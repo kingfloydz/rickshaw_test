@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "tool": "generate_and_select_reset_poses",
+  "status": "failed",
+  "attempted_per_slope": 50,
+  "steps": 1000,
+  "final_library": null,
+  "winners": [],
+  "failures": [
+    "reset candidate worker failed with exit code 1",
+    "candidate worker exited without a search report: 1"
+  ],
+  "candidate_evidence": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/outputs/reset_pose_candidates.json",
+  "intended_final_library": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/config/reset_poses.yaml",
+  "alignment_evidence": null,
+  "stage_a_completed_slopes": [],
+  "stage_a_completed_count": 0,
+  "stage_a_total_count": 19
+}

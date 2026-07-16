@@ -1,0 +1,6 @@
+schema_version: 1
+
+# Independent search grid. These raw candidates are never overwritten by the
+# derived 0.8 safety-scaled limits in feasibility_envelope.yaml.
+acceleration_candidates_mps2: [0.04, 0.08, 0.12, 0.16, 0.20]
+jerk_candidates_mps3: [0.20, 0.40, 0.60, 0.80, 1.00]

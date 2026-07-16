@@ -1,0 +1,210 @@
+"""Configuration artifact contracts for generated calibration files."""
+
+from __future__ import annotations
+
+import pytest
+
+from g1_rickshaw_lab.configuration import (
+    G1_JOINT_ORDER,
+    REQUIRED_CALIBRATION_FIELDS,
+    REQUIRED_FEASIBILITY_RANGES,
+    SLOPE_GRADIENTS,
+    ConfigurationContractError,
+    FeasibilityEnvelope,
+    ResetPoseLibrary,
+)
+
+
+def _range_for(name: str) -> dict[str, float]:
+    if name.startswith("payload.com."):
+        return {"min": -0.05, "max": 0.05}
+    if name == "payload.mass":
+        return {"min": 0.0, "max": 10.0}
+    if name == "terrain.friction":
+        return {"min": 0.6, "max": 1.2}
+    if name in {"command.acceleration_limit", "command.jerk_limit"}:
+        return {"min": 0.1, "max": 1.0}
+    return {"min": 0.01, "max": 10.0}
+
+
+def _calibration_for(name: str):
+    vectors = {
+        "safety.hitch_height_bounds": [0.65, 0.85],
+        "safety.rickshaw_pitch_bounds": [-0.2, 0.5],
+        "d6.robot_body_paths": [
+            "/World/envs/env_0/Robot/left_grasp",
+            "/World/envs/env_0/Robot/right_grasp",
+        ],
+        "d6.hitch_body_paths": [
+            "/World/envs/env_0/Rickshaw/left_tow_hitch_link",
+            "/World/envs/env_0/Rickshaw/right_tow_hitch_link",
+        ],
+        "d6.rotation_free_axes": [False, True, False],
+        "d6.rotation_driven_axes": [True, False, True],
+        "dex.q_open": [0.0, 0.0, 0.0, 0.0],
+        "dex.q_grasp": [0.3, 0.3, 0.3, 0.3],
+        "dex.left_grasp_center_frame": [0.0, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "dex.right_grasp_center_frame": [0.0, -0.05, 0.0, 1.0, 0.0, 0.0, 0.0],
+    }
+    if name in vectors:
+        return vectors[name]
+    if name == "d6.reaction_is_joint_on_robot":
+        return True
+    if name == "fat.wrench_consistency_window_steps":
+        return 5
+    return 1.0
+
+
+def _valid_feasibility_mapping() -> dict:
+    return {
+        "schema_version": 1,
+        "slopes": list(SLOPE_GRADIENTS),
+        "joint_order": list(G1_JOINT_ORDER),
+        "ranges": {name: _range_for(name) for name in REQUIRED_FEASIBILITY_RANGES},
+        "calibration": {
+            name: _calibration_for(name) for name in REQUIRED_CALIBRATION_FIELDS
+        },
+    }
+
+
+def test_feasibility_envelope_requires_exact_schema_fields() -> None:
+    mapping = _valid_feasibility_mapping()
+    envelope = FeasibilityEnvelope.from_mapping(mapping)
+
+    assert tuple(envelope.joint_order) == G1_JOINT_ORDER
+    assert tuple(envelope.slopes) == SLOPE_GRADIENTS
+    assert set(envelope.ranges) == set(REQUIRED_FEASIBILITY_RANGES)
+    assert set(envelope.calibration) == set(REQUIRED_CALIBRATION_FIELDS)
+
+    missing = _valid_feasibility_mapping()
+    del missing["ranges"]["d6.linear_limit"]
+    with pytest.raises(ConfigurationContractError, match="missing"):
+        FeasibilityEnvelope.from_mapping(missing)
+
+    unknown = _valid_feasibility_mapping()
+    unknown["calibration"]["unvalidated.default"] = 1.0
+    with pytest.raises(ConfigurationContractError, match="unknown"):
+        FeasibilityEnvelope.from_mapping(unknown)
+
+
+def test_feasibility_envelope_rejects_joint_order_and_d6_axis_drift() -> None:
+    mapping = _valid_feasibility_mapping()
+    mapping["joint_order"][0], mapping["joint_order"][1] = (
+        mapping["joint_order"][1],
+        mapping["joint_order"][0],
+    )
+    with pytest.raises(ConfigurationContractError, match="fixed checkpoint order"):
+        FeasibilityEnvelope.from_mapping(mapping)
+
+    invalid_axis = _valid_feasibility_mapping()
+    invalid_axis["calibration"]["d6.rotation_free_axes"] = [True, False, False]
+    invalid_axis["calibration"]["d6.rotation_driven_axes"] = [True, False, False]
+    with pytest.raises(ConfigurationContractError, match="cannot be both"):
+        FeasibilityEnvelope.from_mapping(invalid_axis)
+
+
+def test_d6_nominal_calibration_is_explicit_and_range_checked() -> None:
+    mapping = _valid_feasibility_mapping()
+    mapping["calibration"]["d6.linear_stiffness_nominal"] = 5.0
+    envelope = FeasibilityEnvelope.from_mapping(mapping)
+    assert envelope.calibration["d6.linear_stiffness_nominal"] == 5.0
+    assert envelope.ranges["d6.linear_stiffness"].maximum == 10.0
+
+    invalid = _valid_feasibility_mapping()
+    invalid["calibration"]["d6.linear_stiffness_nominal"] = 11.0
+    with pytest.raises(ConfigurationContractError, match="outside"):
+        FeasibilityEnvelope.from_mapping(invalid)
+
+
+def test_reset_pose_library_requires_all_19_slopes_and_fixed_order() -> None:
+    q_reset = [0.02 * index for index in range(29)]
+    q_ref_unloaded = [0.015 * index for index in range(29)]
+    q_ref = [0.01 * index for index in range(29)]
+    torque_basis = {
+        "tau_unloaded": [0.0] * 29,
+        "tau_per_tangent_force": [0.0] * 29,
+        "tau_per_normal_force": [0.0] * 29,
+        "tau_per_tangent_difference": [0.0] * 29,
+        "handle_wrenches_sln": [[0.0] * 6, [0.0] * 6],
+        "wheel_contact_forces_sln": [
+            [0.0, 0.0, 100.0],
+            [0.0, 0.0, 100.0],
+        ],
+    }
+    mapping = {
+        "schema_version": 4,
+        "joint_order": list(G1_JOINT_ORDER),
+        "poses": [
+            {
+                "gradient": gradient,
+                "q_reset": q_reset,
+                "q_ref_unloaded": q_ref_unloaded,
+                **torque_basis,
+                "q_ref": q_ref,
+            }
+            for gradient in SLOPE_GRADIENTS
+        ],
+    }
+    library = ResetPoseLibrary.from_mapping(mapping)
+
+    assert tuple(pose.gradient for pose in library.poses) == SLOPE_GRADIENTS
+    assert library.interpolate_q_ref(0.035)[0] == pytest.approx(0.0)
+    assert library.interpolate_q_reset(0.035)[0] == pytest.approx(0.0)
+    assert library.interpolate_root_pitch(0.035) == pytest.approx(0.0)
+    assert library.interpolate_root_height(0.035) == pytest.approx(0.75)
+
+    pitched = dict(mapping)
+    pitched["poses"] = [
+        {
+            "gradient": gradient,
+            "root_pitch": 0.5 * gradient,
+            "root_height": 0.74 + gradient,
+            "q_reset": q_reset,
+            "q_ref_unloaded": q_ref_unloaded,
+            **torque_basis,
+            "q_ref": q_ref,
+        }
+        for gradient in SLOPE_GRADIENTS
+    ]
+    pitched_library = ResetPoseLibrary.from_mapping(pitched)
+    assert pitched_library.interpolate_root_pitch(0.035) == pytest.approx(0.0175)
+    assert pitched_library.interpolate_root_height(0.035) == pytest.approx(0.775)
+    assert pitched_library.interpolate_q_reset(0.035)[1] == pytest.approx(0.02)
+
+    duplicate = dict(mapping)
+    duplicate["poses"] = list(mapping["poses"])
+    duplicate["poses"][0] = {
+        "gradient": 0.0,
+        "q_reset": q_reset,
+        "q_ref_unloaded": q_ref_unloaded,
+        **torque_basis,
+        "q_ref": [0.0] * 29,
+    }
+    with pytest.raises(ConfigurationContractError, match="exactly one pose"):
+        ResetPoseLibrary.from_mapping(duplicate)
+
+
+def test_reset_pose_library_rejects_missing_static_endpoint() -> None:
+    mapping = {
+        "schema_version": 4,
+        "joint_order": list(G1_JOINT_ORDER),
+        "poses": [
+            {
+                "gradient": gradient,
+                "q_reset": [0.0] * 29,
+                "tau_unloaded": [0.0] * 29,
+                "tau_per_tangent_force": [0.0] * 29,
+                "tau_per_normal_force": [0.0] * 29,
+                "tau_per_tangent_difference": [0.0] * 29,
+                "handle_wrenches_sln": [[0.0] * 6, [0.0] * 6],
+                "wheel_contact_forces_sln": [
+                    [0.0, 0.0, 100.0],
+                    [0.0, 0.0, 100.0],
+                ],
+                "q_ref": [0.0] * 29,
+            }
+            for gradient in SLOPE_GRADIENTS
+        ],
+    }
+    with pytest.raises(ConfigurationContractError, match="q_ref_unloaded"):
+        ResetPoseLibrary.from_mapping(mapping)

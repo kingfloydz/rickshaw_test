@@ -1,0 +1,19 @@
+[package]
+version = "0.1.0"
+title = "G1 Rickshaw Lab"
+description = "Isaac Lab manager-based task for G1 rickshaw velocity tracking"
+repository = "local://g1_rickshaw_lab"
+category = "robotics"
+keywords = ["isaaclab", "unitree", "g1", "locomotion", "rickshaw"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_rl" = {}
+
+[core]
+reloadable = false
+
+[[python.module]]
+name = "g1_rickshaw_lab"
+

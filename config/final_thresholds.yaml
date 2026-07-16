@@ -1,0 +1,13 @@
+schema_version: 1
+thresholds:
+  stages.training.metrics.tracking.speed_rmse_mps: {operator: "<=", value: 0.25}
+  stages.training.metrics.episodes.fall_rate: {operator: "<=", value: 0.01}
+  stages.training.metrics.tracking.lateral_error.rms_m: {operator: "<=", value: 0.10}
+  stages.training.metrics.tracking.heading_error.rms_rad: {operator: "<=", value: 0.10}
+  stages.training.metrics.rickshaw.two_wheel_contact_rate: {operator: ">=", value: 0.99}
+  stages.training.metrics.d6.residual_m_or_rad.p99: {operator: "<=", value: 0.01}
+  stages.training.metrics.stability.zmp_margin_m.p01: {operator: ">=", value: 0.02}
+  stages.training.metrics.actuation.arm_torque_margin.p01: {operator: ">=", value: 0.20}
+  stages.training.metrics.actuation.leg_torque_margin.p01: {operator: ">=", value: 0.20}
+  stages.training.context_interventions.zero_return_drop.fraction_of_abs_baseline: {operator: ">=", value: 0.10}
+  stages.training.context_interventions.shuffle_return_drop.fraction_of_abs_baseline: {operator: ">=", value: 0.10}
