@@ -77,6 +77,9 @@ calibration:
   d6.angular_limit_nominal: 0.17453292519943295
   fat.robot_mass: 34.1299349
   fat.com_radius: 0.715092420262594
+  # Broad physical guard around the observed 19-slope reset range. Runtime uses
+  # the filtered sagittal support-to-CoM distance rather than this nominal value.
+  fat.com_radius_bounds: [0.5, 0.85]
   # Runtime normalization uses mean(abs(T)) so acceleration/braking transients
   # cannot make the denominator collapse through signed-force cancellation.
   fat.wrench_consistency_relative_tolerance: 0.35

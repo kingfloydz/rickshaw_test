@@ -27,6 +27,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import (
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import (
     AnalyticForceCfg,
     CartInteractionWrenchState,
+    FAT2ComRadiusState,
     GRAVITY,
     RickshawMassProperties,
     RollingResistanceCfg,
@@ -42,6 +43,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import (
     foot_support_polygon,
     project_hand_wrench_to_slope,
     rolling_resistance_wrench,
+    sagittal_com_radius,
     torso_pitch_from_world_vertical,
     torso_tilt_from_slope_normal,
     update_analytic_rickshaw_force,
@@ -311,6 +313,68 @@ def test_wrench_consistency_handles_transient_signed_force_cancellation() -> Non
     )
 
 
+def test_fat2_sagittal_com_radius_excludes_lateral_offset() -> None:
+    robot_com = torch.tensor(
+        [[0.6, 4.0, 0.3], [0.3, -7.0, 0.4]], dtype=torch.float64
+    )
+    support_center = torch.zeros_like(robot_com)
+    tangent = torch.tensor([[1.0, 0.0, 0.0]] * 2, dtype=torch.float64)
+    normal = torch.tensor([[0.0, 0.0, 1.0]] * 2, dtype=torch.float64)
+
+    radius = sagittal_com_radius(robot_com, support_center, tangent, normal)
+
+    torch.testing.assert_close(
+        radius, torch.tensor([math.sqrt(0.45), 0.5], dtype=torch.float64)
+    )
+
+
+def test_fat2_com_radius_window_holds_invalid_samples_and_resets() -> None:
+    reference = 0.715092420262594
+    state = FAT2ComRadiusState.initialized(
+        2, 3, reference, dtype=torch.float64
+    )
+    valid = torch.tensor([True, True])
+
+    first = state.update(
+        torch.tensor([0.60, 0.40], dtype=torch.float64),
+        valid,
+        minimum=0.50,
+        maximum=0.85,
+    ).clone()
+    second = state.update(
+        torch.tensor([0.70, 0.90], dtype=torch.float64),
+        valid,
+        minimum=0.50,
+        maximum=0.85,
+    ).clone()
+    third = state.update(
+        torch.tensor([0.80, 0.70], dtype=torch.float64),
+        torch.tensor([True, False]),
+        minimum=0.50,
+        maximum=0.85,
+    ).clone()
+    fourth = state.update(
+        torch.tensor([0.90, float("nan")], dtype=torch.float64),
+        valid,
+        minimum=0.50,
+        maximum=0.85,
+    ).clone()
+
+    torch.testing.assert_close(first, torch.tensor([0.60, 0.50], dtype=torch.float64))
+    torch.testing.assert_close(second, torch.tensor([0.65, 0.675], dtype=torch.float64))
+    torch.testing.assert_close(third, torch.tensor([0.70, 0.675], dtype=torch.float64))
+    torch.testing.assert_close(
+        fourth, torch.tensor([(0.70 + 0.80 + 0.85) / 3.0, 0.675], dtype=torch.float64)
+    )
+
+    state.reset(torch.tensor([0]))
+    torch.testing.assert_close(
+        state.filtered_radius,
+        torch.tensor([reference, 0.675], dtype=torch.float64),
+    )
+    assert state.count.tolist() == [0, 2]
+
+
 def test_cart_interaction_wrench_uses_corrected_contact_window() -> None:
     state = CartInteractionWrenchState.initialized(
         torch.zeros((1, 3), dtype=torch.float64)
@@ -369,7 +433,14 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     env_ids = torch.tensor([0, 2])
     cleared: list[torch.Tensor] = []
     command_samples: list[torch.Tensor] = []
-    env = SimpleNamespace(device="cpu")
+    action_resets: list[torch.Tensor] = []
+    action_term = SimpleNamespace(
+        reset=lambda ids: action_resets.append(ids.clone())
+    )
+    env = SimpleNamespace(
+        device="cpu",
+        action_manager=SimpleNamespace(_terms={"lower": action_term}),
+    )
     monkeypatch.setattr(
         events_module,
         "reset_task_state",
@@ -387,6 +458,8 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     torch.testing.assert_close(cleared[0], env_ids)
     assert len(command_samples) == 1
     torch.testing.assert_close(command_samples[0], env_ids)
+    assert len(action_resets) == 1
+    torch.testing.assert_close(action_resets[0], env_ids)
 
 
 def test_gain_compensation_preserves_static_pd_torque() -> None:

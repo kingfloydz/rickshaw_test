@@ -10,12 +10,11 @@ from pathlib import Path
 import random
 import subprocess
 import sys
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from _isaaclab_wrappers import SOURCE_ROOT, require_existing_file
+from _isaaclab_wrappers import add_project_source_to_path, require_existing_file
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 import torch  # noqa: E402
 import numpy as np  # noqa: E402
@@ -78,36 +77,6 @@ REQUIRED_TENSORS = (
     "gait_mask",
     "lag_mask",
 )
-ALIASES = {
-    "current": ("current", "policy", "policy_obs", "observation", "obs"),
-    "history": ("history", "actor_history", "obs_history"),
-    "teacher_action_mean": (
-        "teacher_action_mean",
-        "teacher_mean",
-        "action_mean",
-        "teacher_action_loc",
-    ),
-    "teacher_action_std": (
-        "teacher_action_std",
-        "teacher_std",
-        "action_std",
-        "teacher_action_scale",
-    ),
-    "teacher_action_log_std": (
-        "teacher_action_log_std",
-        "teacher_log_std",
-        "action_log_std",
-    ),
-    "z_star": ("z_star", "teacher_context", "teacher_latent"),
-    "phase_target": ("phase_target", "phase"),
-    "frequency_target": ("frequency_target", "frequency"),
-    "contact_target": ("contact_target", "contact"),
-    "cart_lag_target": ("cart_lag_target", "cart_lag"),
-    "gait_mask": ("gait_mask", "phase_mask"),
-    "lag_mask": ("lag_mask", "cart_lag_mask"),
-}
-
-
 def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
     """Reject every debug switch or guide-critical hyperparameter deviation."""
 
@@ -134,7 +103,7 @@ def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
         "skip_task_return_evaluation",
         "allow_random_actor_init",
     ):
-        if bool(getattr(args, name, False)):
+        if bool(getattr(args, name)):
             deviations.append(f"{name}=true")
     if (
         isinstance(args.training_seed, bool)
@@ -144,8 +113,6 @@ def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
         deviations.append("training_seed must lie in [0, 2**32-1]")
     if not 0.0 < args.validation_fraction < 1.0:
         deviations.append("validation_fraction must lie strictly between 0 and 1")
-    if args.validation_interval <= 0 or args.max_validation_candidates <= 0:
-        deviations.append("validation interval/candidate count must be positive")
     if args.eval_episodes_per_slope < 100:
         deviations.append("eval_episodes_per_slope must be at least 100")
     if not args.eval_seeds or len(set(args.eval_seeds)) != len(args.eval_seeds):
@@ -154,8 +121,6 @@ def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
         deviations.append(
             f"eval_num_envs must be a positive multiple of {SLOPE_COUNT}"
         )
-    if args.latent_dim not in {8, 16, 24}:
-        deviations.append("latent_dim must be one of the mandated 8/16/24 variants")
     if (
         args.collect_num_envs <= 0
         or args.collect_num_envs != FORMAL_NUM_ENVS
@@ -198,19 +163,12 @@ def _torch_load(path: Path) -> Mapping[str, Any]:
     value = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(value, Mapping):
         raise ValueError(f"rollout shard must contain a mapping: {path}")
-    for root_key in ("rollout", "data", "tensors"):
-        nested = value.get(root_key)
-        if isinstance(nested, Mapping):
-            value = nested
-            break
-    return value
-
-
-def _lookup(mapping: Mapping[str, Any], names: Iterable[str]) -> Any | None:
-    for name in names:
-        if name in mapping:
-            return mapping[name]
-    return None
+    if value.get("schema_version") != ROLLOUT_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(f"rollout shard has an unsupported schema: {path}")
+    rollout = value.get("rollout")
+    if not isinstance(rollout, Mapping):
+        raise ValueError(f"rollout shard is missing its canonical rollout mapping: {path}")
+    return rollout
 
 
 def _as_tensor(value: Any, name: str, path: Path) -> torch.Tensor:
@@ -222,89 +180,43 @@ def _as_tensor(value: Any, name: str, path: Path) -> torch.Tensor:
     return tensor
 
 
-def _column(value: torch.Tensor, name: str) -> torch.Tensor:
-    if value.ndim == 1:
-        return value.unsqueeze(-1)
-    if value.ndim == 2 and value.shape[-1] == 1:
-        return value
-    raise ValueError(f"{name} must have shape [N] or [N,1], got {tuple(value.shape)}")
-
-
-def _phase_target(value: torch.Tensor) -> torch.Tensor:
-    if value.ndim == 1 or (value.ndim == 2 and value.shape[-1] == 1):
-        phase = value.reshape(-1)
-        return torch.stack((torch.sin(phase), torch.cos(phase)), dim=-1)
-    if value.ndim == 2 and value.shape[-1] == 2:
-        return value
-    raise ValueError(f"phase_target must be [N], [N,1], or [N,2], got {tuple(value.shape)}")
-
-
-def _teacher_std(mapping: Mapping[str, Any], path: Path, batch_size: int) -> torch.Tensor:
-    std = _lookup(mapping, ALIASES["teacher_action_std"])
-    if std is not None:
-        tensor = _as_tensor(std, "teacher_action_std", path).float()
-    else:
-        log_std = _lookup(mapping, ALIASES["teacher_action_log_std"])
-        tensor = _as_tensor(log_std, "teacher_action_log_std", path).float().exp()
-    if tensor.ndim == 1 and tensor.shape[0] == 29:
-        tensor = tensor.unsqueeze(0).expand(batch_size, -1).clone()
-    if tensor.shape != (batch_size, 29):
-        raise ValueError(
-            f"teacher_action_std must have shape [N,29] or [29], got {tuple(tensor.shape)}"
-        )
-    if torch.any(tensor <= 0.0):
-        raise ValueError("teacher_action_std must be strictly positive")
-    return tensor
-
-
 def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
     raw = _torch_load(path)
-    current = _as_tensor(_lookup(raw, ALIASES["current"]), "current", path).float()
-    history = _as_tensor(_lookup(raw, ALIASES["history"]), "history", path).float()
+    current = _as_tensor(raw.get("current"), "current", path).float()
+    history = _as_tensor(raw.get("history"), "history", path).float()
     teacher_mean = _as_tensor(
-        _lookup(raw, ALIASES["teacher_action_mean"]), "teacher_action_mean", path
+        raw.get("teacher_action_mean"), "teacher_action_mean", path
     ).float()
     if current.ndim != 2 or current.shape[-1] != 96:
         raise ValueError(f"current must have shape [N,96], got {tuple(current.shape)}")
-    if history.ndim != 3 or history.shape[1:] != (61, 96):
-        raise ValueError(f"history must have shape [N,61,96], got {tuple(history.shape)}")
-    if teacher_mean.ndim != 2 or teacher_mean.shape[-1] != 29:
-        raise ValueError(
-            f"teacher_action_mean must have shape [N,29], got {tuple(teacher_mean.shape)}"
-        )
     batch_size = current.shape[0]
-    if history.shape[0] != batch_size or teacher_mean.shape[0] != batch_size:
-        raise ValueError(f"rollout shard has inconsistent batch sizes: {path}")
     normalized = {
         "current": current,
         "history": history,
         "teacher_action_mean": teacher_mean,
-        "teacher_action_std": _teacher_std(raw, path, batch_size),
-        "z_star": _as_tensor(_lookup(raw, ALIASES["z_star"]), "z_star", path).float(),
-        "phase_target": _phase_target(
-            _as_tensor(_lookup(raw, ALIASES["phase_target"]), "phase_target", path).float()
-        ),
-        "frequency_target": _column(
-            _as_tensor(_lookup(raw, ALIASES["frequency_target"]), "frequency_target", path).float(),
-            "frequency_target",
-        ),
-        "contact_target": _as_tensor(
-            _lookup(raw, ALIASES["contact_target"]), "contact_target", path
+        "teacher_action_std": _as_tensor(
+            raw.get("teacher_action_std"), "teacher_action_std", path
         ).float(),
-        "cart_lag_target": _column(
-            _as_tensor(_lookup(raw, ALIASES["cart_lag_target"]), "cart_lag_target", path).float(),
-            "cart_lag_target",
-        ),
-        "gait_mask": _column(
-            _as_tensor(_lookup(raw, ALIASES["gait_mask"]), "gait_mask", path).bool(),
-            "gait_mask",
-        ),
-        "lag_mask": _column(
-            _as_tensor(_lookup(raw, ALIASES["lag_mask"]), "lag_mask", path).bool(),
-            "lag_mask",
-        ),
+        "z_star": _as_tensor(raw.get("z_star"), "z_star", path).float(),
+        "phase_target": _as_tensor(
+            raw.get("phase_target"), "phase_target", path
+        ).float(),
+        "frequency_target": _as_tensor(
+            raw.get("frequency_target"), "frequency_target", path
+        ).float(),
+        "contact_target": _as_tensor(
+            raw.get("contact_target"), "contact_target", path
+        ).float(),
+        "cart_lag_target": _as_tensor(
+            raw.get("cart_lag_target"), "cart_lag_target", path
+        ).float(),
+        "gait_mask": _as_tensor(raw.get("gait_mask"), "gait_mask", path).bool(),
+        "lag_mask": _as_tensor(raw.get("lag_mask"), "lag_mask", path).bool(),
     }
     expected_shapes = {
+        "history": (batch_size, 61, 96),
+        "teacher_action_mean": (batch_size, 29),
+        "teacher_action_std": (batch_size, 29),
         "z_star": (batch_size, 16),
         "phase_target": (batch_size, 2),
         "frequency_target": (batch_size, 1),
@@ -316,6 +228,8 @@ def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
     for name, shape in expected_shapes.items():
         if tuple(normalized[name].shape) != shape:
             raise ValueError(f"{name} must have shape {shape}, got {tuple(normalized[name].shape)}")
+    if torch.any(normalized["teacher_action_std"] <= 0.0):
+        raise ValueError("teacher_action_std must be strictly positive")
     normalized.update(normalize_audit_tensors(raw, batch_size=batch_size))
     return normalized
 
@@ -511,7 +425,7 @@ def train(args: argparse.Namespace) -> Path:
         num_envs=None,
         seed=args.training_seed,
         max_iterations=args.max_iterations,
-        argv=getattr(args, "argv", ()),
+        argv=args.argv,
         hydra_overrides=(),
         guide_parameters={**S1_GUIDE_PARAMETERS, "latent_dim": args.latent_dim},
         resolved_parameters={

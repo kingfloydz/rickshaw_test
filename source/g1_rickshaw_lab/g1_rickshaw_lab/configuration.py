@@ -146,6 +146,7 @@ REQUIRED_CALIBRATION_FIELDS = (
     "d6.angular_limit_nominal",
     "fat.robot_mass",
     "fat.com_radius",
+    "fat.com_radius_bounds",
     "fat.wrench_consistency_relative_tolerance",
     "fat.wrench_consistency_absolute_floor_n",
     "fat.wrench_consistency_window_steps",
@@ -193,6 +194,7 @@ REQUIRED_CALIBRATION_FIELDS = (
 )
 
 _CALIBRATION_VECTOR_LENGTHS = {
+    "fat.com_radius_bounds": 2,
     "safety.hitch_height_bounds": 2,
     "safety.rickshaw_pitch_bounds": 2,
     "dex.q_open": 4,
@@ -398,16 +400,12 @@ class NumericRange:
         if isinstance(value, Mapping):
             interval = _expect_mapping(value, path)
             _expect_exact_keys(interval, {"min", "max"}, path)
-            return cls(
-                _finite_float(interval["min"], f"{path}.min"),
-                _finite_float(interval["max"], f"{path}.max"),
-            )
+            return cls(interval["min"], interval["max"])
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
             if len(value) != 2:
                 raise ConfigurationContractError(f"{path} interval sequence must have length 2")
-            return cls(_finite_float(value[0], f"{path}[0]"), _finite_float(value[1], f"{path}[1]"))
-        scalar = _finite_float(value, path)
-        return cls(scalar, scalar)
+            return cls(value[0], value[1])
+        return cls(value, value)
 
     def contains(self, value: float | "NumericRange", *, tolerance: float = 0.0) -> bool:
         if tolerance < 0.0 or not math.isfinite(tolerance):
@@ -541,7 +539,11 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
             _finite_float(component, f"calibration.{name}[{index}]")
             for index, component in enumerate(value)
         )
-        if name in {"safety.hitch_height_bounds", "safety.rickshaw_pitch_bounds"}:
+        if name in {
+            "fat.com_radius_bounds",
+            "safety.hitch_height_bounds",
+            "safety.rickshaw_pitch_bounds",
+        }:
             if vector[0] >= vector[1]:
                 raise ConfigurationContractError(
                     f"calibration.{name} lower bound must be less than its upper bound"
@@ -569,6 +571,11 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
     if not 0.0 <= wrench_tolerance <= 1.0:
         raise ConfigurationContractError(
             "calibration.fat.wrench_consistency_relative_tolerance must lie in [0,1]"
+        )
+    radius_min, radius_max = validated["fat.com_radius_bounds"]
+    if radius_min <= 0.0 or not radius_min <= validated["fat.com_radius"] <= radius_max:
+        raise ConfigurationContractError(
+            "calibration.fat.com_radius must lie within positive fat.com_radius_bounds"
         )
     return MappingProxyType(validated)
 
@@ -785,16 +792,16 @@ def assert_sampling_ranges_within_envelope(
 class ResetPose:
     gradient: float
     q_ref: tuple[float, ...]
-    root_pitch: float = 0.0
-    root_height: float = 0.75
-    q_reset: tuple[float, ...] | None = None
-    q_ref_unloaded: tuple[float, ...] | None = None
-    tau_unloaded: tuple[float, ...] | None = None
-    tau_per_tangent_force: tuple[float, ...] | None = None
-    tau_per_normal_force: tuple[float, ...] | None = None
-    tau_per_tangent_difference: tuple[float, ...] | None = None
-    handle_wrenches_sln: tuple[tuple[float, ...], tuple[float, ...]] | None = None
-    wheel_contact_forces_sln: tuple[tuple[float, ...], tuple[float, ...]] | None = None
+    root_pitch: float
+    root_height: float
+    q_reset: tuple[float, ...]
+    q_ref_unloaded: tuple[float, ...]
+    tau_unloaded: tuple[float, ...]
+    tau_per_tangent_force: tuple[float, ...]
+    tau_per_normal_force: tuple[float, ...]
+    tau_per_tangent_difference: tuple[float, ...]
+    handle_wrenches_sln: tuple[tuple[float, ...], tuple[float, ...]]
+    wheel_contact_forces_sln: tuple[tuple[float, ...], tuple[float, ...]]
 
     def __post_init__(self) -> None:
         gradient = _finite_float(self.gradient, "pose.gradient")
@@ -964,7 +971,6 @@ class ResetPoseLibrary:
                 f"got {len(poses)}"
             )
         ordered: list[ResetPose] = []
-        used: set[int] = set()
         for expected in RESET_POSE_GRADIENTS:
             matches = [
                 index
@@ -976,10 +982,7 @@ class ResetPoseLibrary:
                     f"reset pose library requires exactly one pose for gradient {expected}; "
                     f"found {len(matches)}"
                 )
-            used.add(matches[0])
             ordered.append(poses[matches[0]])
-        if len(used) != len(poses):
-            raise ConfigurationContractError("reset pose library contains duplicate gradients")
         object.__setattr__(self, "poses", tuple(ordered))
         object.__setattr__(self, "joint_order", joint_order)
         if self.source_path is not None:
@@ -1003,6 +1006,8 @@ class ResetPoseLibrary:
                 pose = _expect_mapping(value, f"poses[{index}]")
                 required = {
                     "gradient",
+                    "root_pitch",
+                    "root_height",
                     "q_reset",
                     "q_ref_unloaded",
                     "tau_unloaded",
@@ -1013,12 +1018,8 @@ class ResetPoseLibrary:
                     "wheel_contact_forces_sln",
                     "q_ref",
                 }
-                allowed = required | {
-                    "root_pitch",
-                    "root_height",
-                }
                 missing = required - set(pose)
-                unknown = set(pose) - allowed
+                unknown = set(pose) - required
                 if missing or unknown:
                     details = []
                     if missing:
@@ -1032,20 +1033,16 @@ class ResetPoseLibrary:
                     ResetPose(
                         gradient=pose["gradient"],
                         q_ref=pose["q_ref"],
-                        root_pitch=pose.get("root_pitch", 0.0),
-                        root_height=pose.get("root_height", 0.75),
-                        q_reset=pose.get("q_reset"),
-                        q_ref_unloaded=pose.get("q_ref_unloaded"),
-                        tau_unloaded=pose.get("tau_unloaded"),
-                        tau_per_tangent_force=pose.get("tau_per_tangent_force"),
-                        tau_per_normal_force=pose.get("tau_per_normal_force"),
-                        tau_per_tangent_difference=pose.get(
-                            "tau_per_tangent_difference"
-                        ),
-                        handle_wrenches_sln=pose.get("handle_wrenches_sln"),
-                        wheel_contact_forces_sln=pose.get(
-                            "wheel_contact_forces_sln"
-                        ),
+                        root_pitch=pose["root_pitch"],
+                        root_height=pose["root_height"],
+                        q_reset=pose["q_reset"],
+                        q_ref_unloaded=pose["q_ref_unloaded"],
+                        tau_unloaded=pose["tau_unloaded"],
+                        tau_per_tangent_force=pose["tau_per_tangent_force"],
+                        tau_per_normal_force=pose["tau_per_normal_force"],
+                        tau_per_tangent_difference=pose["tau_per_tangent_difference"],
+                        handle_wrenches_sln=pose["handle_wrenches_sln"],
+                        wheel_contact_forces_sln=pose["wheel_contact_forces_sln"],
                     )
                 )
         else:
@@ -1072,9 +1069,7 @@ class ResetPoseLibrary:
             )
         return matches[0]
 
-    def interpolate_q_ref(self, gradient: float) -> tuple[float, ...]:
-        """Linearly interpolate only inside the validated deployment coverage."""
-
+    def _interpolation_bracket(self, gradient: float) -> tuple[ResetPose, ResetPose, float]:
         value = _finite_float(gradient, "gradient")
         if value < RESET_POSE_GRADIENTS[0] or value > RESET_POSE_GRADIENTS[-1]:
             raise ConfigurationContractError(
@@ -1082,93 +1077,56 @@ class ResetPoseLibrary:
             )
         for pose in self.poses:
             if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=SLOPE_MATCH_TOLERANCE):
-                return pose.q_ref
-        upper_index = next(
-            index for index, pose in enumerate(self.poses) if pose.gradient > value
-        )
+                return pose, pose, 0.0
+        upper_index = next(index for index, pose in enumerate(self.poses) if pose.gradient > value)
         lower = self.poses[upper_index - 1]
         upper = self.poses[upper_index]
         fraction = (value - lower.gradient) / (upper.gradient - lower.gradient)
+        return lower, upper, fraction
+
+    def _interpolate_vector(self, gradient: float, field: str) -> tuple[float, ...]:
+        lower, upper, fraction = self._interpolation_bracket(gradient)
+        lower_values = getattr(lower, field)
+        if lower is upper:
+            return lower_values
+        upper_values = getattr(upper, field)
         return tuple(
             lower_value + fraction * (upper_value - lower_value)
-            for lower_value, upper_value in zip(lower.q_ref, upper.q_ref, strict=True)
+            for lower_value, upper_value in zip(lower_values, upper_values, strict=True)
         )
+
+    def _interpolate_scalar(self, gradient: float, field: str) -> float:
+        lower, upper, fraction = self._interpolation_bracket(gradient)
+        lower_value = getattr(lower, field)
+        if lower is upper:
+            return lower_value
+        upper_value = getattr(upper, field)
+        return lower_value + fraction * (upper_value - lower_value)
+
+    def interpolate_q_ref(self, gradient: float) -> tuple[float, ...]:
+        """Linearly interpolate only inside the validated deployment coverage."""
+
+        return self._interpolate_vector(gradient, "q_ref")
 
     def interpolate_q_reset(self, gradient: float) -> tuple[float, ...]:
         """Interpolate the physical reset state inside the validated slope range."""
 
-        value = _finite_float(gradient, "gradient")
-        if value < RESET_POSE_GRADIENTS[0] or value > RESET_POSE_GRADIENTS[-1]:
-            raise ConfigurationContractError(
-                f"gradient {value} is outside [{RESET_POSE_GRADIENTS[0]}, {RESET_POSE_GRADIENTS[-1]}]"
-            )
-        for pose in self.poses:
-            if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=SLOPE_MATCH_TOLERANCE):
-                return pose.q_reset
-        upper_index = next(index for index, pose in enumerate(self.poses) if pose.gradient > value)
-        lower = self.poses[upper_index - 1]
-        upper = self.poses[upper_index]
-        fraction = (value - lower.gradient) / (upper.gradient - lower.gradient)
-        return tuple(
-            lower_value + fraction * (upper_value - lower_value)
-            for lower_value, upper_value in zip(lower.q_reset, upper.q_reset, strict=True)
-        )
+        return self._interpolate_vector(gradient, "q_reset")
 
     def interpolate_q_ref_unloaded(self, gradient: float) -> tuple[float, ...]:
         """Interpolate the zero-handle-load actuator reference."""
 
-        value = _finite_float(gradient, "gradient")
-        if value < RESET_POSE_GRADIENTS[0] or value > RESET_POSE_GRADIENTS[-1]:
-            raise ConfigurationContractError(
-                f"gradient {value} is outside [{RESET_POSE_GRADIENTS[0]}, {RESET_POSE_GRADIENTS[-1]}]"
-            )
-        for pose in self.poses:
-            if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=SLOPE_MATCH_TOLERANCE):
-                return pose.q_ref_unloaded
-        upper_index = next(index for index, pose in enumerate(self.poses) if pose.gradient > value)
-        lower = self.poses[upper_index - 1]
-        upper = self.poses[upper_index]
-        fraction = (value - lower.gradient) / (upper.gradient - lower.gradient)
-        return tuple(
-            lower_value + fraction * (upper_value - lower_value)
-            for lower_value, upper_value in zip(
-                lower.q_ref_unloaded, upper.q_ref_unloaded, strict=True
-            )
-        )
+        return self._interpolate_vector(gradient, "q_ref_unloaded")
 
     def interpolate_root_pitch(self, gradient: float) -> float:
         """Interpolate the reset root pitch inside the validated slope range."""
 
-        value = _finite_float(gradient, "gradient")
-        if value < RESET_POSE_GRADIENTS[0] or value > RESET_POSE_GRADIENTS[-1]:
-            raise ConfigurationContractError(
-                f"gradient {value} is outside [{RESET_POSE_GRADIENTS[0]}, {RESET_POSE_GRADIENTS[-1]}]"
-            )
-        for pose in self.poses:
-            if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=SLOPE_MATCH_TOLERANCE):
-                return pose.root_pitch
-        upper_index = next(index for index, pose in enumerate(self.poses) if pose.gradient > value)
-        lower = self.poses[upper_index - 1]
-        upper = self.poses[upper_index]
-        fraction = (value - lower.gradient) / (upper.gradient - lower.gradient)
-        return lower.root_pitch + fraction * (upper.root_pitch - lower.root_pitch)
+        return self._interpolate_scalar(gradient, "root_pitch")
 
     def interpolate_root_height(self, gradient: float) -> float:
         """Interpolate the statically preloaded root height inside the slope range."""
 
-        value = _finite_float(gradient, "gradient")
-        if value < RESET_POSE_GRADIENTS[0] or value > RESET_POSE_GRADIENTS[-1]:
-            raise ConfigurationContractError(
-                f"gradient {value} is outside [{RESET_POSE_GRADIENTS[0]}, {RESET_POSE_GRADIENTS[-1]}]"
-            )
-        for pose in self.poses:
-            if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=SLOPE_MATCH_TOLERANCE):
-                return pose.root_height
-        upper_index = next(index for index, pose in enumerate(self.poses) if pose.gradient > value)
-        lower = self.poses[upper_index - 1]
-        upper = self.poses[upper_index]
-        fraction = (value - lower.gradient) / (upper.gradient - lower.gradient)
-        return lower.root_height + fraction * (upper.root_height - lower.root_height)
+        return self._interpolate_scalar(gradient, "root_height")
 
     def to_mapping(self) -> dict[str, Any]:
         return {

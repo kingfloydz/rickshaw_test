@@ -6,8 +6,6 @@ from typing import Any
 
 import torch
 
-from .dynamics import torso_pitch_from_world_vertical
-
 
 REWARD_WEIGHTS = {
     "track_speed_exp": 2.0,
@@ -147,11 +145,7 @@ def processed_action_jerk_l2_value(
 
 
 def track_speed_exp(env: Any) -> torch.Tensor:
-    v_s = getattr(env, "policy_robot_speed_s", None)
-    if v_s is None:
-        robot = env.scene["robot"]
-        v_s = torch.sum(robot.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
-    return track_speed_exp_value(env.command_state.v_ref, v_s)
+    return track_speed_exp_value(env.command_state.v_ref, env.policy_robot_speed_s)
 
 
 def lateral_error_l2(env: Any) -> torch.Tensor:
@@ -175,16 +169,8 @@ def hitch_height_exp(env: Any) -> torch.Tensor:
 
 
 def fat2_prior_exp(env: Any, sigma: float = FAT2_ERROR_SCALE_RAD) -> torch.Tensor:
-    if hasattr(env.stability_state, "torso_pitch"):
-        torso_pitch = env.stability_state.torso_pitch
-    else:
-        robot = env.scene["robot"]
-        torso_pitch = torso_pitch_from_world_vertical(
-            robot.data.body_quat_w[:, env.torso_body_id],
-            env.path_tangent_w,
-        )
     return fat2_prior_exp_value(
-        torso_pitch,
+        env.stability_state.torso_pitch,
         env.stability_state.theta_fat,
         env.stability_state.fat_valid,
         sigma=sigma,
@@ -248,11 +234,7 @@ def feet_slide(
 
 
 def terrain_normal_velocity_l2(env: Any) -> torch.Tensor:
-    v_n = getattr(env, "policy_robot_velocity_n", None)
-    if v_n is None:
-        robot = env.scene["robot"]
-        v_n = torch.sum(robot.data.root_lin_vel_w * env.path_normal_w, dim=-1)
-    return terrain_normal_velocity_l2_value(v_n)
+    return terrain_normal_velocity_l2_value(env.policy_robot_velocity_n)
 
 
 def _policy_joint_ids(env: Any, asset: Any, asset_cfg: Any | None) -> Any:

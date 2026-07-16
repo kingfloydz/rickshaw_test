@@ -13,6 +13,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from ._hashing import sha256_file
 from .slope_contract import SLOPE_GRADIENTS
 
 
@@ -140,14 +141,6 @@ class RewardCalibrationError(ValueError):
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def reward_calibration_runtime_input_paths(
@@ -371,8 +364,6 @@ def _finite_number(value: Any, label: str) -> float:
 
 
 def _linear_quantile(sorted_values: Sequence[float], probability: float) -> float:
-    if not sorted_values:
-        raise RewardCalibrationError("reward term samples must not be empty")
     rank = (len(sorted_values) - 1) * probability
     lower = math.floor(rank)
     upper = math.ceil(rank)
@@ -981,11 +972,16 @@ def load_and_recompute_reward_calibration_report(
         raise RewardCalibrationError("reward calibration report is stale for runtime inputs")
     if artifact["runtime_versions"] != expected_versions:
         raise RewardCalibrationError("reward calibration report is stale for runtime versions")
-    if report.get("source") != reward_sample_report_source(artifact):
+    artifact_source = {name: artifact[name] for name in _REPORT_SOURCE_FIELDS}
+    if report.get("source") != artifact_source:
         raise RewardCalibrationError("reward calibration report source differs from raw samples")
     if report.get("guide_contract") != reward_calibration_guide_contract():
         raise RewardCalibrationError("reward calibration report guide contract is malformed")
-    calibration = recompute_reward_calibration(artifact)
+    calibration = calibrate_reward_terms(
+        artifact["raw_terms"],
+        artifact["term_weights"],
+        sample_slope_indices=artifact["sample_slope_indices"],
+    )
     if report.get("calibration") != calibration or report.get("status") != calibration["status"]:
         raise RewardCalibrationError("reward calibration statistics differ from raw recomputation")
     if teacher_checkpoint_path is not None:

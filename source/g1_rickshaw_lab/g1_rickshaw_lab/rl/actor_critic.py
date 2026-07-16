@@ -162,7 +162,7 @@ class GaussianActor(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         distribution = self.distribution(current, context)
         _check_matrix("actions", actions, self.action_dim)
-        _check_same_batch(current=current, context=context, actions=actions)
+        _check_same_batch(current=current, actions=actions)
         return distribution.log_prob(actions), distribution.entropy()
 
     @property
@@ -239,11 +239,6 @@ class ActorCritic(nn.Module):
             current_dim=current_dim,
             latent_dim=latent_dim,
         )
-
-        actor_parameter_ids = {id(parameter) for parameter in self.actor.parameters()}
-        critic_parameter_ids = {id(parameter) for parameter in self.critic.parameters()}
-        if actor_parameter_ids & critic_parameter_ids:
-            raise RuntimeError("actor and critic must not share parameters")
 
     def forward(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import (
@@ -20,6 +21,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import 
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     CommandState,
+    RuntimeRandomizationCfg,
     SpeedCommandSamplingCfg,
     _write_actuator_parameters,
     advance_speed_command_resampling,
@@ -46,6 +48,44 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations impo
 def test_startup_event_signature_accepts_event_manager_env_ids() -> None:
     parameters = tuple(inspect.signature(initialize_curriculum_runtime).parameters)
     assert parameters[:3] == ("env", "env_ids", "cfg")
+
+
+def _runtime_randomization_cfg(
+    *, sample_ranges: bool, payload_range: tuple[float, float], joint_range: tuple[float, float]
+) -> RuntimeRandomizationCfg:
+    return RuntimeRandomizationCfg(
+        ranges={
+            "payload.mass": payload_range,
+            "joint.model_error": joint_range,
+        },
+        calibration={},
+        nominal_values={
+            "payload.mass": payload_range[0],
+            "joint.model_error": joint_range[0],
+        },
+        curriculum=CurriculumScheduleCfg(),
+        sample_ranges=sample_ranges,
+        teacher_extrinsic_names=("payload.mass",),
+    )
+
+
+def test_replicated_physics_accepts_singleton_scan_ranges() -> None:
+    _runtime_randomization_cfg(
+        sample_ranges=True,
+        payload_range=(0.5, 0.5),
+        joint_range=(0.1, 0.1),
+    ).validate()
+
+
+@pytest.mark.parametrize("varying", ("teacher", "joint"))
+def test_replicated_physics_rejects_non_singleton_scan_ranges(varying: str) -> None:
+    cfg = _runtime_randomization_cfg(
+        sample_ranges=True,
+        payload_range=(0.5, 0.6) if varying == "teacher" else (0.5, 0.5),
+        joint_range=(0.1, 0.2) if varying == "joint" else (0.1, 0.1),
+    )
+    with pytest.raises(ValueError, match="singleton scan ranges"):
+        cfg.validate()
 
 
 def test_curriculum_is_single_training_stage_for_all_iterations() -> None:

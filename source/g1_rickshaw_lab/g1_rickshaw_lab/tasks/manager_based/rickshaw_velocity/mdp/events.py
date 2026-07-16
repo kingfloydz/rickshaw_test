@@ -56,6 +56,7 @@ from .dynamics import (
     update_zmp_stability,
 )
 from .curricula import CurriculumRuntimeState, CurriculumScheduleCfg, CurriculumStage
+from .observations import INDEPENDENT_EXTRINSIC_NAMES
 
 
 @dataclass
@@ -506,27 +507,7 @@ class RuntimeRandomizationCfg:
     nominal_values: Mapping[str, float] = MISSING
     curriculum: CurriculumScheduleCfg = MISSING
     sample_ranges: bool = True
-    teacher_extrinsic_names: tuple[str, ...] = (
-        "payload.mass",
-        "payload.com.x",
-        "payload.com.y",
-        "payload.com.z",
-        "rolling_resistance.c_rr",
-        "terrain.friction",
-        "wheel.left_damping",
-        "wheel.right_damping",
-        "d6.linear_stiffness",
-        "d6.linear_damping",
-        "d6.angular_stiffness",
-        "d6.angular_damping",
-        "d6.max_force",
-        "d6.max_torque",
-        "d6.linear_limit",
-        "d6.angular_limit",
-        "motor.strength",
-        "control.delay",
-        "observation.delay",
-    )
+    teacher_extrinsic_names: tuple[str, ...] = INDEPENDENT_EXTRINSIC_NAMES
 
     def validate(self) -> None:
         if not isinstance(self.ranges, Mapping) or not self.ranges:
@@ -544,6 +525,17 @@ class RuntimeRandomizationCfg:
         missing_nominal = sorted(required - set(self.nominal_values))
         if missing_nominal:
             raise ValueError(f"nominal values are missing {missing_nominal}")
+        if self.sample_ranges:
+            non_singleton = sorted(
+                name
+                for name in required
+                if float(self.ranges[name][0]) != float(self.ranges[name][1])
+            )
+            if non_singleton:
+                raise ValueError(
+                    "replicated physics only permits singleton scan ranges; "
+                    f"non-singleton ranges: {non_singleton}"
+                )
         for name in required:
             value = float(self.nominal_values[name])
             low, high = self.ranges[name]
@@ -552,22 +544,6 @@ class RuntimeRandomizationCfg:
         if float(self.ranges["joint.model_error"][0]) <= -1.0:
             raise ValueError("joint.model_error must keep actuator gains positive")
         self.curriculum.validate()
-
-
-def _sample_config_range(
-    env: Any, env_ids: torch.Tensor, cfg: RuntimeRandomizationCfg, name: str
-) -> torch.Tensor:
-    try:
-        low, high = cfg.ranges[name]
-    except KeyError as exc:
-        raise RuntimeError(f"feasibility envelope is missing {name!r}") from exc
-    value = torch.empty(env_ids.numel(), device=env.device, dtype=torch.float32)
-    if cfg.sample_ranges and high > low:
-        value.uniform_(float(low), float(high))
-    else:
-        value.fill_(0.5 * (float(low) + float(high)))
-    return value
-
 
 def _ensure_named_tensor_dict(env: Any, attribute: str) -> dict[str, torch.Tensor]:
     values = getattr(env, attribute, None)
@@ -1090,30 +1066,31 @@ def sample_episode_physics(
     """Reset-time EventTerm for the single training distribution."""
 
     cfg.validate()
-    if cfg.sample_ranges:
-        raise RuntimeError(
-            "per-environment physics randomization is disabled while the scene uses replicated physics"
-        )
-    if not hasattr(env, "curriculum_runtime_state"):
-        initialize_curriculum_runtime(env, None, cfg)
     stage_per_env = env.curriculum_runtime_state.stage_per_environment()
     env.curriculum_stage_per_env[env_ids] = stage_per_env[env_ids]
-    sampled = {
-        name: _sample_config_range(env, env_ids, cfg, name)
-        for name in cfg.teacher_extrinsic_names
-    }
-    for name, value in sampled.items():
-        if not cfg.sample_ranges:
-            value.fill_(float(cfg.nominal_values[name]))
-
-    joint_low, joint_high = cfg.ranges["joint.model_error"]
-    joint_error = torch.empty(
-        (env_ids.numel(), ACTION_DIM), device=env.device, dtype=torch.float32
+    configured_values = (
+        {name: float(cfg.ranges[name][0]) for name in cfg.teacher_extrinsic_names}
+        if cfg.sample_ranges
+        else {name: float(cfg.nominal_values[name]) for name in cfg.teacher_extrinsic_names}
     )
-    if cfg.sample_ranges and joint_high > joint_low:
-        joint_error.uniform_(float(joint_low), float(joint_high))
-    else:
-        joint_error.fill_(float(cfg.nominal_values["joint.model_error"]))
+    sampled = {
+        name: torch.full(
+            (env_ids.numel(),), value, device=env.device, dtype=torch.float32
+        )
+        for name, value in configured_values.items()
+    }
+
+    joint_error_value = float(
+        cfg.ranges["joint.model_error"][0]
+        if cfg.sample_ranges
+        else cfg.nominal_values["joint.model_error"]
+    )
+    joint_error = torch.full(
+        (env_ids.numel(), ACTION_DIM),
+        joint_error_value,
+        device=env.device,
+        dtype=torch.float32,
+    )
 
     control_steps, sampled["control.delay"] = _quantize_delay_samples(
         sampled["control.delay"], float(env.step_dt), env.max_control_delay_steps
@@ -1347,22 +1324,6 @@ def d6_spatial_impulse_magnitudes(impulse: torch.Tensor) -> torch.Tensor:
     return torch.stack((linear, angular), dim=-1)
 
 
-def _quat_multiply_wxyz(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Multiply batched scalar-first quaternions."""
-
-    left_w, left_xyz = left[..., :1], left[..., 1:]
-    right_w, right_xyz = right[..., :1], right[..., 1:]
-    return torch.cat(
-        (
-            left_w * right_w - torch.sum(left_xyz * right_xyz, dim=-1, keepdim=True),
-            left_w * right_xyz
-            + right_w * left_xyz
-            + torch.linalg.cross(left_xyz, right_xyz),
-        ),
-        dim=-1,
-    )
-
-
 def _axis_angle_from_quaternion_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     """Return the shortest batched rotation vector for scalar-first quaternions."""
 
@@ -1483,13 +1444,14 @@ class IsaacSimD6ReactionProvider:
         grasp_frame_position_w = grasp_body_position_w + quat_apply_wxyz(
             grasp_body_quaternion_w, grasp_local_position
         )
-        grasp_frame_quaternion_w = _quat_multiply_wxyz(
-            grasp_body_quaternion_w, grasp_local_quaternion
+        grasp_frame_quaternion_w = quat_multiply_wxyz(
+            grasp_body_quaternion_w,
+            grasp_local_quaternion.expand_as(grasp_body_quaternion_w),
         )
         hitch_conjugate = torch.cat(
             (hitch_quaternion_w[..., :1], -hitch_quaternion_w[..., 1:]), dim=-1
         )
-        relative_quaternion = _quat_multiply_wxyz(
+        relative_quaternion = quat_multiply_wxyz(
             hitch_conjugate, grasp_frame_quaternion_w
         )
         rotation_residual = _axis_angle_from_quaternion_wxyz(relative_quaternion)
@@ -1773,12 +1735,12 @@ def _compile_reset_pose_tables(env: Any) -> None:
 def initialize_mdp_state(
     env: Any,
     env_ids: Any,
-    handle_constraint_cfg: HandleConstraintCfg | None = None,
-    rolling_resistance_cfg: RollingResistanceCfg | None = None,
-    entity_names_cfg: TaskEntityNamesCfg | None = None,
-    rickshaw_pose_cfg: RickshawPoseTargetCfg | None = None,
-    robot_mass: float | None = None,
-    dex_q_grasp: tuple[float, float, float, float] | None = None,
+    handle_constraint_cfg: HandleConstraintCfg,
+    rolling_resistance_cfg: RollingResistanceCfg,
+    entity_names_cfg: TaskEntityNamesCfg,
+    rickshaw_pose_cfg: RickshawPoseTargetCfg,
+    robot_mass: float,
+    dex_q_grasp: tuple[float, float, float, float],
 ) -> None:
     """Startup event that allocates state, creates D6 joints, and binds hooks.
 
@@ -1787,29 +1749,9 @@ def initialize_mdp_state(
     """
 
     del env_ids  # Startup state is allocated for every environment at once.
-    if handle_constraint_cfg is None:
-        handle_constraint_cfg = getattr(env.cfg, "handle_constraint", None)
-    if rolling_resistance_cfg is None:
-        rolling_resistance_cfg = getattr(env.cfg, "rolling_resistance", None)
-    if entity_names_cfg is None:
-        entity_names_cfg = getattr(env.cfg, "task_entity_names", None)
-    if rickshaw_pose_cfg is None:
-        rickshaw_pose_cfg = getattr(env.cfg, "rickshaw_pose", None)
-    if robot_mass is None:
-        robot_mass = getattr(env.cfg, "robot_mass", None)
-    if dex_q_grasp is None:
-        dex_q_grasp = getattr(env.cfg, "dex_q_grasp", None)
-    if handle_constraint_cfg is None:
-        raise RuntimeError("validated HandleConstraintCfg is required at startup")
-    if rolling_resistance_cfg is None:
-        raise RuntimeError("validated RollingResistanceCfg is required at startup")
-    if entity_names_cfg is None:
-        raise RuntimeError("persisted TaskEntityNamesCfg is required at startup")
-    if rickshaw_pose_cfg is None:
-        raise RuntimeError("validated RickshawPoseTargetCfg is required at startup")
-    if robot_mass is None or robot_mass <= 0.0:
+    if robot_mass <= 0.0:
         raise RuntimeError("validated positive robot_mass is required at startup")
-    if dex_q_grasp is None or len(dex_q_grasp) != 4:
+    if len(dex_q_grasp) != 4:
         raise RuntimeError("calibrated four-joint dex_q_grasp is required at startup")
     rolling_resistance_cfg.validate()
     if hasattr(env, "d6_constraint_manager"):
@@ -2072,13 +2014,12 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
     preload_offset_w = torch.mean(preload_offset_per_hand_w, dim=1)
     env.static_d6_preload_offset_w[env_ids] = preload_offset_w
     target_hitch_positions_w = grasp_position + preload_offset_per_hand_w
-    cart_root, cart_quat, two_point_fit_error = fit_cart_pose_to_hitch_targets(
+    cart_root, cart_quat, _ = fit_cart_pose_to_hitch_targets(
         target_hitch_positions_w,
         cart_quat,
         env.path_normal_w[env_ids],
         env.rickshaw_pose_cfg,
     )
-    del two_point_fit_error
     path_position = torch.sum((cart_root - origin) * env.path_tangent_w[env_ids], dim=-1)
     wheel_phase = wheel_phase_from_path_position(
         path_position, env.rickshaw_pose_cfg.wheel_radius
@@ -2125,21 +2066,20 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.stability_state.support_points_sy[env_ids] = 0.0
     env.stability_state.support_point_mask[env_ids] = False
     env.action_state.reset(env.action_state.q_ref[env_ids], env_ids)
-    if hasattr(env, "observation_history_state"):
-        env.observation_history_state.reset(env_ids)
-    if hasattr(env, "termination_state"):
-        env.termination_state.reset(env_ids)
-    if hasattr(env, "curriculum_state"):
-        env.curriculum_state.reset(env_ids)
-    if hasattr(env, "analytic_force_state"):
-        cart = env.scene["rickshaw"]
-        v_s = torch.sum(cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
-        pitch = rickshaw_pitch_from_quaternion(
-            cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-        )
-        env.analytic_force_state.reset(v_s, pitch, env_ids)
+    env.observation_history_state.reset(env_ids)
+    env.termination_state.reset(env_ids)
+    env.curriculum_state.reset(env_ids)
+    cart = env.scene["rickshaw"]
+    v_s = torch.sum(cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
+    pitch = rickshaw_pitch_from_quaternion(
+        cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
+    )
+    env.analytic_force_state.reset(v_s, pitch, env_ids)
     if hasattr(env, "fat2_wrench_consistency_state"):
         env.fat2_wrench_consistency_state.reset(env_ids)
+    if hasattr(env, "fat2_com_radius_state"):
+        env.fat2_com_radius_state.reset(env_ids)
+        env.fat_com_radius_raw[env_ids] = env.fat2_com_radius_state.reference_radius[env_ids]
     if hasattr(env, "zmp_kinematic_state"):
         robot = env.scene["robot"]
         velocity_s = torch.sum(
@@ -2166,11 +2106,7 @@ def prepare_closed_chain_reset(env: Any, env_ids: torch.Tensor) -> None:
 def _reset_action_terms_to_current_reference(env: Any, env_ids: torch.Tensor) -> None:
     """Rebind action filters after the reset event installs the new q_ref."""
 
-    action_manager = getattr(env, "action_manager", None)
-    terms = getattr(action_manager, "_terms", None)
-    if terms is None:
-        return
-    for term in terms.values():
+    for term in env.action_manager._terms.values():
         term.reset(env_ids)
 
 
@@ -2186,12 +2122,7 @@ def reset_closed_chain(env: Any, env_ids: torch.Tensor) -> None:
     """Single reset EventTerm around the calibrated project pose writer."""
 
     prepare_closed_chain_reset(env, env_ids)
-    writer = getattr(env, "write_closed_chain_reset_state", None)
-    if writer is None:
-        raise RuntimeError(
-            "environment must install write_closed_chain_reset_state from the validated IK pose loader"
-        )
-    writer(env_ids)
+    env.write_closed_chain_reset_state(env_ids)
     finish_closed_chain_reset(env, env_ids)
 
 

@@ -389,15 +389,12 @@ def assemble_teacher_extrinsics(
     if not ordered_names:
         raise ValueError("teacher extrinsics cannot be empty")
     normalized: list[torch.Tensor] = []
-    batch_shape: tuple[int, ...] | None = None
     for name in ordered_names:
         if name in DERIVED_OR_PRIVILEGED_ONLY_NAMES:
             raise ValueError(f"derived quantity {name!r} cannot enter the teacher encoder")
         if name not in values or name not in bounds:
             raise KeyError(f"missing value or bounds for extrinsic {name!r}")
         value = values[name]
-        if batch_shape is None:
-            batch_shape = value.shape[:-1] if value.ndim > 1 else value.shape
         low, high = bounds[name]
         item = normalize_to_minus_one_one(value, low, high)
         if item.ndim == 1:
@@ -411,29 +408,16 @@ def _resolve_asset(env: Any, asset_cfg: Any | None) -> Any:
     return env.scene[name]
 
 
-def _policy_joint_ids(env: Any, asset: Any, asset_cfg: Any | None) -> Any:
+def _policy_joint_ids(env: Any, asset_cfg: Any | None) -> Any:
     if asset_cfg is not None:
         ids = getattr(asset_cfg, "joint_ids", None)
         if ids is not None and not isinstance(ids, slice):
             return ids
-    for attribute in ("policy_joint_ids", "g1_joint_ids", "rl_joint_ids"):
-        if hasattr(env, attribute):
-            ids = getattr(env, attribute)
-            if len(ids) != ACTION_DIM:
-                raise ValueError(f"env.{attribute} must contain exactly 29 fixed joint indices")
-            return ids
-    if asset.data.joint_pos.shape[-1] == ACTION_DIM:
-        return slice(None)
-    raise AttributeError("combined articulation requires a persisted 29-joint policy_joint_ids order")
+    return env.policy_joint_ids
 
 
 def _reference(env: Any) -> torch.Tensor:
-    if hasattr(env, "action_state") and hasattr(env.action_state, "q_ref"):
-        result = env.action_state.q_ref
-    elif hasattr(env, "q_ref"):
-        result = env.q_ref
-    else:
-        raise AttributeError("environment has no episode-fixed q_ref")
+    result = env.action_state.q_ref
     if result.shape[-1] != ACTION_DIM:
         raise ValueError("q_ref must use the fixed 29-joint checkpoint order")
     return result
@@ -451,18 +435,11 @@ def projected_gravity(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
 
 def joint_velocity(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
     asset = _resolve_asset(env, asset_cfg)
-    return asset.data.joint_vel[:, _policy_joint_ids(env, asset, asset_cfg)] * JOINT_VELOCITY_SCALE
+    return asset.data.joint_vel[:, _policy_joint_ids(env, asset_cfg)] * JOINT_VELOCITY_SCALE
 
 
 def previous_processed_action(env: Any) -> torch.Tensor:
-    if hasattr(env, "action_state") and hasattr(env.action_state, "target"):
-        result = env.action_state.target
-    elif hasattr(env, "action_manager") and hasattr(env.action_manager, "_terms"):
-        result = torch.cat(
-            [term.processed_actions for term in env.action_manager._terms.values()], dim=-1
-        )
-    else:
-        raise AttributeError("no processed ActionTerm target is available")
+    result = env.action_state.target
     if result.shape[-1] != ACTION_DIM:
         raise ValueError("processed action must be 29-D; raw last_action is not accepted")
     return result
@@ -477,18 +454,13 @@ def actor_observation(
 ) -> torch.Tensor:
     """Isaac Lab observation-manager adapter for the complete 96-D vector."""
 
-    if not hasattr(env, "command_state") or not hasattr(env, "action_state"):
-        return torch.zeros((env.num_envs, ACTOR_OBSERVATION_DIM), device=env.device)
     if use_cache and hasattr(env, "_actor_observation_cache"):
         return env._actor_observation_cache
     asset = _resolve_asset(env, asset_cfg)
-    ids = _policy_joint_ids(env, asset, asset_cfg)
+    ids = _policy_joint_ids(env, asset_cfg)
     if noise_cfg is None:
-        noise_cfg = getattr(env, "actor_observation_noise_cfg", None)
-    runtime_state = getattr(env, "curriculum_runtime_state", None)
-    if runtime_state is not None and int(runtime_state.stage) != 3:
-        noise_cfg = None
-    if noise_cfg is not None and hasattr(env, "observation_noise_scale"):
+        noise_cfg = env.actor_observation_noise_cfg
+    if noise_cfg is not None:
         noise_cfg = noise_cfg.scaled(env.observation_noise_scale)
     # Component manager functions above are scaled; this call uses the pure
     # assembler so there is a single schema assertion and no double scaling.
@@ -504,15 +476,10 @@ def actor_observation(
         previous_processed_action(env),
         noise_cfg=noise_cfg,
     )
-    delay_state = getattr(env, "observation_delay_state", None)
-    delay_steps = getattr(env, "observation_delay_steps", None)
-    if (
-        delay_state is not None
-        and delay_steps is not None
-        and delay_state.max_delay_steps > 0
-    ):
+    delay_state = env.observation_delay_state
+    if delay_state.max_delay_steps > 0:
         active = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
-        observation = delay_state.apply(observation, delay_steps, active)
+        observation = delay_state.apply(observation, env.observation_delay_steps, active)
     return observation
 
 

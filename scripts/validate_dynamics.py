@@ -48,18 +48,6 @@ parser.add_argument("--measurement-steps", type=int, default=30)
 parser.add_argument("--window-start", type=int, default=5)
 parser.add_argument("--coast-speed", type=float, default=0.8)
 parser.add_argument("--coast-relative-tolerance", type=float, default=0.20)
-parser.add_argument(
-    "--wrench-relative-tolerance",
-    type=float,
-    default=None,
-    help="Must match the independent normative measured/analytic dynamics gate.",
-)
-parser.add_argument(
-    "--wrench-absolute-floor-n",
-    type=float,
-    default=None,
-    help="Must match the independent normative measured/analytic dynamics gate.",
-)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -226,24 +214,8 @@ def _set_control_forces(base) -> dict[str, float]:
 def _run() -> tuple[dict[str, object], list[str], dict[str, object]]:
     envelope = load_feasibility_envelope(args.feasibility)
     load_reset_pose_library(args.reset_poses)
-    calibrated_wrench_tolerance = MAX_WRENCH_RELATIVE_TOLERANCE
-    calibrated_wrench_floor = WRENCH_ABSOLUTE_FLOOR_N
-    if (
-        args.wrench_relative_tolerance is not None
-        and args.wrench_relative_tolerance != calibrated_wrench_tolerance
-    ):
-        raise ValueError(
-            "--wrench-relative-tolerance must match the normative dynamics gate"
-        )
-    if (
-        args.wrench_absolute_floor_n is not None
-        and args.wrench_absolute_floor_n != calibrated_wrench_floor
-    ):
-        raise ValueError(
-            "--wrench-absolute-floor-n must match the normative dynamics gate"
-        )
-    wrench_relative_tolerance = calibrated_wrench_tolerance
-    wrench_absolute_floor_n = calibrated_wrench_floor
+    wrench_relative_tolerance = MAX_WRENCH_RELATIVE_TOLERANCE
+    wrench_absolute_floor_n = WRENCH_ABSOLUTE_FLOOR_N
     if args.settling_steps <= 0 or args.measurement_steps <= 0:
         raise ValueError("settling and measurement steps must be positive")
     if not 0 <= args.window_start < args.measurement_steps:

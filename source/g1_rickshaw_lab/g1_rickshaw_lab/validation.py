@@ -18,6 +18,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ._hashing import sha256_file as _sha256_file
 from .configuration import SLOPE_GRADIENTS
 from .rickshaw_spec import RICKSHAW_TOTAL_MASS
 
@@ -190,11 +191,7 @@ def sha256_file(path: str | Path) -> str:
     file_path = Path(path).resolve()
     if not file_path.is_file():
         raise FileNotFoundError(file_path)
-    digest = hashlib.sha256()
-    with file_path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _sha256_file(file_path)
 
 
 def reset_dynamics_feasibility_sha256(path: str | Path) -> str:

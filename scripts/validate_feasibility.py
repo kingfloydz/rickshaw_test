@@ -86,11 +86,6 @@ def _base_parser() -> argparse.ArgumentParser:
         default=REPOSITORY_ROOT / "config/reset_poses.yaml",
     )
     parser.add_argument(
-        "--scan",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--schema-only",
         action="store_true",
         help="Validate input schemas without launching PhysX or producing a gate report.",

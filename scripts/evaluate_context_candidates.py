@@ -9,20 +9,18 @@ from dataclasses import replace
 import math
 import os
 from pathlib import Path
-import sys
 from typing import Any
 
-from _isaaclab_wrappers import SOURCE_ROOT, add_isaaclab_sources_to_path
+from _isaaclab_wrappers import add_isaaclab_sources_to_path, add_project_source_to_path
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     SIGNED_SLOPES,
     evaluation_runtime_sources_sha256,
     slope_label,
 )
-from g1_rickshaw_lab.provenance import extract_checkpoint_metadata, sha256_file  # noqa: E402
+from g1_rickshaw_lab.provenance import sha256_file  # noqa: E402
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
     SLOPE_TERRAIN_LEVELS,
@@ -174,16 +172,14 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default="Isaac-G1-Rickshaw-Directional-Slope-v0")
-    parser.add_argument("--candidates", nargs="+")
-    parser.add_argument("--output")
+    parser.add_argument("--candidates", nargs="+", required=True)
+    parser.add_argument("--output", required=True)
     parser.add_argument("--num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS)
     parser.add_argument("--episodes-per-slope", type=int, default=100)
     parser.add_argument("--max-policy-steps-per-seed", type=int, default=6000)
     parser.add_argument("--seeds", type=int, nargs="+", default=(42, 43, 44, 45, 46))
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if args.candidates is None or args.output is None:
-        parser.error("--candidates and --output are required")
     if args.num_envs <= 0 or args.num_envs % len(SIGNED_SLOPES) != 0:
         raise ValueError(f"--num-envs must be a positive multiple of {len(SIGNED_SLOPES)}")
     if args.episodes_per_slope < 100 or args.max_policy_steps_per_seed <= 0:
@@ -196,7 +192,6 @@ def main() -> int:
     env = None
     try:
         import gymnasium as gym
-        import torch
 
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
         from isaaclab_tasks.utils import parse_env_cfg
@@ -204,7 +199,7 @@ def main() -> int:
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
-        device = args.device or "cuda:0"
+        device = args.device
         first_checkpoint = load_stage_checkpoint(
             Path(args.candidates[0]).resolve(),
             expected_stage="s1_context_candidate",
@@ -224,7 +219,6 @@ def main() -> int:
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=1.0)
         base_env = raw_env.unwrapped
-        metadata = extract_checkpoint_metadata(first_checkpoint)
         first_lineage = first_checkpoint.get("g1_rickshaw_lineage")
         if not isinstance(first_lineage, Mapping):
             raise RuntimeError("S1 candidate is missing its teacher/rollout lineage")
@@ -269,14 +263,11 @@ def main() -> int:
             ):
                 raise ValueError("S1 candidate iteration/KL metadata is invalid or duplicated")
             observed_iterations.add(candidate_iteration)
-            state = checkpoint.get("model_state_dict")
-            if not isinstance(state, Mapping):
-                raise ValueError(f"candidate has no model_state_dict: {candidate_path}")
-            latent_weight = state.get("context_encoder.context.2.weight")
-            if not torch.is_tensor(latent_weight) or latent_weight.ndim != 2:
-                raise ValueError("candidate does not expose its context latent dimension")
+            state = checkpoint["model_state_dict"]
             model = G1RickshawStudentActor(
-                latent_dim=int(latent_weight.shape[0])
+                latent_dim=int(
+                    candidate_training_configuration["ablation_values"]["latent_dim"]
+                )
             ).to(device)
             model.load_state_dict(state, strict=True)
             model.eval()

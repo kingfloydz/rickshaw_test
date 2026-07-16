@@ -56,18 +56,6 @@ class CausalBlock(nn.Module):
         self.mix = nn.Conv1d(channels, channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not torch.jit.is_scripting():
-            if x.ndim != 3:
-                raise ValueError(
-                    f"CausalBlock expects [N, C, T], got shape {tuple(x.shape)}"
-                )
-            if x.shape[1] != self.channels:
-                raise ValueError(
-                    f"CausalBlock expects {self.channels} channels, got {x.shape[1]}"
-                )
-            if not x.is_floating_point():
-                raise TypeError(f"CausalBlock expects floating-point input, got {x.dtype}")
-
         y = self.conv(F.pad(x, (self.left_pad, 0)))
         y = self.mix(F.elu(y))
         return F.elu(x + y)
@@ -90,10 +78,6 @@ class ContextEncoder(nn.Module):
         super().__init__()
         if latent_dim < 1:
             raise ValueError(f"latent_dim must be positive, got {latent_dim}")
-        if self.receptive_field != self.history_length:
-            raise RuntimeError(
-                "TCN architecture no longer matches the 61-frame history contract"
-            )
 
         self.latent_dim = latent_dim
         self.input = nn.Conv1d(OBSERVATION_DIM, FEATURE_DIM, kernel_size=1)
@@ -133,10 +117,7 @@ class ContextEncoder(nn.Module):
         self._validate_history(history)
         x = self.input(history.transpose(1, 2))
         x = self.blocks(x)
-        feature = x[:, :, -1]
-        if feature.shape != (history.shape[0], FEATURE_DIM):
-            raise RuntimeError(f"unexpected TCN feature shape {tuple(feature.shape)}")
-        return feature
+        return x[:, :, -1]
 
     def encode(self, history: torch.Tensor) -> torch.Tensor:
         """Return only ``z_hat`` for deployment wrappers."""

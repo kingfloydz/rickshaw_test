@@ -241,7 +241,7 @@ class _RelativeLearningRateAdam(torch.optim.Adam):
         original = [group["lr"] for group in self.param_groups]
         try:
             for group, learning_rate in zip(self.param_groups, original, strict=True):
-                group["lr"] = learning_rate * group.get("lr_multiplier", 1.0)
+                group["lr"] = learning_rate * group["lr_multiplier"]
             return super().step(closure)
         finally:
             for group, learning_rate in zip(self.param_groups, original, strict=True):

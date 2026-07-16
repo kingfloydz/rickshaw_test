@@ -13,12 +13,11 @@ import sys
 import tempfile
 from typing import Any
 
-from _isaaclab_wrappers import SOURCE_ROOT, add_isaaclab_sources_to_path
+from _isaaclab_wrappers import add_isaaclab_sources_to_path, add_project_source_to_path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     C1_NOMINAL_PHYSICS_FIELDS,
@@ -68,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group()
+    source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint", type=Path)
     source.add_argument(
         "--samples",
@@ -101,8 +100,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if (args.checkpoint is None) == (args.samples is None):
-        parser.error("exactly one of --checkpoint or --samples is required")
     if args.samples is not None:
         if not args.samples.is_file():
             parser.error(f"raw sample artifact does not exist: {args.samples}")
@@ -191,11 +188,7 @@ def _resolve_policy_kind(requested: str, checkpoint: dict[str, Any]) -> str:
     expected = {
         "s0_teacher": "teacher",
         "s2_student_ppo": "student",
-    }.get(stage)
-    if expected is None:
-        raise RewardCalibrationError(
-            "reward calibration requires a formal S0 teacher or completed S2 student"
-        )
+    }[stage]
     if requested != "auto" and requested != expected:
         raise RewardCalibrationError(
             f"--policy-kind {requested} is incompatible with checkpoint stage {stage}"
@@ -237,14 +230,7 @@ def _assign_fixed_slopes(base_env: Any):
         raise RewardCalibrationError(
             "fixed terrain assignment did not resolve to every configured slope"
         )
-    runtime_randomization = getattr(base_env, "runtime_randomization", None)
-    if runtime_randomization is None:
-        runtime_randomization = getattr(
-            getattr(base_env, "cfg", None), "runtime_randomization", None
-        )
-    if runtime_randomization is None:
-        raise RewardCalibrationError("environment has no runtime randomization configuration")
-    cfg = runtime_randomization.curriculum
+    cfg = base_env.cfg.runtime_randomization.curriculum
     base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
         columns,
         torch.sign(expected).to(dtype=torch.long),
@@ -291,12 +277,7 @@ def _physics_snapshot(
     actual_values["joint.model_error"] = joint_model_error
     if set(actual_values) != set(C1_NOMINAL_PHYSICS_FIELDS):
         raise RewardCalibrationError("C1 runtime physical fields are incomplete")
-    randomization = getattr(base_env, "runtime_randomization", None)
-    if randomization is None:
-        randomization = getattr(
-            getattr(base_env, "cfg", None), "runtime_randomization", None
-        )
-    nominal_source = getattr(randomization, "nominal_values", None)
+    nominal_source = base_env.cfg.runtime_randomization.nominal_values
     if not isinstance(nominal_source, Mapping):
         raise RewardCalibrationError("C1 runtime randomization has no nominal values")
     missing_nominal = sorted(set(C1_NOMINAL_PHYSICS_FIELDS) - set(nominal_source))
@@ -338,7 +319,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
             "reward calibration task differs from the checkpoint training task"
         )
     ablation_values = training_configuration["ablation_values"]
-    device = args.device or "cuda:0"
+    device = args.device
     env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
     _configure_training(env_cfg)

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from hashlib import sha256
 import importlib.metadata
 import importlib.util
 import os
@@ -21,6 +20,7 @@ import tempfile
 from types import MappingProxyType
 from typing import Any
 
+from ._hashing import sha256_file
 from .configuration import FIXED_G1_JOINT_ORDER, validate_joint_order
 
 
@@ -55,16 +55,6 @@ def _require_torch():
     return torch
 
 
-def sha256_file(path: str | Path) -> str:
-    """Return the lowercase SHA256 of a file's exact bytes."""
-
-    digest = sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _normalize_config_files(
     config_files: Mapping[str, str | Path] | Sequence[str | Path],
 ) -> dict[str, Path]:
@@ -75,8 +65,6 @@ def _normalize_config_files(
         for label, path in config_files.items():
             if not isinstance(label, str) or not label:
                 raise ProvenanceError("configuration hash labels must be non-empty strings")
-            if label in result:
-                raise ProvenanceError(f"duplicate configuration hash label {label!r}")
             result[label] = Path(path)
         return result
     if isinstance(config_files, (str, bytes)) or not isinstance(config_files, Sequence):
@@ -591,8 +579,6 @@ def load_checkpoint_with_validation(
     torch = _require_torch()
     checkpoint_path = Path(path)
     checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
-    if not isinstance(checkpoint, Mapping):
-        raise ProvenanceError(f"checkpoint {checkpoint_path} did not contain a mapping")
     validate_checkpoint(checkpoint, **validation_kwargs)
     return checkpoint
 

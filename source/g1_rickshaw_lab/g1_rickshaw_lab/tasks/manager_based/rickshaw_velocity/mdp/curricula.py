@@ -174,9 +174,7 @@ def record_curriculum_tracking(
             robot.data.root_lin_vel_w * env.path_tangent_w, dim=-1
         )
     active = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
-    safety = torch.zeros_like(active)
-    if hasattr(env, "termination_state"):
-        safety = torch.any(env.termination_state.counters > 0, dim=-1)
+    safety = torch.any(env.termination_state.counters > 0, dim=-1)
     env.curriculum_state.record(
         env.command_state.v_ref,
         actual_speed,

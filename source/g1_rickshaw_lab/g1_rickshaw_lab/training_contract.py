@@ -2284,8 +2284,9 @@ def install_runner_hooks_from_environment() -> None:
     def set_curriculum(runner: Any, iteration: int) -> None:
         env = _unwrap_env(runner.env)
         callback = getattr(env, "set_curriculum_iteration", None)
-        if callable(callback):
-            callback(int(iteration))
+        if not callable(callback):
+            raise RuntimeError("environment does not expose set_curriculum_iteration")
+        callback(int(iteration))
 
     def run_s0_periodic_validation(runner: Any) -> None:
         iteration = int(runner._g1_curriculum_iteration)

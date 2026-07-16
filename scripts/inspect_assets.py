@@ -13,7 +13,6 @@ import sys
 from typing import Any, Mapping
 import xml.etree.ElementTree as ET
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "source" / "g1_rickshaw_lab"
 if str(SOURCE_ROOT) not in sys.path:

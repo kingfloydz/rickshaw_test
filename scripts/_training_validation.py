@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import sys
 
-from _isaaclab_wrappers import SOURCE_ROOT
+from _isaaclab_wrappers import add_project_source_to_path
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.validation import (  # noqa: E402
     asset_hashes,
@@ -17,16 +15,10 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
 )
 
 
-def validate_training_reset_inputs(
-    validation_dir: str | Path,
-    *,
-    feasibility_path: str | Path,
-    reset_pose_path: str | Path,
-) -> None:
-    """Validate assets only; reset reports are not a training gate."""
+def validate_training_assets(validation_dir: str | Path) -> None:
+    """Validate the canonical asset report required before training."""
 
     validation_dir = Path(validation_dir).resolve()
-    del feasibility_path, reset_pose_path
     assets = asset_hashes(validation_input_assets())
     asset_report_path = validation_dir / "asset_inspection.json"
     if not asset_report_path.is_file():
@@ -40,4 +32,4 @@ def validate_training_reset_inputs(
         raise RuntimeError("training asset inspection is failed or stale")
 
 
-__all__ = ["validate_training_reset_inputs"]
+__all__ = ["validate_training_assets"]

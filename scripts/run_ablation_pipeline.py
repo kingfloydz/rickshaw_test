@@ -20,10 +20,9 @@ import sys
 import threading
 from typing import Any, Iterable, Mapping
 
-from _isaaclab_wrappers import REPOSITORY_ROOT, SOURCE_ROOT
+from _isaaclab_wrappers import REPOSITORY_ROOT, add_project_source_to_path
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     ABLATION_DEFAULTS,
@@ -57,7 +56,7 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
     write_yaml_atomic,
 )
 
-from _training_validation import validate_training_reset_inputs
+from _training_validation import validate_training_assets
 
 
 DEFAULT_VALIDATION_DIR = REPOSITORY_ROOT / "outputs" / "validation"
@@ -231,7 +230,6 @@ def _run_command(
     command: list[str],
     *,
     environment: Mapping[str, str],
-    cpu_set: tuple[int, ...],
     log_path: Path,
     label: str,
 ) -> None:
@@ -467,7 +465,6 @@ def _run_one_pipeline(
     spec: RunSpec,
     *,
     gpu: GpuInfo,
-    cpu_set: tuple[int, ...],
     args: argparse.Namespace,
 ) -> None:
     run_dir = args.output_dir / "runs" / spec.name
@@ -513,7 +510,6 @@ def _run_one_pipeline(
         _run_command(
             command,
             environment=environment,
-            cpu_set=cpu_set,
             log_path=logs / "01_train_teacher.log",
             label=label,
         )
@@ -544,7 +540,6 @@ def _run_one_pipeline(
                 "--headless",
             ],
             environment=environment,
-            cpu_set=cpu_set,
             log_path=logs / "02_calibrate_rewards.log",
             label=label,
         )
@@ -571,7 +566,6 @@ def _run_one_pipeline(
         _run_command(
             command,
             environment=environment,
-            cpu_set=cpu_set,
             log_path=logs / "03_train_context.log",
             label=label,
         )
@@ -603,7 +597,6 @@ def _run_one_pipeline(
                 "--headless",
             ],
             environment=environment,
-            cpu_set=cpu_set,
             log_path=logs / "04_evaluate_s1.log",
             label=label,
         )
@@ -644,7 +637,6 @@ def _run_one_pipeline(
         _run_command(
             command,
             environment=environment,
-            cpu_set=cpu_set,
             log_path=logs / "05_finetune_student.log",
             label=label,
         )
@@ -864,11 +856,7 @@ def _validate_inputs(args: argparse.Namespace) -> None:
             raise FileNotFoundError(f"{label} does not exist: {path}")
     final = load_thresholds(args.final_thresholds)
     validate_final_acceptance_thresholds(final, curriculum_stages=("training",))
-    validate_training_reset_inputs(
-        args.validation_dir,
-        feasibility_path=args.feasibility,
-        reset_pose_path=args.reset_poses,
-    )
+    validate_training_assets(args.validation_dir)
     if args.worker_only and args.runs is None:
         raise ValueError("--worker-only requires an explicit --runs selection")
     if args.finalize_only and args.runs is not None:
@@ -892,7 +880,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
     _validate_inputs(args)
     gpus = _select_gpus(args.gpus)
-    cpu_sets = [tuple() for _ in gpus]
     requested_names = tuple(RUNS_BY_NAME) if args.runs is None else args.runs
     requested_runs = (
         []
@@ -912,9 +899,8 @@ def main(argv: list[str] | None = None) -> int:
                         "gpu": gpu.index,
                         "name": gpu.name,
                         "memory_mib": gpu.memory_total_mib,
-                        "cpu_cores": list(cpu_set),
                     }
-                    for gpu, cpu_set in zip(gpus, cpu_sets, strict=True)
+                    for gpu in gpus
                 ],
                 "output_dir": os.fspath(args.output_dir),
                 "postprocess": {
@@ -948,7 +934,7 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[tuple[str, str]] = []
     stop_event = threading.Event()
 
-    def worker(gpu: GpuInfo, cpu_set: tuple[int, ...]) -> None:
+    def worker(gpu: GpuInfo) -> None:
         while not stop_event.is_set():
             try:
                 spec = work_queue.get_nowait()
@@ -959,7 +945,6 @@ def main(argv: list[str] | None = None) -> int:
                     _run_one_pipeline(
                         spec,
                         gpu=gpu,
-                        cpu_set=cpu_set,
                         args=args,
                     )
             except Exception as exc:  # noqa: BLE001
@@ -969,8 +954,8 @@ def main(argv: list[str] | None = None) -> int:
                 return
     with ThreadPoolExecutor(max_workers=len(gpus)) as executor:
         futures = [
-            executor.submit(worker, gpu, cpu_set)
-            for gpu, cpu_set in zip(gpus, cpu_sets, strict=True)
+            executor.submit(worker, gpu)
+            for gpu in gpus
         ]
         for future in futures:
             future.result()
@@ -1036,7 +1021,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.selected_run_id,
                 ],
                 environment=environment,
-                cpu_set=cpu_sets[0],
                 log_path=results_dir / "evaluation.log",
                 label=f"evaluation/gpu{gpu.index}",
             )
@@ -1065,7 +1049,6 @@ def main(argv: list[str] | None = None) -> int:
         _run_command(
             artifact_command,
             environment=environment,
-            cpu_set=cpu_sets[0],
             log_path=results_dir / "artifacts.log",
             label=f"artifacts/gpu{gpu.index}",
         )

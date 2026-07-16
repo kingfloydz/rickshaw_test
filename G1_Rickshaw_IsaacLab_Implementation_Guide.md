@@ -621,7 +621,13 @@ M_h=h_sF_{h,n}-h_nF_{h,s}
 -\sin\theta_{max},\sin\theta_{max}\right)\right)
 \]
 
-`m_r`、`R_c` 从 G1 资产和闭链 IK pose 计算；`R_c` 是支撑中心到机器人 CoM 的距离。`theta_FAT>0` 表示沿 `+e_s` 前倾。该项是弱姿态先验，不是主稳定性判据：
+`m_r` 从 G1 资产计算；`R_c` 是当前支撑中心到机器人全身 CoM 在
+`e_s/e_n` 平面内的距离。在线实现将有效支撑下的 `R_c` 裁剪到标定的
+`[0.5, 0.85] m` 物理范围，并使用与 wrench consistency 相同的 25 个 policy
+step 滑窗均值；无有效支撑或非有限样本时保持上一个滤波值，reset 时回到
+标定半径 `0.715092420262594 m`。这避免单/双支撑切换把瞬时几何跳变直接
+传入弱姿态 reward。`theta_FAT>0` 表示沿 `+e_s` 前倾。该项是弱姿态先验，
+不是主稳定性判据：
 
 ```python
 def fat2_prior_exp(env, sigma):

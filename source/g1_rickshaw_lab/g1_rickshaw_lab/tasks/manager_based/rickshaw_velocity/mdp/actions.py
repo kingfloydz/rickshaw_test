@@ -441,11 +441,8 @@ if ISAACLAB_AVAILABLE:
         def process_actions(self, actions: torch.Tensor) -> None:
             self._raw_actions[:] = actions
             effective_actions = actions
-            if (
-                hasattr(self._env, "control_delay_steps")
-                and int(getattr(self._env, "max_control_delay_steps", 0)) > 0
-            ):
-                max_delay = int(getattr(self._env, "max_control_delay_steps", 0))
+            max_delay = int(self._env.max_control_delay_steps)
+            if max_delay > 0:
                 state = getattr(self, "_control_delay_state", None)
                 if state is None or state.max_delay_steps != max_delay:
                     state = ControlDelayState.zeros(
@@ -464,8 +461,6 @@ if ISAACLAB_AVAILABLE:
             self._new_policy_action = True
 
         def _sync_global_action_state(self) -> None:
-            if not hasattr(self._env, "action_state"):
-                raise RuntimeError("initialize_mdp_state must install the global action_state")
             terms = self._env.action_manager._terms.values()
             target = torch.cat([term.processed_actions for term in terms], dim=-1)
             if target.shape[-1] != ACTION_DIM:
@@ -478,10 +473,6 @@ if ISAACLAB_AVAILABLE:
 
         def apply_actions(self) -> None:
             if self.cfg.physics_hook_owner:
-                if not hasattr(self._env, "_g1_rickshaw_pre_physics_step"):
-                    raise RuntimeError(
-                        "initialize_mdp_state did not bind the per-physics-step rickshaw hook"
-                    )
                 self._env._g1_rickshaw_pre_physics_step()
             # The reset state already includes the full static handle preload.
             # Every substep therefore uses the normal policy controller target.

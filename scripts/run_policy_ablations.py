@@ -12,10 +12,9 @@ import sys
 
 import yaml
 
-from _isaaclab_wrappers import SOURCE_ROOT, require_existing_file
+from _isaaclab_wrappers import add_project_source_to_path, require_existing_file
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     ABLATION_DEFAULTS,

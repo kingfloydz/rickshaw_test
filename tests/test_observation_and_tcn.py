@@ -77,19 +77,13 @@ def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
 def test_observation_and_reward_interfaces_do_not_read_v_sample() -> None:
     assert "v_sample" not in inspect.signature(assemble_actor_observation).parameters
 
-    robot = SimpleNamespace(
-        data=SimpleNamespace(
-            root_lin_vel_w=torch.tensor([[0.5, 0.0, 0.0]], dtype=torch.float64)
-        )
-    )
     command = SimpleNamespace(
         v_ref=torch.tensor([0.7], dtype=torch.float64),
         v_sample=torch.tensor([100.0], dtype=torch.float64),
     )
     env = SimpleNamespace(
-        scene={"robot": robot},
-        path_tangent_w=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64),
         command_state=command,
+        policy_robot_speed_s=torch.tensor([0.5], dtype=torch.float64),
     )
     before = rewards.track_speed_exp(env)
     command.v_sample[:] = -100.0

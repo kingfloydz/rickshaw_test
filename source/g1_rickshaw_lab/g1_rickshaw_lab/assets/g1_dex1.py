@@ -9,11 +9,12 @@ tests can run in a normal Python environment.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 import re
 from typing import Iterable, Sequence
 import xml.etree.ElementTree as ET
+
+from .._hashing import sha256_file
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -305,16 +306,6 @@ def missing_g1_dex1_assets() -> tuple[Path, ...]:
     """Return required combined-asset artifacts that have not been generated."""
 
     return tuple(path for path in (G1_DEX1_URDF_PATH, G1_DEX1_USD_PATH) if not path.is_file())
-
-
-def sha256_file(path: str | Path) -> str:
-    """Hash an asset for checkpoint provenance."""
-
-    digest = sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 __all__ = [

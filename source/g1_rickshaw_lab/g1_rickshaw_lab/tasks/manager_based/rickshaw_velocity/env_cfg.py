@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -97,27 +96,7 @@ ILLEGAL_CONTACT_BODY_NAMES = (
     "right_dex1_finger_link_1",
     "right_dex1_finger_link_2",
 )
-TEACHER_EXTRINSIC_NAMES = (
-    "payload.mass",
-    "payload.com.x",
-    "payload.com.y",
-    "payload.com.z",
-    "rolling_resistance.c_rr",
-    "terrain.friction",
-    "wheel.left_damping",
-    "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
-    "motor.strength",
-    "control.delay",
-    "observation.delay",
-)
+TEACHER_EXTRINSIC_NAMES = mdp.INDEPENDENT_EXTRINSIC_NAMES
 CRITIC_PRIVILEGED_DIM = len(TEACHER_EXTRINSIC_NAMES) + 27
 
 
@@ -531,6 +510,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         fat2 = mdp.FAT2Cfg(
             robot_mass=_cal(calibration, "fat.robot_mass"),
             com_radius=_cal(calibration, "fat.com_radius"),
+            com_radius_bounds=tuple(_cal(calibration, "fat.com_radius_bounds")),
             theta_max=_cal(calibration, "safety.theta_max"),
             wrench_consistency_relative_tolerance=_cal(
                 calibration, "fat.wrench_consistency_relative_tolerance"
@@ -635,13 +615,6 @@ class G1RickshawDirectionalSlopePlayEnvCfg(G1RickshawDirectionalSlopeEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 64
         self.curriculum = None
-        self.scene.terrain.terrain_generator.curriculum = True
-        self.runtime_randomization = replace(
-            self.runtime_randomization,
-            curriculum=mdp.CurriculumScheduleCfg(),
-        )
-        self.events.sample_physics.params = {"cfg": self.runtime_randomization}
-        self.events.initialize_curriculum.params = {"cfg": self.runtime_randomization}
 
 
 def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) -> None:

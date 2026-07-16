@@ -15,7 +15,6 @@ from g1_rickshaw_lab.slope_contract import (
     SLOPE_LABELS,
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
-    TERRAIN_NUM_COLS,
 )
 from g1_rickshaw_lab.training_contract import (
     GUIDE_TRAINING_NUM_ENVS,
@@ -25,7 +24,6 @@ from g1_rickshaw_lab.training_contract import (
 
 
 ACTION_DIM = 29
-TERRAIN_STRATA_COUNT = TERRAIN_NUM_COLS
 SIGNED_SLOPES = SLOPE_GRADIENTS
 FORMAL_NUM_ENVS = GUIDE_TRAINING_NUM_ENVS
 
@@ -50,7 +48,6 @@ PHYSICS_VALUE_NAMES = (
     "control.delay",
     "observation.delay",
 )
-STAGE_CODES = {1: "TRAINING"}
 AUDIT_TENSOR_NAMES = (
     "teacher_extrinsics",
     "curriculum_stage",
@@ -227,7 +224,6 @@ def summarize_segment_samples(
     num_envs: int,
     samples_per_environment: int,
     physics_bounds: Mapping[str, Any],
-    nominal_values: Mapping[str, Any] | None = None,
     joint_model_error_bounds: Any,
 ) -> dict[str, Any]:
     """Validate and summarize the single TRAINING segment from stored samples."""
@@ -378,8 +374,6 @@ __all__ = [
     "SLOPE_LABELS",
     "SLOPE_TERRAIN_LEVELS",
     "SLOPE_TERRAIN_TYPES",
-    "STAGE_CODES",
-    "TERRAIN_STRATA_COUNT",
     "canonical_sha256",
     "formal_slope_environment_assignment",
     "normalize_audit_tensors",

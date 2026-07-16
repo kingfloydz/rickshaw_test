@@ -11,10 +11,9 @@ from pathlib import Path
 import re
 import sys
 
-from _isaaclab_wrappers import SOURCE_ROOT, require_existing_file, run_isaaclab_rsl_rl
+from _isaaclab_wrappers import add_project_source_to_path, require_existing_file, run_isaaclab_rsl_rl
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import sha256_file  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
@@ -37,18 +36,16 @@ from _training_configuration import (  # noqa: E402
     validate_formal_launcher_arguments,
     validate_training_configuration as validate_launcher_training_configuration,
 )
-from _training_validation import validate_training_reset_inputs
+from _training_validation import validate_training_assets
 
 
 DEFAULT_TASK = GUIDE_TRAINING_TASK
-DEFAULT_VALIDATION_TASK = "Isaac-G1-Rickshaw-Directional-Slope-Play-v0"
 S0_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s0_teacher"]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--validation-task", default=DEFAULT_VALIDATION_TASK)
     parser.add_argument("--validation-dir", default=None)
     parser.add_argument(
         "--experiment-dir",
@@ -94,11 +91,7 @@ def main() -> int:
     reset_pose_path = Path(
         os.environ.get("G1_RICKSHAW_RESET_POSES", os.fspath(DEFAULT_RESET_POSES_PATH))
     ).resolve()
-    validate_training_reset_inputs(
-        validation_dir,
-        feasibility_path=feasibility_path,
-        reset_pose_path=reset_pose_path,
-    )
+    validate_training_assets(validation_dir)
     require_pinned_rsl_rl()
     os.environ["G1_RICKSHAW_VALIDATION_DIR"] = os.fspath(validation_dir)
     os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"

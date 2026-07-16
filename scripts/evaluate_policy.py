@@ -9,13 +9,15 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-import sys
 from typing import Any
 
-from _isaaclab_wrappers import SOURCE_ROOT, add_isaaclab_sources_to_path, require_existing_file
+from _isaaclab_wrappers import (
+    add_isaaclab_sources_to_path,
+    add_project_source_to_path,
+    require_existing_file,
+)
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     COMMAND_PHASE_LABELS,
@@ -85,10 +87,7 @@ class PolicyHandle:
     @property
     def latent_dim(self) -> int:
         encoder = self.actor.context_encoder if hasattr(self.actor, "context_encoder") else self.actor.encoder
-        value = getattr(encoder, "latent_dim", None)
-        if not isinstance(value, int):
-            raise RuntimeError("policy encoder does not expose latent_dim")
-        return value
+        return encoder.latent_dim
 
     def distribution(self, observation: Any, intervention: str = "baseline"):
         if intervention not in {"baseline", "zero", "shuffle"}:
@@ -119,7 +118,7 @@ def _parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--checkpoint")
+    parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--teacher-checkpoint", default=None)
     parser.add_argument(
         "--s1-baseline-report",
@@ -129,7 +128,7 @@ def _parser() -> argparse.ArgumentParser:
             "for an S2 report to pass."
         ),
     )
-    parser.add_argument("--output")
+    parser.add_argument("--output", required=True)
     parser.add_argument("--num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS)
     parser.add_argument("--episodes-per-slope", type=int, default=100)
     parser.add_argument("--seeds", type=int, nargs="+", default=(42, 43, 44, 45, 46))
@@ -163,8 +162,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace, stage: str) -> None:
-    if stage not in SUPPORTED_STAGES:
-        raise ValueError(f"unsupported checkpoint stage {stage!r}")
     if (
         args.num_envs <= 0
         or args.num_envs % FORMAL_EVALUATION_NUM_ENVS_MULTIPLE != 0
@@ -254,7 +251,7 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
             "fixed evaluation terrain does not resolve to every configured slope"
         )
 
-    cfg = base_env.runtime_randomization.curriculum if hasattr(base_env, "runtime_randomization") else base_env.cfg.runtime_randomization.curriculum
+    cfg = base_env.cfg.runtime_randomization.curriculum
     base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
         columns, torch.sign(expected).to(dtype=torch.long), cfg
     )
@@ -298,19 +295,14 @@ def _load_policy(
     device: str,
     task: str,
 ) -> tuple[PolicyHandle, list[Any]]:
-    import torch
-
     keepalive: list[Any] = []
     if stage in {"s1_context_candidate", "s1_context_distillation"}:
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
-        state = checkpoint.get("model_state_dict")
-        if not isinstance(state, Mapping):
-            raise ValueError("S1 checkpoint has no model_state_dict")
-        latent_weight = state.get("context_encoder.context.2.weight")
-        if not torch.is_tensor(latent_weight) or latent_weight.ndim != 2:
-            raise ValueError("S1 checkpoint does not expose the context latent dimension")
-        model = G1RickshawStudentActor(latent_dim=int(latent_weight.shape[0])).to(device)
+        state = checkpoint["model_state_dict"]
+        training_configuration = checkpoint[TRAINING_CONFIGURATION_KEY]
+        latent_dim = int(training_configuration["ablation_values"]["latent_dim"])
+        model = G1RickshawStudentActor(latent_dim=latent_dim).to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
         keepalive.append(model)
@@ -763,10 +755,12 @@ def _context_report(
 def main() -> int:  # noqa: C901
     parser = _parser()
     args = parser.parse_args()
-    if args.checkpoint is None or args.output is None:
-        parser.error("--checkpoint and --output are required")
     checkpoint_path = require_existing_file(args.checkpoint, "policy checkpoint").resolve()
-    checkpoint = load_stage_checkpoint(checkpoint_path, validate_runtime=True)
+    checkpoint = load_stage_checkpoint(
+        checkpoint_path,
+        expected_stage=SUPPORTED_STAGES,
+        validate_runtime=True,
+    )
     stage = checkpoint[CHECKPOINT_STAGE_KEY]
     training_configuration = dict(checkpoint[TRAINING_CONFIGURATION_KEY])
     if training_configuration["task"] != args.task:
@@ -857,7 +851,7 @@ def main() -> int:  # noqa: C901
 
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
 
-        device = args.device or "cuda:0"
+        device = args.device
         for curriculum_name in args.curriculum_stages:
             raw_env = None
             env = None

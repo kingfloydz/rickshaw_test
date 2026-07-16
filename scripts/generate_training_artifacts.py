@@ -13,10 +13,9 @@ import subprocess
 import sys
 from typing import Any
 
-from _isaaclab_wrappers import REPOSITORY_ROOT, SOURCE_ROOT, require_existing_file
+from _isaaclab_wrappers import REPOSITORY_ROOT, add_project_source_to_path, require_existing_file
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import sha256_file  # noqa: E402
 from g1_rickshaw_lab.training_contract import load_policy_ablation_artifact  # noqa: E402

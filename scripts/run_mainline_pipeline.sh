@@ -31,17 +31,9 @@ pipeline_args=(
 case "$MODE" in
     all) ;;
     worker)
-        if [[ -z "$RUN_LIST" ]]; then
-            echo "MODE=worker requires RUNS=<one-or-more-unique-config-ids>" >&2
-            exit 2
-        fi
         pipeline_args+=(--worker-only)
         ;;
     finalize)
-        if [[ -n "$RUN_LIST" ]]; then
-            echo "MODE=finalize requires RUNS to be unset" >&2
-            exit 2
-        fi
         pipeline_args+=(--finalize-only)
         ;;
     *)

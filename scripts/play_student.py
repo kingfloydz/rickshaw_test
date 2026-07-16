@@ -6,12 +6,10 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-import sys
 
-from _isaaclab_wrappers import SOURCE_ROOT, require_existing_file, run_isaaclab_rsl_rl
+from _isaaclab_wrappers import add_project_source_to_path, require_existing_file, run_isaaclab_rsl_rl
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import pytest
 import torch
 
 
@@ -11,12 +12,53 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from _rollout_audit import (  # noqa: E402
+    ACTION_DIM,
     FORMAL_NUM_ENVS,
+    PHYSICS_VALUE_NAMES,
+    ROLLOUT_MANIFEST_SCHEMA_VERSION,
     SIGNED_SLOPES,
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
     formal_slope_environment_assignment,
 )
+from train_context import _normalize_shard  # noqa: E402
+
+
+def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
+    return {
+        "current": torch.zeros(batch_size, 96),
+        "history": torch.zeros(batch_size, 61, 96),
+        "teacher_action_mean": torch.zeros(batch_size, ACTION_DIM),
+        "teacher_action_std": torch.ones(batch_size, ACTION_DIM),
+        "z_star": torch.zeros(batch_size, 16),
+        "phase_target": torch.zeros(batch_size, 2),
+        "frequency_target": torch.zeros(batch_size, 1),
+        "contact_target": torch.zeros(batch_size, 2),
+        "cart_lag_target": torch.zeros(batch_size, 1),
+        "gait_mask": torch.zeros(batch_size, 1, dtype=torch.bool),
+        "lag_mask": torch.zeros(batch_size, 1, dtype=torch.bool),
+        "teacher_extrinsics": torch.zeros(batch_size, len(PHYSICS_VALUE_NAMES)),
+        "curriculum_stage": torch.ones(batch_size, 1, dtype=torch.long),
+        "collection_segment": torch.zeros(batch_size, 1, dtype=torch.long),
+        "environment_id": torch.arange(batch_size).unsqueeze(-1),
+        "episode_id": torch.arange(batch_size).unsqueeze(-1),
+        "slope": torch.zeros(batch_size, 1),
+        "terrain_level": torch.zeros(batch_size, 1, dtype=torch.long),
+        "terrain_type": torch.zeros(batch_size, 1, dtype=torch.long),
+        "physics_values": torch.zeros(batch_size, len(PHYSICS_VALUE_NAMES)),
+        "joint_model_error": torch.zeros(batch_size, ACTION_DIM),
+        "observation_noise_scale": torch.zeros(batch_size, 1),
+    }
+
+
+def _write_rollout_shard(path: Path, tensors: dict[str, torch.Tensor], *, root: str = "rollout") -> None:
+    torch.save(
+        {
+            "schema_version": ROLLOUT_MANIFEST_SCHEMA_VERSION,
+            root: tensors,
+        },
+        path,
+    )
 
 
 def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
@@ -31,3 +73,39 @@ def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
     )
     assert len(SLOPE_TERRAIN_LEVELS) == len(SIGNED_SLOPES)
     assert len(SLOPE_TERRAIN_TYPES) == len(SIGNED_SLOPES)
+
+
+def test_formal_rollout_shard_accepts_only_canonical_tensor_shapes(tmp_path: Path) -> None:
+    shard = tmp_path / "rollout.pt"
+    _write_rollout_shard(shard, _canonical_rollout_tensors())
+
+    normalized = _normalize_shard(shard)
+
+    assert normalized["current"].shape == (2, 96)
+    assert normalized["teacher_action_std"].shape == (2, ACTION_DIM)
+
+
+def test_formal_rollout_shard_rejects_legacy_root(tmp_path: Path) -> None:
+    shard = tmp_path / "rollout.pt"
+    _write_rollout_shard(shard, _canonical_rollout_tensors(), root="data")
+
+    with pytest.raises(ValueError, match="canonical rollout mapping"):
+        _normalize_shard(shard)
+
+
+def test_formal_rollout_shard_rejects_aliases_and_legacy_shapes(tmp_path: Path) -> None:
+    alias_shard = tmp_path / "alias.pt"
+    alias_tensors = _canonical_rollout_tensors()
+    alias_tensors["policy"] = alias_tensors.pop("current")
+    _write_rollout_shard(alias_shard, alias_tensors)
+
+    with pytest.raises(KeyError, match="'current'"):
+        _normalize_shard(alias_shard)
+
+    shape_shard = tmp_path / "shape.pt"
+    shape_tensors = _canonical_rollout_tensors()
+    shape_tensors["phase_target"] = torch.zeros(2)
+    _write_rollout_shard(shape_shard, shape_tensors)
+
+    with pytest.raises(ValueError, match="phase_target must have shape"):
+        _normalize_shard(shape_shard)

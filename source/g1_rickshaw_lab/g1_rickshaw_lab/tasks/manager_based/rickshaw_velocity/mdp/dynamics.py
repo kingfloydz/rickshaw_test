@@ -282,7 +282,7 @@ class SecondOrderLowPassState:
 
     def reset(self, value: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
         ids: slice | torch.Tensor = slice(None) if env_ids is None else env_ids
-        target = value if env_ids is None or value.shape == self.stage_1.shape else value
+        target = value
         if env_ids is not None and value.shape == self.stage_1.shape:
             target = value[env_ids]
         self.stage_1[ids] = target
@@ -616,6 +616,91 @@ class WrenchConsistencyState:
         self.source_valid_buffer[ids] = False
         self.cursor[ids] = 0
         self.count[ids] = 0
+
+
+@dataclass
+class FAT2ComRadiusState:
+    """Windowed sagittal CoM radius with a calibrated reset fallback."""
+
+    sample_buffer: torch.Tensor
+    running_sum: torch.Tensor
+    cursor: torch.Tensor
+    count: torch.Tensor
+    filtered_radius: torch.Tensor
+    reference_radius: torch.Tensor
+
+    @classmethod
+    def initialized(
+        cls,
+        num_envs: int,
+        window_steps: int,
+        reference_radius: float,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> "FAT2ComRadiusState":
+        if num_envs <= 0 or window_steps <= 0 or reference_radius <= 0.0:
+            raise ValueError("FAT2 CoM radius state dimensions and reference must be positive")
+        reference = torch.full(
+            (num_envs,), reference_radius, device=device, dtype=dtype
+        )
+        return cls(
+            sample_buffer=torch.zeros(
+                (num_envs, window_steps), device=device, dtype=dtype
+            ),
+            running_sum=torch.zeros(num_envs, device=device, dtype=dtype),
+            cursor=torch.zeros(num_envs, device=device, dtype=torch.long),
+            count=torch.zeros(num_envs, device=device, dtype=torch.long),
+            filtered_radius=reference.clone(),
+            reference_radius=reference,
+        )
+
+    @property
+    def window_steps(self) -> int:
+        return int(self.sample_buffer.shape[1])
+
+    def update(
+        self,
+        sample: torch.Tensor,
+        valid: torch.Tensor,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> torch.Tensor:
+        expected = self.filtered_radius.shape
+        if sample.shape != expected or valid.shape != expected or valid.dtype != torch.bool:
+            raise ValueError("FAT2 CoM radius sample and validity must have shape [N]")
+        if minimum <= 0.0 or minimum >= maximum:
+            raise ValueError("FAT2 CoM radius bounds must be positive and ordered")
+        valid = valid & torch.isfinite(sample)
+        clipped = torch.clamp(sample, min=minimum, max=maximum)
+        env_ids = torch.arange(expected[0], device=self.cursor.device)
+        write_ids = env_ids[valid]
+        outgoing = self.sample_buffer[write_ids, self.cursor[write_ids]]
+        self.running_sum[write_ids] += clipped[write_ids] - outgoing
+        self.sample_buffer[write_ids, self.cursor[write_ids]] = clipped[write_ids]
+        self.cursor[:] = torch.where(
+            valid, (self.cursor + 1) % self.window_steps, self.cursor
+        )
+        self.count[:] = torch.where(
+            valid,
+            torch.clamp(self.count + 1, max=self.window_steps),
+            self.count,
+        )
+        denominator = torch.clamp(self.count, min=1).to(sample.dtype)
+        window_mean = self.running_sum / denominator
+        self.filtered_radius[:] = torch.where(
+            valid, window_mean, self.filtered_radius
+        )
+        return self.filtered_radius
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        ids: slice | torch.Tensor = slice(None) if env_ids is None else env_ids
+        self.sample_buffer[ids] = 0.0
+        self.running_sum[ids] = 0.0
+        self.cursor[ids] = 0
+        self.count[ids] = 0
+        self.filtered_radius[ids] = self.reference_radius[ids]
 
 
 @dataclass
@@ -1012,6 +1097,7 @@ def torso_pitch_from_world_vertical(
 class FAT2Cfg:
     robot_mass: float = MISSING
     com_radius: float = MISSING
+    com_radius_bounds: tuple[float, float] = MISSING
     theta_max: float = MISSING
     wrench_consistency_relative_tolerance: float = MISSING
     wrench_consistency_absolute_floor_n: float = MISSING
@@ -1020,6 +1106,13 @@ class FAT2Cfg:
     def validate(self) -> None:
         if self.robot_mass <= 0.0 or self.com_radius <= 0.0:
             raise ValueError("FAT2 robot mass and CoM radius must be calibrated")
+        if len(self.com_radius_bounds) != 2:
+            raise ValueError("FAT2 CoM radius bounds must contain two values")
+        radius_min, radius_max = self.com_radius_bounds
+        if radius_min <= 0.0 or radius_min >= radius_max:
+            raise ValueError("FAT2 CoM radius bounds must be positive and ordered")
+        if not radius_min <= self.com_radius <= radius_max:
+            raise ValueError("FAT2 calibrated CoM radius must lie within its bounds")
         if not 0.0 < self.theta_max < math.pi / 2.0:
             raise ValueError("FAT2 theta_max must lie in (0, pi/2)")
         if not 0.0 <= self.wrench_consistency_relative_tolerance <= 1.0:
@@ -1056,6 +1149,27 @@ def fat2_reference_angle(
     ratio = hand_moment / (mass * GRAVITY * radius)
     limit = torch.sin(maximum)
     return torch.asin(torch.clamp(ratio, min=-limit, max=limit))
+
+
+def sagittal_com_radius(
+    robot_com_w: torch.Tensor,
+    support_center_w: torch.Tensor,
+    path_tangent_w: torch.Tensor,
+    path_normal_w: torch.Tensor,
+) -> torch.Tensor:
+    """Return support-to-CoM distance in the path tangent/normal plane."""
+
+    if robot_com_w.ndim != 2 or robot_com_w.shape[-1] != 3:
+        raise ValueError("robot CoM must have shape [N,3]")
+    if any(
+        value.shape != robot_com_w.shape
+        for value in (support_center_w, path_tangent_w, path_normal_w)
+    ):
+        raise ValueError("FAT2 sagittal geometry tensors must have identical shapes")
+    offset = robot_com_w - support_center_w
+    offset_s = torch.sum(offset * path_tangent_w, dim=-1)
+    offset_n = torch.sum(offset * path_normal_w, dim=-1)
+    return torch.sqrt(torch.square(offset_s) + torch.square(offset_n))
 
 
 def adapt_d6_reaction_wrench(
@@ -1394,9 +1508,34 @@ def update_fat2_reference(
     if robot_kinematics is None:
         robot_kinematics = robot_system_mass_kinematics(env)
     robot_com_w, _, robot_mass = robot_kinematics
-    current_com_radius = torch.linalg.vector_norm(robot_com_w - support_center, dim=-1)
-    if not hasattr(env, "fat_com_radius"):
-        env.fat_com_radius = torch.full_like(current_com_radius, float(cfg.com_radius))
+    current_com_radius = sagittal_com_radius(
+        robot_com_w,
+        support_center,
+        env.path_tangent_w,
+        env.path_normal_w,
+    )
+    radius_state = getattr(env, "fat2_com_radius_state", None)
+    if radius_state is None:
+        radius_state = FAT2ComRadiusState.initialized(
+            env.num_envs,
+            cfg.wrench_consistency_window_steps,
+            cfg.com_radius,
+            device=env.device,
+            dtype=current_com_radius.dtype,
+        )
+        env.fat2_com_radius_state = radius_state
+        env.fat_com_radius = radius_state.filtered_radius
+        env.fat_com_radius_raw = current_com_radius.clone()
+    elif radius_state.window_steps != cfg.wrench_consistency_window_steps:
+        raise RuntimeError("FAT2 CoM radius window changed after initialization")
+    env.fat_com_radius_raw[:] = current_com_radius
+    radius_min, radius_max = cfg.com_radius_bounds
+    radius_state.update(
+        current_com_radius,
+        torch.any(env.stability_state.support_point_mask, dim=-1),
+        minimum=radius_min,
+        maximum=radius_max,
+    )
     # T_s/T_n are robot-on-cart; FAT2 needs the cart-on-robot force.  Use the
     # same low-frequency window as the gate so the weak torso prior does not
     # chase gait-impact force peaks.
@@ -1505,7 +1644,6 @@ def update_zmp_stability(
 def apply_rolling_resistance(env: Any, cfg: RollingResistanceCfg) -> torch.Tensor:
     """Isaac Lab pre-physics adapter that applies wheel-center resistance."""
 
-    cfg.validate()
     cart = env.scene["rickshaw"]
     wheel_velocity = cart.data.body_lin_vel_w[:, env.wheel_body_ids]
     contact_force = env.scene["wheel_contacts"].data.net_forces_w[:, env.wheel_sensor_ids]
@@ -1561,6 +1699,7 @@ __all__ = [
     "AnalyticHandleForceState",
     "CartInteractionWrenchState",
     "FAT2Cfg",
+    "FAT2ComRadiusState",
     "GRAVITY",
     "RickshawMassProperties",
     "RollingResistanceCfg",
@@ -1597,6 +1736,7 @@ __all__ = [
     "rickshaw_pitch_from_quaternion",
     "robot_system_mass_kinematics",
     "rolling_resistance_wrench",
+    "sagittal_com_radius",
     "slope_zmp",
     "torso_tilt_from_slope_normal",
     "torso_pitch_from_world_vertical",

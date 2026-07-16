@@ -7,18 +7,16 @@ import argparse
 import os
 from pathlib import Path
 import random
-import sys
 
 import numpy as np
 
 from _isaaclab_wrappers import (
-    SOURCE_ROOT,
     add_isaaclab_sources_to_path,
+    add_project_source_to_path,
     require_existing_file,
 )
 
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import atomic_torch_save, extract_checkpoint_metadata, sha256_file  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
@@ -57,8 +55,8 @@ def main() -> int:  # noqa: C901
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--teacher")
-    parser.add_argument("--output-dir")
+    parser.add_argument("--teacher", required=True)
+    parser.add_argument("--output-dir", required=True)
     parser.add_argument("--num-envs", type=int, default=FORMAL_NUM_ENVS)
     parser.add_argument(
         "--num-steps",
@@ -79,15 +77,14 @@ def main() -> int:  # noqa: C901
     parser.add_argument("--training-iteration", type=int, default=0)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if args.teacher is None or args.output_dir is None:
-        parser.error("--teacher and --output-dir are required")
     if (
-        args.num_envs <= 0
-        or args.num_steps <= 0
+        args.num_steps <= 0
         or args.shard_steps <= 0
         or args.max_collection_multiplier <= 0
     ):
-        raise ValueError("--num-envs/--num-steps/--shard-steps must be positive")
+        raise ValueError(
+            "--num-steps/--shard-steps/--max-collection-multiplier must be positive"
+        )
     if args.seed < 0 or args.seed > 2**32 - 1:
         raise ValueError("formal rollout collection seed must lie in [0, 2**32-1]")
     if args.num_envs != FORMAL_NUM_ENVS:
@@ -140,7 +137,7 @@ def main() -> int:  # noqa: C901
         torch.manual_seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
-        device = args.device or "cuda:0"
+        device = args.device
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         env_cfg.seed = args.seed
         # Formal rollouts bind immutable slopes.  This prevents auto-resets

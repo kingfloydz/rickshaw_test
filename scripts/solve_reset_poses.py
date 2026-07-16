@@ -114,6 +114,7 @@ DEFAULT_MAXIMUM_CONTINUATION_ARM_DELTA = 0.30
 DEFAULT_Q_REF_JOINT_MARGIN = 0.04
 DEFAULT_SOLVER_TOLERANCE = 1.0e-9
 DEFAULT_SOLVER_WORKERS = 20
+DEFAULT_ZMP_OPTIMIZATION_RESERVE_FRACTION = 0.10
 PIPELINE_WORKER_TOKEN_ENV = "G1_RICKSHAW_RESET_WORKER_TOKEN"
 PIPELINE_WORKER_STAGING_ENV = "G1_RICKSHAW_RESET_WORKER_STAGING"
 PIPELINE_WORKER_PROGRESS_ENV = "G1_RICKSHAW_RESET_WORKER_PROGRESS"
@@ -136,6 +137,12 @@ def _static_load_scales(uncertainty: float) -> tuple[float, ...]:
     if uncertainty == 0.0:
         return (1.0,)
     return (1.0 - uncertainty, 1.0, 1.0 + uncertainty)
+
+
+def _zmp_optimization_target(minimum_margin: float, reserve_fraction: float) -> float:
+    """Keep the least-squares target safely inside the hard ZMP boundary."""
+
+    return minimum_margin * (1.0 + reserve_fraction)
 
 
 def _solver_worker_count(requested: int, multistarts: int) -> int:
@@ -1000,11 +1007,9 @@ def _solve_library(
             return positions
 
         def static_zmp_from_state(
-            hand_x: float,
             hand_force_scale: float = 1.0,
             cart_force_sn: tuple[float, float] | None = None,
         ) -> tuple[Any, Any, Any]:
-            del hand_x  # The exact FK grasp points are the static moment authority.
             com = data.subtree_com[bodies["pelvis"]]
             hand_wrenches = resolved_hand_load(
                 hand_force_scale, cart_force_sn
@@ -1030,19 +1035,7 @@ def _solve_library(
             )
             return zmp, com.copy(), reaction
 
-        def static_zmp(
-            qpos: Any,
-            hand_x: float,
-            hand_force_scale: float = 1.0,
-            cart_force_sn: tuple[float, float] | None = None,
-        ) -> tuple[Any, Any, Any]:
-            data.qpos[:] = qpos
-            mujoco.mj_forward(model, data)
-            return static_zmp_from_state(
-                hand_x, hand_force_scale, cart_force_sn
-            )
-
-        def foot_contact_distribution(_zmp_y: float) -> dict[str, tuple[float, float]]:
+        def foot_contact_distribution() -> dict[str, tuple[float, float]]:
             # Select one fixed member of the double-support wrench family.  A
             # load-dependent split makes the inverse-statics map non-affine and
             # prevents exact online payload compensation.
@@ -1053,7 +1046,6 @@ def _solve_library(
 
         def required_joint_torque(
             qpos: Any,
-            hand_x: float,
             hand_force_scale: float = 1.0,
             *,
             state_is_current: bool = False,
@@ -1083,10 +1075,9 @@ def _solve_library(
                 )
 
             zmp, _, reaction = static_zmp_from_state(
-                hand_x, hand_force_scale, cart_force_sn
+                hand_force_scale, cart_force_sn
             )
-            zmp_y = float(zmp[1])
-            foot_contacts = foot_contact_distribution(zmp_y)
+            foot_contacts = foot_contact_distribution()
             for side in ("left", "right"):
                 foot_id = bodies[f"{side}_ankle_roll_link"]
                 fraction, contact_y = foot_contacts[side]
@@ -1146,31 +1137,26 @@ def _solve_library(
 
         def static_torque_basis(
             qpos: Any,
-            hand_x: float,
             *,
             state_is_current: bool = False,
         ) -> tuple[Any, Any, Any, Any]:
             tau_unloaded = required_joint_torque(
                 qpos,
-                hand_x,
                 state_is_current=state_is_current,
                 cart_force_sn=(0.0, 0.0),
             )[0]
             tau_tangent = required_joint_torque(
                 qpos,
-                hand_x,
                 state_is_current=True,
                 cart_force_sn=(1.0, 0.0),
             )[0]
             tau_normal = required_joint_torque(
                 qpos,
-                hand_x,
                 state_is_current=True,
                 cart_force_sn=(0.0, 1.0),
             )[0]
             tau_tangent_difference = required_joint_torque(
                 qpos,
-                hand_x,
                 state_is_current=True,
                 cart_force_sn=(0.0, 0.0),
                 cart_tangent_difference=1.0,
@@ -1185,7 +1171,7 @@ def _solve_library(
         def support_wrench_ratios(
             support_torque: Any, reaction: Any, zmp: Any
         ) -> tuple[float, Any]:
-            contacts = foot_contact_distribution(float(zmp[1]))
+            contacts = foot_contact_distribution()
             sides = ("left", "right")
             fractions = np.asarray([contacts[side][0] for side in sides])
             forces = fractions[:, None] * reaction[None, :]
@@ -1214,7 +1200,6 @@ def _solve_library(
 
         def evaluate_static_cases(
             qpos: Any,
-            hand_x: float,
             foot_x: float,
             *,
             state_is_current: bool = False,
@@ -1234,12 +1219,11 @@ def _solve_library(
                 required, root_components, support_torque, raw_root_components = (
                     required_joint_torque(
                         qpos,
-                        hand_x,
                         scale,
                         state_is_current=True,
                     )
                 )
-                zmp, com, reaction = static_zmp_from_state(hand_x, scale)
+                zmp, com, reaction = static_zmp_from_state(scale)
                 support_ratio, support_components = support_wrench_ratios(
                     support_torque, reaction, zmp
                 )
@@ -1464,18 +1448,20 @@ def _solve_library(
                 )
             )
 
-            static_cases = evaluate_static_cases(
-                qpos, hand_x, foot_x, state_is_current=True
-            )
+            static_cases = evaluate_static_cases(qpos, foot_x, state_is_current=True)
             nominal_static = static_cases["nominal"]
             zmp = nominal_static["zmp"]
             com = nominal_static["com"]
             support_center = foot_x + args.foot_center_offset_x
             values.append(args.zmp_center_weight * (zmp[0] - support_center) / 0.02)
             values.append(args.zmp_center_weight * zmp[1] / 0.02)
+            zmp_optimization_target = _zmp_optimization_target(
+                args.minimum_zmp_margin,
+                args.zmp_optimization_reserve_fraction,
+            )
             for static_case in static_cases["cases"]:
                 margin_deficit = max(
-                    args.minimum_zmp_margin - float(static_case["zmp_margin"]),
+                    zmp_optimization_target - float(static_case["zmp_margin"]),
                     0.0,
                 )
                 values.append(
@@ -1484,7 +1470,6 @@ def _solve_library(
                     / max(args.minimum_zmp_margin, 1.0e-6)
                 )
             torso_rotation = data.xmat[bodies["torso_link"]].reshape(3, 3)
-            fat2_angle = fat2_target_angle(com, float(hand_x), float(foot_x))
             reset_torso_angle = reset_torso_target_angle(
                 com, float(hand_x), float(foot_x)
             )
@@ -1773,7 +1758,6 @@ def _solve_library(
             candidate_foot_x = float(candidate.x[FOOT_X_INDEX])
             candidate_static = evaluate_static_cases(
                 candidate_qpos,
-                float(candidate.x[HAND_X_INDEX]),
                 candidate_foot_x,
             )
             candidate_nominal_static = candidate_static["nominal"]
@@ -1785,7 +1769,6 @@ def _solve_library(
                 candidate_tau_per_tangent_difference,
             ) = static_torque_basis(
                 candidate_qpos,
-                float(candidate.x[HAND_X_INDEX]),
                 state_is_current=True,
             )
             candidate_basis_required = (
@@ -1804,11 +1787,6 @@ def _solve_library(
                 raise RuntimeError(
                     "static torque basis does not reconstruct the nominal load"
                 )
-            candidate_root_components = candidate_nominal_static["root_components"]
-            candidate_support_torque = candidate_nominal_static["support_torque"]
-            candidate_raw_root_components = candidate_nominal_static[
-                "raw_root_components"
-            ]
             candidate_torque_ratio = candidate_static["torque_ratio"]
             candidate_lower_ratio = candidate_static["lower_torque_ratio"]
             candidate_waist_ratio = candidate_static["waist_torque_ratio"]
@@ -1829,9 +1807,7 @@ def _solve_library(
                     candidate_q_ref_unloaded, joint_lower, joint_upper, np
                 ),
             )
-            candidate_zmp = candidate_nominal_static["zmp"]
             candidate_com = candidate_nominal_static["com"]
-            candidate_reaction = candidate_nominal_static["reaction"]
             candidate_zmp_margin = candidate_static["zmp_margin"]
             candidate_friction_ratio = candidate_static["friction_ratio"]
             candidate_support_torque_ratio = candidate_static["support_wrench_ratio"]
@@ -2126,11 +2102,10 @@ def _solve_library(
             / args.hard_weight
         )
         foot_x = float(result.x[-1])
-        static_cases = evaluate_static_cases(qpos, float(result.x[-2]), foot_x)
+        static_cases = evaluate_static_cases(qpos, foot_x)
         nominal_static = static_cases["nominal"]
         zmp = nominal_static["zmp"]
         com = nominal_static["com"]
-        reaction = nominal_static["reaction"]
         zmp_margin = static_cases["zmp_margin"]
         friction_ratio = static_cases["friction_ratio"]
         joint_margin = _minimum_joint_limit_margin(
@@ -2144,7 +2119,6 @@ def _solve_library(
             tau_per_tangent_difference,
         ) = static_torque_basis(
             qpos,
-            float(result.x[-2]),
             state_is_current=True,
         )
         basis_required_torque = (
@@ -2856,6 +2830,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "load case, including the unloaded reset endpoint."
         ),
     )
+    parser.add_argument(
+        "--zmp-optimization-reserve-fraction",
+        type=float,
+        default=DEFAULT_ZMP_OPTIMIZATION_RESERVE_FRACTION,
+        help=(
+            "Relative reserve above --minimum-zmp-margin used only by the "
+            "least-squares objective; the hard acceptance threshold is unchanged."
+        ),
+    )
     parser.add_argument("--world-upright-weight", type=float, default=0.0)
     parser.add_argument("--fat2-torso-weight", type=float, default=20.0)
     parser.add_argument(
@@ -3097,6 +3080,11 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("hand-x weight must be positive and foot-x weight non-negative")
     if not math.isfinite(args.zmp_margin_weight) or args.zmp_margin_weight <= 0.0:
         raise ValueError("--zmp-margin-weight must be finite and positive")
+    if (
+        not math.isfinite(args.zmp_optimization_reserve_fraction)
+        or not 0.0 <= args.zmp_optimization_reserve_fraction < 1.0
+    ):
+        raise ValueError("--zmp-optimization-reserve-fraction must lie in [0, 1)")
     if not math.isfinite(args.hand_x_slope_span) or args.hand_x_slope_span < 0.0:
         raise ValueError("--hand-x-slope-span must be finite and non-negative")
     if args.dex_forward_weight <= 0.0:
@@ -3337,7 +3325,6 @@ def _orientation_metrics(env) -> dict[str, torch.Tensor]:
 
 
 def _initial_alignment(env) -> dict[str, torch.Tensor]:
-    robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     origins = env.scene.terrain.env_origins
     grasp = _grasp_positions(env)
@@ -4524,6 +4511,9 @@ def _candidate_contract(args: argparse.Namespace) -> dict[str, Any]:
         "validate_existing",
         "verbose",
         "xr",
+        # This changes only the soft feasibility reserve. Cached candidates have
+        # already passed the unchanged hard ZMP threshold and remain reusable.
+        "zmp_optimization_reserve_fraction",
     }
 
     def json_value(value: Any) -> Any:
@@ -5292,10 +5282,26 @@ def main() -> int:
     _validate_arguments(args)
 
     if args.static_only:
-        if args.validate_existing is not None or args.reuse_candidates:
-            raise ValueError("--static-only cannot be combined with validation/reuse")
-        print("Stage A diagnostic: solving static candidates only", flush=True)
-        baseline_library, _diagnostics, _candidate_bank = _solve_library(args)
+        if args.validate_existing is not None:
+            raise ValueError("--static-only cannot be combined with --validate-existing")
+        if args.reuse_candidates:
+            completed_poses, _diagnostics, _candidate_bank = _load_candidate_progress(
+                args.candidate_output,
+                args.full_pose_multistarts,
+                args.root_height,
+                args,
+            )
+            print(
+                "Stage A diagnostic: resuming "
+                f"{len(completed_poses)}/{len(SLOPE_GRADIENTS)} cached slopes",
+                flush=True,
+            )
+            baseline_library, _diagnostics, _candidate_bank = _solve_library(
+                args, resume_candidate_output=args.candidate_output
+            )
+        else:
+            print("Stage A diagnostic: solving static candidates only", flush=True)
+            baseline_library, _diagnostics, _candidate_bank = _solve_library(args)
         _write_json_yaml(args.output, baseline_library.to_mapping())
         print(f"uncertified static library: {args.output.resolve()}", flush=True)
         return 0

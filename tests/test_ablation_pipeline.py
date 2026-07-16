@@ -18,13 +18,11 @@ import run_ablation_pipeline as pipeline
 def test_run_command_streams_output_and_keeps_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cpu = min(os.sched_getaffinity(0))
     log_path = tmp_path / "stream.log"
 
     pipeline._run_command(
         [sys.executable, "-c", "print('live-output', flush=True)"],
         environment=os.environ,
-        cpu_set=(cpu,),
         log_path=log_path,
         label="stream-test",
     )

@@ -51,6 +51,7 @@ from solve_reset_poses import (  # noqa: E402
     _write_candidate_progress,
     _worst_case_torque_ratios,
     _write_text_atomic,
+    _zmp_optimization_target,
     main,
 )
 from g1_rickshaw_lab.static_equilibrium import solve_fixed_contact_statics  # noqa: E402
@@ -162,6 +163,16 @@ def test_stage_a_extended_uphill_continuation_uses_positive_parent() -> None:
     assert plan[-0.08] == -0.07
     gradients = [gradient for gradient, _parent in ordered_plan]
     assert gradients.index(0.10) < gradients.index(-0.01)
+
+
+def test_zmp_optimization_reserve_does_not_relax_hard_margin() -> None:
+    args = _build_parser().parse_args([])
+
+    assert args.minimum_zmp_margin == pytest.approx(0.02)
+    assert args.zmp_optimization_reserve_fraction == pytest.approx(0.10)
+    assert _zmp_optimization_target(
+        args.minimum_zmp_margin, args.zmp_optimization_reserve_fraction
+    ) == pytest.approx(0.022)
 
 
 def test_partial_candidate_cache_round_trips_completed_slopes(
