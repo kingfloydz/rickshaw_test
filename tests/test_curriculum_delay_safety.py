@@ -183,6 +183,7 @@ def test_motor_randomization_updates_explicit_model_without_enabling_solver_pd()
     env = SimpleNamespace(
         scene={"robot": robot},
         policy_joint_ids=[0, 1],
+        num_envs=2,
         device="cpu",
     )
     env_ids = torch.tensor([0, 1], dtype=torch.long)

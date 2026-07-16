@@ -776,7 +776,7 @@ actor input  = current + z_star
 critic input = current + z_star + privileged
 ```
 
-全部环境始终使用同一个 `TRAINING` 分布，总计最多 `6000` iterations。这里没有 off-policy replay buffer。每 200 iterations 在固定 validation seeds 上评估并保存 checkpoint；连续 10 次评估无提升则停止。19 个坡度中的每个坡度至少评估 100 episodes。
+全部环境始终使用同一个 `TRAINING` 分布，总计最多 `6000` iterations。这里没有 off-policy replay buffer。每 200 iterations 在固定 validation seeds 上评估并保存 checkpoint；连续 5 次评估无提升则停止。19 个坡度中的每个坡度至少评估 100 episodes。
 
 ### 10.2 S1 On-policy Student Distillation
 
@@ -800,11 +800,11 @@ loss = (
 )
 ```
 
-Student actor 从 teacher actor 权重初始化。Adam：context learning rate `3e-4`、actor learning rate `1e-4`、batch `65536`、mini-batch `8192`、gradient clip `1.0`，最多 `2000` iterations。模型选择依据固定验证集的 teacher action KL 与 task return；latent MSE 只用于诊断。
+Student actor 从 teacher actor 权重初始化。Adam：context learning rate `3e-4`、actor learning rate `1e-4`、batch `65536`、mini-batch `8192`、gradient clip `1.0`，最多 `4000` iterations。每 200 iterations 保存候选并检查固定验证集 action KL，连续 5 次无提升则停止；最终模型仍由候选的 action KL 与固定种子 task return 联合选择。latent MSE 只用于诊断。
 
 ### 10.3 S2 Student PPO Fine-tune
 
-用 `z_hat` 替换 `z_star`，critic 继续读取 privileged group。Context encoder 不冻结：context learning rate `1e-4`，actor/critic learning rate `3e-4`，继续 PPO `2000` iterations。S2 不再保留 distillation loss，防止 student 被 teacher 在不可辨识状态下的 latent 表示限制。
+用 `z_hat` 替换 `z_star`，critic 继续读取 privileged group。Context encoder 不冻结：context learning rate `1e-4`，actor/critic learning rate `3e-4`，最多继续 PPO `2000` iterations。每 200 iterations 在固定 validation seeds 上评估并保存 checkpoint，连续 5 次无提升则停止。S2 不再保留 distillation loss，防止 student 被 teacher 在不可辨识状态下的 latent 表示限制。
 
 ### 10.4 PPO 配置
 
@@ -972,6 +972,7 @@ gym.register(
 
 ```bash
 PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
+# 可选离线诊断；输出报告不参与训练 gate 或 checkpoint lineage。
 "$PYTHON" scripts/inspect_assets.py --num_envs 1 --headless \
   --output outputs/validation/asset_inspection.json
 "$PYTHON" scripts/solve_reset_poses.py --headless --steps 1000 \
@@ -984,9 +985,9 @@ PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
 "$PYTHON" scripts/play_student.py --task Isaac-G1-Rickshaw-Directional-Slope-Play-v0 --checkpoint <checkpoint>
 ```
 
-当前工作区没有通过上述固定点认证：正式 alignment 与 feasibility report
-缺失，现有 authority 和 dynamics report 已过期。完整重签顺序及关键产物见
-`RUN_COMMANDS.md`；运行时 gate 通过前不得开始训练。
+资产检查、alignment、feasibility 与 dynamics 报告仅用于离线诊断；缺失或过期
+不阻止训练、续训或消融汇总。训练入口仍会直接加载实际配置并校验 checkpoint
+provenance，具体命令见 `RUN_COMMANDS.md`。
 
 Play 配置只关闭 observation corruption、push 和 curriculum；保留 command limiter、物理 `c_rr`、action filter、61 帧 history、rickshaw pose target 和全部安全检查。导出包只包含 observation scale、TCN、student actor、action filter、关节顺序和安全参数；teacher、critic、privileged group 和 auxiliary heads不得导出。
 
@@ -1002,7 +1003,7 @@ Play 配置只关闭 observation corruption、push 和 curriculum；保留 comma
 8. TCN 输入严格为 `[N,61,96]`，感受野单元测试为 61；扰动 history 之外或 future frame 不改变 `z_hat`。
 9. S0/S1/S2 在固定 19 坡度、固定 randomization seeds 上报告相同指标；除总体和逐坡结果外，必须完整报告 standing/accelerating/cruising/decelerating 和 19 坡度×命令阶段。S1 以 action KL 和 return 选模，S2 的 `TRAINING` return 不低于 S1，latent MSE 不作为通过条件。
 10. `z_hat` 置零或跨环境 shuffle 后，`TRAINING` return 应显著下降；若无下降，说明 context 被 actor 忽略，应缩减或删除该分支，而不是扩大 latent。
-11. 完成 `FAT2 weight=0/0.1`、rollout `24/48/64` 和 latent dim `8/16/24` 三组消融；矩阵共 8 项、对应 6 个唯一训练配置。物理滚阻在全部配置中始终开启并保留真实轮心切向阻力实现，不再作为消融因素；只保留改善独立验证集而非训练 return 的配置。
+11. 完成 `FAT2 weight=0/0.1/0.2`、rollout `24/48/64` 和 latent dim `8/16/24/32` 三组消融；矩阵共 10 项、对应 8 个唯一训练配置。物理滚阻在全部配置中始终开启并保留真实轮心切向阻力实现，不再作为消融因素；只保留改善独立验证集而非训练 return 的配置。
 
 必须记录：speed RMSE、fall rate、termination cause histogram、overspeed rate、`e_y/e_psi` RMS/max、rickshaw pitch/hitch-height error、双轮接触率和 normal-force percentile、foot slip、processed action rate/jerk、power、D6 residual/force/torque/asymmetry、解析 `T_s/T_n` 瞬时误差、FAT2 窗口一致率及窗口误差、ZMP margin、arm/leg torque margin、teacher-student action KL、`z_hat` zero/shuffle return drop 和 curriculum level 分布；上述样本指标同时按命令阶段、cross-case 及其与坡度的组合分层。
 

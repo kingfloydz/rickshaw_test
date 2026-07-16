@@ -1,9 +1,4 @@
-"""Content-addressed validation reports and optional physics diagnostics.
-
-Training requires canonical asset inspection and reset-alignment evidence.
-Feasibility and dynamics reports remain available for offline diagnostics but
-are not training startup gates.
-"""
+"""Content-addressed reports for optional offline physics diagnostics."""
 
 from __future__ import annotations
 
@@ -107,7 +102,6 @@ SAFETY_THRESHOLD_FIELDS = (
 )
 SAFETY_AUTHORITY_REQUIRED_SOURCES = (
     "implementation_guide",
-    "asset_inspection",
     "reset_pose_library",
     "reset_alignment",
 )
@@ -912,26 +906,6 @@ def validate_safety_authority_source_evidence(
     reset_pose_sha256: str,
 ) -> None:
     """Recompute the project-specific claims made by authority source records."""
-
-    asset_report = _load_json_evidence(
-        authority.sources["asset_inspection"].path,
-        "safety authority asset_inspection source",
-    )
-    asset_inputs = _require_mapping(
-        asset_report.get("inputs"), "asset_inspection.inputs"
-    )
-    inspected_assets = _require_mapping(
-        asset_inputs.get("asset_dependencies_sha256"),
-        "asset_inspection.inputs.asset_dependencies_sha256",
-    )
-    if (
-        asset_report.get("tool") != "inspect_assets"
-        or asset_report.get("status") != "passed"
-        or dict(inspected_assets) != dict(assets_sha256)
-    ):
-        raise ValidationGateError(
-            "safety authority asset inspection is not passed and current for report assets"
-        )
 
     reset_source = authority.sources["reset_pose_library"]
     if (

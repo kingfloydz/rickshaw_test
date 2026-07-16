@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import hashlib
 import json
 import os
 from typing import Any
@@ -11,6 +10,9 @@ from typing import Any
 from g1_rickshaw_lab.training_contract import (
     TRAINING_CONFIGURATION_KEY,
     TRAINING_CONFIGURATION_SCHEMA_VERSION,
+    finalize_training_configuration,
+    training_configuration_sha256,
+    validate_training_configuration as _validate_training_configuration,
 )
 
 TRAINING_CONFIGURATION_ENV = "G1_RICKSHAW_TRAINING_CONFIGURATION"
@@ -37,107 +39,21 @@ _FORMAL_OPERATIONAL_OPTIONS = {
 }
 
 
-def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-
-
-def training_configuration_sha256(value: Mapping[str, Any]) -> str:
-    """Hash a training record while excluding its self-describing digest."""
-
-    payload = dict(value)
-    payload.pop("content_sha256", None)
-    return hashlib.sha256(_canonical_json(payload)).hexdigest()
-
-
-def finalize_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a JSON-only, content-addressed training configuration."""
-
-    payload = dict(value)
-    payload.pop("content_sha256", None)
-    if payload.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
-        raise ValueError("training configuration has an unsupported schema_version")
-    if not isinstance(payload.get("stage"), str) or not payload["stage"]:
-        raise ValueError("training configuration requires a stage")
-    if type(payload.get("formal")) is not bool:
-        raise ValueError("training configuration formal must be boolean")
-    # The round trip rejects tensors, Path objects, NaN/Inf, and other unstable values.
-    normalized = json.loads(_canonical_json(payload).decode("ascii"))
-    normalized["content_sha256"] = training_configuration_sha256(normalized)
-    return normalized
-
-
 def validate_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("training configuration must be a mapping")
-    expected = value.get("content_sha256")
-    if not isinstance(expected, str) or len(expected) != 64:
-        raise ValueError("training configuration is missing content_sha256")
-    try:
-        int(expected, 16)
-    except ValueError as exc:
-        raise ValueError("training configuration content_sha256 is malformed") from exc
-    if training_configuration_sha256(value) != expected.lower():
-        raise ValueError("training configuration content_sha256 mismatch")
-    required = {
-        "schema_version",
-        "stage",
-        "formal",
-        "task",
-        "num_envs",
-        "seed",
-        "max_iterations",
-        "argv",
-        "hydra_overrides",
-        "guide_parameters",
-        "resolved_parameters",
-        "actor_initialized_from_teacher",
-        "stage_coverage",
-        "ablation_values",
-        "inputs_sha256",
-        "content_sha256",
-    }
-    if set(value) != required:
-        raise ValueError("training configuration has missing or unknown fields")
-    if not isinstance(value.get("argv"), list) or not all(
-        isinstance(item, str) for item in value["argv"]
-    ):
-        raise ValueError("training configuration argv must be a string list")
-    if not isinstance(value.get("hydra_overrides"), list) or not all(
-        isinstance(item, str) for item in value["hydra_overrides"]
-    ):
-        raise ValueError("training configuration hydra_overrides must be a string list")
-    if not isinstance(value.get("guide_parameters"), Mapping):
-        raise ValueError("training configuration guide_parameters must be a mapping")
-    if not isinstance(value.get("resolved_parameters"), Mapping):
-        raise ValueError("training configuration resolved_parameters must be a mapping")
-    num_envs = value.get("num_envs")
-    if num_envs is not None and (
-        isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0
-    ):
-        raise ValueError("training configuration num_envs must be a positive integer or null")
-    ablations = value.get("ablation_values")
-    if not isinstance(ablations, Mapping) or set(ablations) != {
-        "fat2_weight",
-        "rollout_steps",
-        "latent_dim",
-    }:
-        raise ValueError(
-            "training configuration ablation_values must contain the exact three variants"
-        )
-    return finalize_training_configuration(value)
+    return _validate_training_configuration(value, require_formal=False)
 
 
 def publish_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
     """Publish the canonical mapping for the runner checkpoint hook."""
 
     normalized = validate_training_configuration(value)
-    os.environ[TRAINING_CONFIGURATION_ENV] = _canonical_json(normalized).decode("ascii")
+    os.environ[TRAINING_CONFIGURATION_ENV] = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     return normalized
 
 

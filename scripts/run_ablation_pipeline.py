@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import queue
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -48,6 +47,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     load_policy_ablation_artifact,
     load_reward_calibration_report,
     runtime_config_files,
+    training_checkpoint_complete,
     validate_guide_training_configuration,
     validate_training_throughput,
 )
@@ -56,10 +56,6 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
     write_yaml_atomic,
 )
 
-from _training_validation import validate_training_assets
-
-
-DEFAULT_VALIDATION_DIR = REPOSITORY_ROOT / "outputs" / "validation"
 DEFAULT_OUTPUT_DIR = REPOSITORY_ROOT / "outputs" / "ablation_pipeline"
 DEFAULT_FEASIBILITY = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
 DEFAULT_RESET_POSES = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
@@ -93,10 +89,12 @@ class GpuInfo:
 UNIQUE_RUNS = (
     RunSpec("baseline", 0.1, 48, 16),
     RunSpec("fat2_weight_0.0", 0.0, 48, 16),
+    RunSpec("fat2_weight_0.2", 0.2, 48, 16),
     RunSpec("rollout_steps_24", 0.1, 24, 16),
     RunSpec("rollout_steps_64", 0.1, 64, 16),
     RunSpec("latent_dim_8", 0.1, 48, 8),
     RunSpec("latent_dim_24", 0.1, 48, 24),
+    RunSpec("latent_dim_32", 0.1, 48, 32),
 )
 RUNS_BY_NAME = {run.name: run for run in UNIQUE_RUNS}
 
@@ -136,10 +134,12 @@ def _matrix_run_specs() -> list[tuple[str, str, Any, str]]:
     result: list[tuple[str, str, Any, str]] = []
     non_default_runs = {
         ("fat2_weight", 0.0): "fat2_weight_0.0",
+        ("fat2_weight", 0.2): "fat2_weight_0.2",
         ("rollout_steps", 24): "rollout_steps_24",
         ("rollout_steps", 64): "rollout_steps_64",
         ("latent_dim", 8): "latent_dim_8",
         ("latent_dim", 24): "latent_dim_24",
+        ("latent_dim", 32): "latent_dim_32",
     }
     for group, values in ABLATION_VARIANTS.items():
         for value in values:
@@ -329,6 +329,7 @@ def _resolve_checkpoint(
     stage: str,
     expected_values: Mapping[str, Any],
     minimum_iterations: int = 0,
+    require_complete: bool = False,
 ) -> Path | None:
     if not directory.is_dir():
         return None
@@ -343,9 +344,15 @@ def _resolve_checkpoint(
             expected_values=expected_values,
         )
         if match is not None:
-            if match[0][0] >= minimum_iterations:
+            complete = not require_complete or stage not in {
+                "s0_teacher",
+                "s2_student_ppo",
+            }
+            if not complete:
+                complete = training_checkpoint_complete(_torch_load(path), stage=stage)
+            if match[0][0] >= minimum_iterations and complete:
                 matches.append(match)
-            target_iterations = GUIDE_MAX_ITERATIONS.get(stage, minimum_iterations)
+            target_iterations = GUIDE_MAX_ITERATIONS[stage]
             if match[0][0] >= max(minimum_iterations, target_iterations):
                 break
     return max(matches, default=None, key=lambda item: item[0])[1] if matches else None
@@ -405,24 +412,10 @@ def _write_state(run_dir: Path, spec: RunSpec, artifacts: Mapping[str, Path]) ->
     write_json_atomic(_state_path(run_dir), payload)
 
 
-def _copy_validation_gate(base_dir: Path, run_dir: Path) -> Path:
-    destination = run_dir / "validation"
-    destination.mkdir(parents=True, exist_ok=True)
-    for filename in ("asset_inspection.json",):
-        source = base_dir / filename
-        if not source.is_file():
-            raise FileNotFoundError(f"required validation gate does not exist: {source}")
-        target = destination / filename
-        if not target.is_file() or sha256_file(target) != sha256_file(source):
-            shutil.copy2(source, target)
-    return destination
-
-
 def _pipeline_commands(
     spec: RunSpec,
     *,
     run_dir: Path,
-    validation_dir: Path,
 ) -> dict[str, list[str]]:
     teacher_dir = run_dir / "teacher"
     validation_command = [
@@ -443,8 +436,6 @@ def _pipeline_commands(
         os.fspath(REPOSITORY_ROOT / "scripts/train_teacher.py"),
         "--experiment-dir",
         os.fspath(teacher_dir),
-        "--validation-dir",
-        os.fspath(validation_dir),
         "--fat2-weight",
         str(spec.fat2_weight),
         "--rollout-steps",
@@ -469,7 +460,6 @@ def _run_one_pipeline(
 ) -> None:
     run_dir = args.output_dir / "runs" / spec.name
     run_dir.mkdir(parents=True, exist_ok=True)
-    validation_dir = _copy_validation_gate(args.validation_dir, run_dir)
     environment = _thread_environment(gpu.index)
     environment.update(
         {
@@ -480,12 +470,10 @@ def _run_one_pipeline(
     commands = _pipeline_commands(
         spec,
         run_dir=run_dir,
-        validation_dir=validation_dir,
     )
     environment["G1_RICKSHAW_S0_VALIDATION_COMMAND"] = shlex.join(
         commands["teacher_validation"]
     )
-    environment["G1_RICKSHAW_VALIDATION_DIR"] = os.fspath(validation_dir)
     label = f"{spec.name}/gpu{gpu.index}"
     logs = run_dir / "logs"
 
@@ -494,6 +482,7 @@ def _run_one_pipeline(
         teacher_dir,
         stage="s0_teacher",
         expected_values=spec.ablation_values,
+        require_complete=True,
     )
     if teacher is None:
         partial = _resolve_checkpoint(
@@ -517,6 +506,7 @@ def _run_one_pipeline(
             teacher_dir,
             stage="s0_teacher",
             expected_values=spec.ablation_values,
+            require_complete=True,
         )
     if teacher is None:
         raise RuntimeError(f"{label} produced no complete S0 checkpoint")
@@ -608,7 +598,7 @@ def _run_one_pipeline(
         s2_dir,
         stage="s2_student_ppo",
         expected_values=spec.ablation_values,
-        minimum_iterations=GUIDE_MAX_ITERATIONS["s2_student_ppo"],
+        require_complete=True,
     )
     if s2_checkpoint is None:
         partial = _resolve_checkpoint(
@@ -625,8 +615,6 @@ def _run_one_pipeline(
             os.fspath(s1_checkpoint),
             "--bootstrap-dir",
             os.fspath(s2_dir),
-            "--validation-dir",
-            os.fspath(validation_dir),
             "--device",
             "cuda:0",
             "--headless",
@@ -644,7 +632,7 @@ def _run_one_pipeline(
             s2_dir,
             stage="s2_student_ppo",
             expected_values=spec.ablation_values,
-            minimum_iterations=GUIDE_MAX_ITERATIONS["s2_student_ppo"],
+            require_complete=True,
         )
     if s2_checkpoint is None:
         raise RuntimeError(f"{label} produced no complete S2 checkpoint")
@@ -699,7 +687,14 @@ def _load_completed_run(output_dir: Path, spec: RunSpec) -> dict[str, Path] | No
         if (
             teacher_match is None
             or s2_match is None
-            or s2_match[0][0] < GUIDE_MAX_ITERATIONS["s2_student_ppo"]
+            or not training_checkpoint_complete(
+                _torch_load(artifacts["teacher_checkpoint"]),
+                stage="s0_teacher",
+            )
+            or not training_checkpoint_complete(
+                _torch_load(artifacts["s2_checkpoint"]),
+                stage="s2_student_ppo",
+            )
             or not _valid_s1_checkpoint(artifacts["s1_checkpoint"], spec)
             or not _valid_s1_report(
                 artifacts["s1_baseline_report"], artifacts["s1_checkpoint"]
@@ -791,7 +786,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--final-thresholds", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--validation-dir", type=Path, default=DEFAULT_VALIDATION_DIR)
     parser.add_argument("--feasibility", type=Path, default=DEFAULT_FEASIBILITY)
     parser.add_argument("--reset-poses", type=Path, default=DEFAULT_RESET_POSES)
     parser.add_argument("--gpus", type=int, nargs="+", default=None)
@@ -800,7 +794,7 @@ def _parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=tuple(RUNS_BY_NAME),
         default=None,
-        help="Unique configurations to train; all six are required for a formal matrix.",
+        help="Unique configurations to train; all eight are required for a formal matrix.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -815,7 +809,7 @@ def _parser() -> argparse.ArgumentParser:
         "--finalize-only",
         action="store_true",
         help=(
-            "Train nothing; verify all six shared runs, assemble the matrix, "
+            "Train nothing; verify all eight shared runs, assemble the matrix, "
             "and perform the requested postprocessing."
         ),
     )
@@ -843,7 +837,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _validate_inputs(args: argparse.Namespace) -> None:
     args.output_dir = args.output_dir.resolve()
-    args.validation_dir = args.validation_dir.resolve()
     args.feasibility = args.feasibility.resolve()
     args.reset_poses = args.reset_poses.resolve()
     args.final_thresholds = args.final_thresholds.resolve()
@@ -856,7 +849,6 @@ def _validate_inputs(args: argparse.Namespace) -> None:
             raise FileNotFoundError(f"{label} does not exist: {path}")
     final = load_thresholds(args.final_thresholds)
     validate_final_acceptance_thresholds(final, curriculum_stages=("training",))
-    validate_training_assets(args.validation_dir)
     if args.worker_only and args.runs is None:
         raise ValueError("--worker-only requires an explicit --runs selection")
     if args.finalize_only and args.runs is not None:
@@ -1033,8 +1025,6 @@ def main(argv: list[str] | None = None) -> int:
             os.fspath(results_dir),
             "--selected-run-id",
             args.selected_run_id,
-            "--validation-dir",
-            os.fspath(args.output_dir / "runs" / selected_run_name / "validation"),
             "--video-length",
             str(args.video_length),
             "--video-num-envs",

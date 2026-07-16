@@ -22,6 +22,8 @@ from g1_rickshaw_lab.policy_evaluation import (
     ABLATION_VARIANTS,
     FORMAL_EVALUATION_COMMAND_PROTOCOL,
     FORMAL_EVALUATION_CROSS_CASE_PROTOCOL,
+    POLICY_ABLATION_MANIFEST_SCHEMA_VERSION,
+    POLICY_ABLATION_MATRIX_SCHEMA_VERSION,
 )
 from g1_rickshaw_lab.provenance import sha256_file
 
@@ -88,7 +90,11 @@ def test_loader_reparses_matrix_yaml_instead_of_trusting_manifest_runs(
         "thresholds": "thresholds.yaml",
     }
     (tmp_path / "thresholds.yaml").write_text("thresholds\n", encoding="utf-8")
-    matrix = {"schema_version": 3, "defaults": defaults, "runs": _matrix_runs()}
+    matrix = {
+        "schema_version": POLICY_ABLATION_MATRIX_SCHEMA_VERSION,
+        "defaults": defaults,
+        "runs": _matrix_runs(),
+    }
     matrix_path = tmp_path / "matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False), encoding="utf-8")
     matrix_digest = sha256_file(matrix_path)
@@ -222,7 +228,7 @@ def test_loader_reparses_matrix_yaml_instead_of_trusting_manifest_runs(
 
     selected = next(run for run in bindings if run["id"] == "fat2_weight_0.1")
     manifest = {
-        "schema_version": 3,
+        "schema_version": POLICY_ABLATION_MANIFEST_SCHEMA_VERSION,
         "report_type": "g1_rickshaw_policy_ablation_matrix",
         "status": "passed",
         "created_utc": "2026-07-13T00:00:00Z",

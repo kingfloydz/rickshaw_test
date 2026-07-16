@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -31,31 +32,51 @@ def test_run_command_streams_output_and_keeps_log(
     assert "live-output" in log_path.read_text(encoding="utf-8")
 
 
-def test_copy_validation_gate_copies_only_current_training_evidence(
-    tmp_path: Path,
-) -> None:
-    base_dir = tmp_path / "canonical_validation"
-    base_dir.mkdir()
-    (base_dir / "asset_inspection.json").write_text("asset\n", encoding="utf-8")
-    (base_dir / "feasibility_report.json").write_text("obsolete\n", encoding="utf-8")
-    (base_dir / "dynamics_report.json").write_text("obsolete\n", encoding="utf-8")
-
-    destination = pipeline._copy_validation_gate(base_dir, tmp_path / "run")
-
-    assert (destination / "asset_inspection.json").read_text(encoding="utf-8") == "asset\n"
-    assert not (destination / "reset_alignment_1000.json").exists()
-    assert not (destination / "feasibility_report.json").exists()
-    assert not (destination / "dynamics_report.json").exists()
-
-
 def test_unique_training_runs_expand_to_exact_formal_matrix() -> None:
-    assert len(pipeline.UNIQUE_RUNS) == 6
+    assert len(pipeline.UNIQUE_RUNS) == 8
     matrix_runs = pipeline._matrix_run_specs()
-    assert len(matrix_runs) == 8
-    assert len({identifier for identifier, *_ in matrix_runs}) == 8
+    assert len(matrix_runs) == 10
+    assert len({identifier for identifier, *_ in matrix_runs}) == 10
     baseline_entries = [entry for entry in matrix_runs if entry[3] == "baseline"]
     assert len(baseline_entries) == 3
-    assert ("latent_dim_24", "latent_dim", 24, "latent_dim_24") in matrix_runs
+    assert ("fat2_weight_0.2", "fat2_weight", 0.2, "fat2_weight_0.2") in matrix_runs
+    assert ("latent_dim_32", "latent_dim", 32, "latent_dim_32") in matrix_runs
+
+
+def test_single_node_eight_gpu_plan_runs_all_configs_then_postprocesses(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requested_gpus = list(range(8))
+    monkeypatch.setattr(pipeline, "_validate_inputs", lambda _args: None)
+
+    def select_gpus(requested: list[int] | None) -> list[pipeline.GpuInfo]:
+        assert requested == requested_gpus
+        return [pipeline.GpuInfo(index, f"GPU {index}", 80_000, 0) for index in requested]
+
+    monkeypatch.setattr(pipeline, "_select_gpus", select_gpus)
+
+    result = pipeline.main(
+        [
+            "--final-thresholds",
+            "config/final_thresholds.yaml",
+            "--output-dir",
+            "outputs/ablation_pipeline",
+            "--gpus",
+            *(str(index) for index in requested_gpus),
+            "--resume",
+            "--skip-video",
+            "--plan-only",
+        ]
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert plan["mode"] == "all"
+    assert plan["runs"] == [spec.name for spec in pipeline.UNIQUE_RUNS]
+    assert [worker["gpu"] for worker in plan["workers"]] == requested_gpus
+    assert plan["postprocess"]["enabled"] is True
+    assert plan["postprocess"]["record_video"] is False
 
 
 def test_shared_storage_modes_require_unambiguous_run_selection() -> None:
@@ -176,17 +197,29 @@ def test_gpu_selection_uses_requested_devices_without_model_constraints(monkeypa
         pipeline._select_gpus([7])
 
 
-def test_teacher_command_binds_all_ablation_values(tmp_path: Path) -> None:
-    spec = pipeline.RUNS_BY_NAME["latent_dim_24"]
+@pytest.mark.parametrize(
+    ("run_name", "fat2_weight", "latent_dim"),
+    (
+        ("fat2_weight_0.2", "0.2", "16"),
+        ("latent_dim_32", "0.1", "32"),
+    ),
+)
+def test_teacher_command_binds_all_ablation_values(
+    tmp_path: Path,
+    run_name: str,
+    fat2_weight: str,
+    latent_dim: str,
+) -> None:
+    spec = pipeline.RUNS_BY_NAME[run_name]
     commands = pipeline._pipeline_commands(
         spec,
         run_dir=tmp_path / spec.name,
-        validation_dir=tmp_path / "validation",
     )
     teacher = commands["teacher"]
-    assert teacher[teacher.index("--latent-dim") + 1] == "24"
+    assert "--validation-dir" not in teacher
+    assert teacher[teacher.index("--latent-dim") + 1] == latent_dim
     assert teacher[teacher.index("--rollout-steps") + 1] == "48"
-    assert teacher[teacher.index("--fat2-weight") + 1] == "0.1"
+    assert teacher[teacher.index("--fat2-weight") + 1] == fat2_weight
 
 
 def test_resolve_checkpoint_skips_config_stale_candidates(

@@ -114,7 +114,7 @@ DEFAULT_MAXIMUM_CONTINUATION_ARM_DELTA = 0.30
 DEFAULT_Q_REF_JOINT_MARGIN = 0.04
 DEFAULT_SOLVER_TOLERANCE = 1.0e-9
 DEFAULT_SOLVER_WORKERS = 20
-DEFAULT_ZMP_OPTIMIZATION_RESERVE_FRACTION = 0.10
+DEFAULT_ZMP_OPTIMIZATION_RESERVE_FRACTION = 0.025
 PIPELINE_WORKER_TOKEN_ENV = "G1_RICKSHAW_RESET_WORKER_TOKEN"
 PIPELINE_WORKER_STAGING_ENV = "G1_RICKSHAW_RESET_WORKER_STAGING"
 PIPELINE_WORKER_PROGRESS_ENV = "G1_RICKSHAW_RESET_WORKER_PROGRESS"
@@ -4489,6 +4489,7 @@ def _candidate_contract(args: argparse.Namespace) -> dict[str, Any]:
         "anim_recording_stop_time",
         "candidate_output",
         "device",
+        "device_explicit",
         "enable_cameras",
         "experience",
         "foot_damping",
@@ -4502,6 +4503,7 @@ def _candidate_contract(args: argparse.Namespace) -> dict[str, Any]:
         "report_output",
         "reuse_candidates",
         "stable_displacement_limit",
+        "static_only",
         "static_arm_preload_limit",
         "static_lower_preload_limit",
         "static_waist_preload_limit",
@@ -4610,9 +4612,20 @@ def _load_candidate_progress(
         raise RuntimeError("candidate output uses an unsupported schema; rerun Stage A")
     stored_contract = mapping.get("candidate_contract")
     current_contract = _candidate_contract(args)
+    stored_arguments = (
+        dict(stored_contract.get("arguments", {}))
+        if isinstance(stored_contract, dict)
+        else None
+    )
+    if stored_arguments is not None:
+        # Schema-3 caches written before these operational/soft-reserve fields
+        # were excluded remain valid because their hard Stage A contract did not
+        # change.
+        stored_arguments.pop("static_only", None)
+        stored_arguments.pop("zmp_optimization_reserve_fraction", None)
     if (
         not isinstance(stored_contract, dict)
-        or stored_contract.get("arguments") != current_contract["arguments"]
+        or stored_arguments != current_contract["arguments"]
         or (
             schema_version >= 3
             and stored_contract.get("configured_slopes")

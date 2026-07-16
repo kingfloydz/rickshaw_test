@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from g1_rickshaw_lab.training_contract import (
+    GUIDE_MAX_ITERATIONS,
+    GUIDE_TRAINING_PARAMETERS,
     ROLLOUT_FORMAL_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
     ROLLOUT_PHYSICS_PARAMETER_NAMES,
     ROLLOUT_STAGE_SEQUENCE,
     SIGNED_SLOPE_LABELS,
     S0FixedSeedValidationState,
+    s2_remaining_learning_iterations,
+    validate_s1_training_completion,
     validate_rollout_stage_coverage,
 )
 
@@ -30,6 +34,65 @@ def test_s0_validation_runs_every_200_iterations() -> None:
     assert not state.should_evaluate(199)
     assert state.should_evaluate(200)
     assert not state.should_evaluate(201)
+
+
+def test_all_training_stages_use_patience_five() -> None:
+    assert GUIDE_MAX_ITERATIONS == {
+        "s0_teacher": 6000,
+        "s1_context_distillation": 4000,
+        "s2_student_ppo": 2000,
+    }
+    for stage in GUIDE_TRAINING_PARAMETERS.values():
+        assert stage["validation_patience"] == 5
+
+
+def test_fixed_seed_validation_stops_after_five_misses() -> None:
+    state = S0FixedSeedValidationState()
+    digest = "a" * 64
+    assert not state.record(
+        iteration=200,
+        stage="training",
+        score=1.0,
+        report_sha256=digest,
+    )
+    for iteration in (400, 600, 800, 1000):
+        assert not state.record(
+            iteration=iteration,
+            stage="training",
+            score=1.0,
+            report_sha256=digest,
+        )
+    assert state.record(
+        iteration=1200,
+        stage="training",
+        score=1.0,
+        report_sha256=digest,
+    )
+
+
+def test_s2_terminal_patience_prevents_resume() -> None:
+    assert s2_remaining_learning_iterations(
+        requested_iterations=2000,
+        completed_iterations=1200,
+        early_stopped=True,
+    ) == 0
+
+
+def test_s1_terminal_patience_is_a_complete_training_run() -> None:
+    validate_s1_training_completion(
+        {
+            "training": {
+                "completed_iterations": 1200,
+                "early_stopped": True,
+                "validation_history": [
+                    {
+                        "iteration": 1200,
+                        "no_improvement_count": 5,
+                    }
+                ],
+            }
+        }
+    )
 
 
 def test_single_training_rollout_manifest_is_accepted() -> None:

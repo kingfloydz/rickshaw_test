@@ -237,21 +237,16 @@ def terrain_normal_velocity_l2(env: Any) -> torch.Tensor:
     return terrain_normal_velocity_l2_value(env.policy_robot_velocity_n)
 
 
-def _policy_joint_ids(env: Any, asset: Any, asset_cfg: Any | None) -> Any:
+def _policy_joint_ids(env: Any, asset_cfg: Any | None) -> Any:
     if asset_cfg is not None and getattr(asset_cfg, "joint_ids", None) is not None:
         return asset_cfg.joint_ids
-    for attribute in ("policy_joint_ids", "g1_joint_ids", "rl_joint_ids"):
-        if hasattr(env, attribute):
-            return getattr(env, attribute)
-    if asset.data.joint_vel.shape[-1] == 29:
-        return slice(None)
-    raise AttributeError("policy joint order is required for the combined articulation")
+    return env.policy_joint_ids
 
 
 def joint_power_l1(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
-    joint_ids = _policy_joint_ids(env, robot, asset_cfg)
+    joint_ids = _policy_joint_ids(env, asset_cfg)
     return joint_power_l1_value(
         robot.data.applied_torque[:, joint_ids], robot.data.joint_vel[:, joint_ids]
     )
@@ -276,7 +271,7 @@ def joint_position_limits(env: Any, asset_cfg: Any | None = None) -> torch.Tenso
 
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
-    joint_ids = _policy_joint_ids(env, robot, asset_cfg)
+    joint_ids = _policy_joint_ids(env, asset_cfg)
     position = robot.data.joint_pos[:, joint_ids]
     limits = robot.data.soft_joint_pos_limits[:, joint_ids]
     below = torch.clamp(limits[..., 0] - position, min=0.0)

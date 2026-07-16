@@ -680,13 +680,6 @@ def _write_payload_to_physx(
     view.set_masses(masses, ids_cpu)
     view.set_coms(coms, ids_cpu)
     view.set_inertias(inertias, ids_cpu)
-    if not hasattr(env, "rickshaw_body_masses"):
-        env.rickshaw_body_masses = torch.zeros(
-            (env.num_envs, masses.shape[1]), device=env.device, dtype=torch.float32
-        )
-        env.rickshaw_body_com_pos_b = torch.zeros(
-            (env.num_envs, coms.shape[1], 3), device=env.device, dtype=torch.float32
-        )
     env.rickshaw_body_masses[env_ids] = masses[ids_cpu].to(
         device=env.device, dtype=env.rickshaw_body_masses.dtype
     )
@@ -930,7 +923,7 @@ def _write_actuator_parameters(
     if env_ids.numel() == 0:
         return
     robot = env.scene["robot"]
-    num_envs = int(getattr(env, "num_envs", robot.data.joint_stiffness.shape[0]))
+    num_envs = env.num_envs
     action_dim = int(joint_model_error.shape[-1])
     if not hasattr(env, "_motor_strength_written"):
         env._motor_strength_written = torch.full(
@@ -1065,7 +1058,6 @@ def sample_episode_physics(
 ) -> None:
     """Reset-time EventTerm for the single training distribution."""
 
-    cfg.validate()
     stage_per_env = env.curriculum_runtime_state.stage_per_environment()
     env.curriculum_stage_per_env[env_ids] = stage_per_env[env_ids]
     configured_values = (
@@ -1664,32 +1656,13 @@ def static_reset_contact_allocation(
 def install_q_ref_from_reset_library(env: Any, env_ids: torch.Tensor) -> None:
     """Install the nominal MuJoCo static state and controller reference directly."""
 
-    if hasattr(env, "reset_pose_gradients"):
-        pose_indices = torch.argmin(
-            torch.abs(env.slope[env_ids, None] - env.reset_pose_gradients[None, :]),
-            dim=1,
-        )
-        env.reset_pose_index[env_ids] = pose_indices
-        q_reset = env.reset_q_reset_table[pose_indices]
-        q_ref = env.reset_q_ref_table[pose_indices]
-    else:
-        library = getattr(env, "reset_pose_library", None)
-        if library is None:
-            library = getattr(env.cfg, "reset_pose_library", None)
-        if library is None or not hasattr(library, "pose_for_gradient"):
-            raise RuntimeError("a schema-v4 reset pose library is required")
-        poses = [
-            library.pose_for_gradient(round(float(value), 2))
-            for value in env.slope[env_ids].detach().cpu()
-        ]
-        device = env.action_state.q_ref.device
-        dtype = env.action_state.q_ref.dtype
-        q_reset = torch.tensor(
-            [pose.q_reset for pose in poses], device=device, dtype=dtype
-        )
-        q_ref = torch.tensor(
-            [pose.q_ref for pose in poses], device=device, dtype=dtype
-        )
+    pose_indices = torch.argmin(
+        torch.abs(env.slope[env_ids, None] - env.reset_pose_gradients[None, :]),
+        dim=1,
+    )
+    env.reset_pose_index[env_ids] = pose_indices
+    q_reset = env.reset_q_reset_table[pose_indices]
+    q_ref = env.reset_q_ref_table[pose_indices]
     env.action_state.q_ref[env_ids] = q_ref
     env.reset_policy_joint_pos[env_ids] = q_reset
 
@@ -1853,7 +1826,7 @@ def initialize_mdp_state(
     )
     from .curricula import TerrainCurriculumState
     from .observations import ObservationHistoryState
-    from .terminations import PersistentTerminationState
+    from .terminations import PersistentTerminationState, TerminationCauseState
 
     history_enabled = getattr(env.cfg.observations, "history", None) is not None
     env.observation_history_state = ObservationHistoryState.zeros(
@@ -1863,6 +1836,7 @@ def initialize_mdp_state(
     )
     env.curriculum_state = TerrainCurriculumState.zeros(num_envs, device=device)
     env.termination_state = PersistentTerminationState.zeros(num_envs, device=device)
+    env.termination_cause_state = TerminationCauseState.zeros(num_envs, device=device)
     bind_d6_runtime_adapters(env)
     env._rolling_resistance_cfg = rolling_resistance_cfg
 
@@ -1954,8 +1928,6 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
     the actual post-forward grasp midpoint and guide-defined hitch geometry.
     """
 
-    if not hasattr(env, "action_state"):
-        raise RuntimeError("initialize_mdp_state must run before closed-chain reset")
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     env_ids = env_ids.to(device=env.device, dtype=torch.long)

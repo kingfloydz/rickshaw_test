@@ -78,12 +78,11 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
             "S1 fixed validation terrain does not resolve to every configured slope"
         )
     cfg = base_env.cfg.runtime_randomization.curriculum
-    previous_state = getattr(base_env, "curriculum_runtime_state", None)
+    previous_iteration = int(base_env.curriculum_runtime_state.iteration)
     runtime_state = mdp.CurriculumRuntimeState.create(
         columns, torch.sign(expected).to(dtype=torch.long), cfg
     )
-    if previous_state is not None:
-        runtime_state.set_iteration(int(previous_state.iteration))
+    runtime_state.set_iteration(previous_iteration)
     base_env.curriculum_runtime_state = runtime_state
     base_env.curriculum_stage_per_env[:] = (
         base_env.curriculum_runtime_state.stage_per_environment()

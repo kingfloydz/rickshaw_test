@@ -13,7 +13,6 @@ add_project_source_to_path()
 
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
-    DEFAULT_VALIDATION_DIR,
     TRAINING_CONFIGURATION_KEY,
     load_final_policy_acceptance_artifact,
     load_policy_ablation_artifact,
@@ -83,7 +82,6 @@ def main() -> int:
         required=True,
         help="Passed three-sweep ablation manifest selecting this checkpoint.",
     )
-    parser.add_argument("--validation-dir", default=None)
     parser.add_argument(
         "--video-dir",
         default=None,
@@ -99,11 +97,6 @@ def main() -> int:
         raise ValueError(f"play/export task is fixed to {DEFAULT_TASK}")
     validate_operational_play_arguments(list(remaining))
     checkpoint = require_existing_file(args.checkpoint, "student checkpoint").resolve()
-    validation_dir = Path(
-        args.validation_dir
-        or os.environ.get("G1_RICKSHAW_VALIDATION_DIR", os.fspath(DEFAULT_VALIDATION_DIR))
-    ).resolve()
-    os.environ["G1_RICKSHAW_VALIDATION_DIR"] = os.fspath(validation_dir)
     if args.video_dir:
         os.environ["G1_RICKSHAW_VIDEO_DIR"] = os.fspath(Path(args.video_dir).resolve())
     loaded_checkpoint = load_stage_checkpoint(

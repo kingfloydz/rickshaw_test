@@ -53,6 +53,7 @@ CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
 CHECKPOINT_HASH_HISTORY_KEY = "g1_rickshaw_checkpoint_hashes"
 S0_VALIDATION_STATE_KEY = "g1_rickshaw_s0_validation"
+S2_VALIDATION_STATE_KEY = "g1_rickshaw_s2_validation"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
 TRAINING_THROUGHPUT_KEY = "g1_rickshaw_training_throughput"
 TRAINING_CONFIGURATION_SCHEMA_VERSION = 3
@@ -60,7 +61,6 @@ EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ISAACLAB_ROOT = REPOSITORY_ROOT.parent / "IsaacLab"
-DEFAULT_VALIDATION_DIR = REPOSITORY_ROOT / "outputs" / "validation"
 DEFAULT_FEASIBILITY_PATH = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
 DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
 GUIDE_TRAINING_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
@@ -100,9 +100,9 @@ ABLATION_VALUE_KEYS = (
     "latent_dim",
 )
 ABLATION_VALUE_OPTIONS = {
-    "fat2_weight": (0.0, 0.1),
+    "fat2_weight": (0.0, 0.1, 0.2),
     "rollout_steps": (24, 48, 64),
-    "latent_dim": (8, 16, 24),
+    "latent_dim": (8, 16, 24, 32),
 }
 TRAINING_CONFIGURATION_FIELDS = {
     "schema_version",
@@ -125,11 +125,10 @@ TRAINING_CONFIGURATION_FIELDS = {
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
         "validation_interval": TRAINING_ARTIFACT_INTERVAL,
-        "validation_patience": 10,
+        "validation_patience": 5,
         "validation_episodes_per_slope": 100,
     },
     "s1_context_distillation": {
-        "max_iterations": 2000,
         "context_learning_rate": 3.0e-4,
         "actor_learning_rate": 1.0e-4,
         "batch_size": 65536,
@@ -140,6 +139,7 @@ GUIDE_TRAINING_PARAMETERS = {
         "teacher_actor_initialization": True,
         "rollout_stage_sequence": list(ROLLOUT_STAGE_SEQUENCE),
         "validation_interval": TRAINING_ARTIFACT_INTERVAL,
+        "validation_patience": 5,
         "validation_candidate_count": 40,
         "model_selection": [
             "fixed_validation_action_kl",
@@ -152,28 +152,44 @@ GUIDE_TRAINING_PARAMETERS = {
         "critic_learning_rate": 3.0e-4,
         "context_encoder_frozen": False,
         "distillation_loss": False,
+        "validation_interval": TRAINING_ARTIFACT_INTERVAL,
+        "validation_patience": 5,
+        "validation_episodes_per_slope": 100,
     },
 }
 GUIDE_MAX_ITERATIONS = {
     "s0_teacher": 6000,
-    "s1_context_distillation": 2000,
+    "s1_context_distillation": 4000,
     "s2_student_ppo": 2000,
 }
 
 
-def finalize_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Content-address a JSON-only training configuration."""
-
-    payload = dict(value)
-    payload.pop("content_sha256", None)
-    encoded = json.dumps(
-        payload,
+def _canonical_training_configuration_json(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
         ensure_ascii=True,
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("ascii")
-    return {**payload, "content_sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def training_configuration_sha256(value: Mapping[str, Any]) -> str:
+    """Hash a training configuration without its self-describing digest."""
+
+    payload = dict(value)
+    payload.pop("content_sha256", None)
+    return hashlib.sha256(_canonical_training_configuration_json(payload)).hexdigest()
+
+
+def finalize_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize and content-address a JSON-only training configuration."""
+
+    payload = dict(value)
+    payload.pop("content_sha256", None)
+    normalized = json.loads(_canonical_training_configuration_json(payload).decode("ascii"))
+    normalized["content_sha256"] = training_configuration_sha256(normalized)
+    return normalized
 
 
 def validate_training_configuration(
@@ -201,16 +217,7 @@ def validate_training_configuration(
         int(claimed_digest, 16)
     except ValueError as exc:
         raise ValueError("training configuration content_sha256 is malformed") from exc
-    digest_payload = dict(value)
-    del digest_payload["content_sha256"]
-    encoded = json.dumps(
-        digest_payload,
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    if hashlib.sha256(encoded).hexdigest() != claimed_digest.lower():
+    if training_configuration_sha256(value) != claimed_digest.lower():
         raise ValueError("training configuration content_sha256 mismatch")
     stage = value.get("stage")
     if not isinstance(stage, str) or not stage:
@@ -286,7 +293,7 @@ def validate_training_configuration(
             )
     result = dict(value)
     result["ablation_values"] = normalized_ablation
-    return result
+    return finalize_training_configuration(result)
 
 
 def validate_guide_training_configuration(
@@ -467,9 +474,12 @@ def s2_remaining_learning_iterations(
     *,
     requested_iterations: int,
     completed_iterations: int,
+    early_stopped: bool,
 ) -> int:
-    """Translate Isaac's target-like S2 config into RSL's additional-iteration API."""
+    """Return the additional S2 iterations, treating patience stop as terminal."""
 
+    if type(early_stopped) is not bool:
+        raise ValueError("early_stopped must be boolean")
     for name, value in (
         ("requested_iterations", requested_iterations),
         ("completed_iterations", completed_iterations),
@@ -481,6 +491,8 @@ def s2_remaining_learning_iterations(
         raise ValueError(f"formal S2 learn must request the {target}-iteration Guide target")
     if completed_iterations > target:
         raise ValueError("S2 checkpoint already exceeds the 2000-iteration Guide target")
+    if early_stopped:
+        return 0
     return target - completed_iterations
 
 
@@ -510,8 +522,8 @@ def s0_remaining_learning_iterations(
     return target - completed_iterations
 
 
-def s0_validation_early_stopped(state: "S0FixedSeedValidationState") -> bool:
-    """Whether the persisted Guide patience state represents a terminal stop."""
+def fixed_seed_validation_early_stopped(state: "FixedSeedValidationState") -> bool:
+    """Whether a persisted fixed-seed patience state represents a terminal stop."""
 
     return (
         state.last_evaluated_iteration > state.warmup_iterations
@@ -519,14 +531,79 @@ def s0_validation_early_stopped(state: "S0FixedSeedValidationState") -> bool:
     )
 
 
-def _validate_s0_validation_iteration_alignment(
-    state: "S0FixedSeedValidationState",
+def s0_validation_early_stopped(state: "FixedSeedValidationState") -> bool:
+    """Backward-compatible name for the S0 validation terminal-state check."""
+
+    return fixed_seed_validation_early_stopped(state)
+
+
+def _validation_state_key(stage: str) -> str:
+    try:
+        return {
+            "s0_teacher": S0_VALIDATION_STATE_KEY,
+            "s2_student_ppo": S2_VALIDATION_STATE_KEY,
+        }[stage]
+    except KeyError as exc:
+        raise ValueError(f"stage {stage!r} does not use fixed-seed early stopping") from exc
+
+
+def training_checkpoint_complete(checkpoint: Mapping[str, Any], *, stage: str) -> bool:
+    """Return whether a PPO checkpoint reached its cap or terminal patience stop."""
+
+    throughput = validate_training_throughput(checkpoint.get(TRAINING_THROUGHPUT_KEY))
+    raw_state = checkpoint.get(_validation_state_key(stage))
+    if not isinstance(raw_state, Mapping):
+        return False
+    state = FixedSeedValidationState.from_mapping(raw_state)
+    _validate_fixed_seed_validation_iteration_alignment(
+        state,
+        int(throughput["iterations"]),
+    )
+    return (
+        throughput["iterations"] == GUIDE_MAX_ITERATIONS[stage]
+        or fixed_seed_validation_early_stopped(state)
+    )
+
+
+def validate_s1_training_completion(checkpoint: Mapping[str, Any]) -> None:
+    """Require S1 to reach its cap or carry auditable terminal patience state."""
+
+    training = checkpoint.get("training")
+    if not isinstance(training, Mapping):
+        raise ValueError("S1 checkpoint is missing training completion evidence")
+    completed = training.get("completed_iterations")
+    target = GUIDE_MAX_ITERATIONS["s1_context_distillation"]
+    if isinstance(completed, bool) or not isinstance(completed, int) or not 0 < completed <= target:
+        raise ValueError(f"S1 completed_iterations must lie in [1, {target}]")
+    early_stopped = training.get("early_stopped")
+    if type(early_stopped) is not bool:
+        raise ValueError("S1 early_stopped must be boolean")
+    history = training.get("validation_history")
+    if not isinstance(history, list) or not history:
+        raise ValueError("S1 checkpoint has no validation history")
+    last = history[-1]
+    patience = GUIDE_TRAINING_PARAMETERS["s1_context_distillation"][
+        "validation_patience"
+    ]
+    terminal_patience = (
+        isinstance(last, Mapping)
+        and last.get("iteration") == completed
+        and last.get("no_improvement_count") == patience
+    )
+    if completed < target and (not early_stopped or not terminal_patience):
+        raise ValueError("incomplete S1 checkpoint lacks terminal patience evidence")
+    if completed == target and early_stopped:
+        raise ValueError("S1 checkpoint at the iteration cap cannot be marked early-stopped")
+
+
+def _validate_fixed_seed_validation_iteration_alignment(
+    state: "FixedSeedValidationState",
     completed_iterations: int,
 ) -> None:
     expected = (completed_iterations // state.interval) * state.interval
     if state.last_evaluated_iteration != expected:
         raise ValueError(
-            "S0 validation state is not aligned with completed training iterations: "
+            "fixed-seed validation state is not aligned with completed training iterations: "
             f"last={state.last_evaluated_iteration}, expected={expected}"
         )
 
@@ -577,11 +654,11 @@ def validate_student_checkpoint_architecture(
 
 
 @dataclass
-class S0FixedSeedValidationState:
-    """Pure scheduling and patience state for the guide's S0 validation loop."""
+class FixedSeedValidationState:
+    """Pure scheduling and patience state for fixed-seed PPO validation."""
 
     interval: int = TRAINING_ARTIFACT_INTERVAL
-    patience: int = 10
+    patience: int = 5
     warmup_iterations: int = 0
     minimum_improvement: float = 0.0
     stage: str | None = None
@@ -593,12 +670,12 @@ class S0FixedSeedValidationState:
     def __post_init__(self) -> None:
         if (
             self.interval != TRAINING_ARTIFACT_INTERVAL
-            or self.patience != 10
+            or self.patience != 5
             or self.warmup_iterations != 0
         ):
             raise ValueError(
-                "S0 validation is fixed at every "
-                f"{TRAINING_ARTIFACT_INTERVAL} iterations with patience 10"
+                "fixed-seed validation is required every "
+                f"{TRAINING_ARTIFACT_INTERVAL} iterations with patience 5"
             )
         if self.minimum_improvement < 0.0:
             raise ValueError("minimum_improvement cannot be negative")
@@ -619,11 +696,11 @@ class S0FixedSeedValidationState:
         report_sha256: str,
     ) -> bool:
         if not self.should_evaluate(iteration):
-            raise ValueError(f"iteration {iteration} is not the next scheduled S0 validation")
+            raise ValueError(f"iteration {iteration} is not the next scheduled validation")
         if not isinstance(stage, str) or not stage or not math.isfinite(score):
-            raise ValueError("S0 validation stage/score is invalid")
+            raise ValueError("fixed-seed validation stage/score is invalid")
         if not isinstance(report_sha256, str) or len(report_sha256) != 64:
-            raise ValueError("S0 validation report SHA256 is malformed")
+            raise ValueError("fixed-seed validation report SHA256 is malformed")
         int(report_sha256, 16)
         if self.stage != stage:
             self.stage = stage
@@ -664,9 +741,9 @@ class S0FixedSeedValidationState:
         }
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "S0FixedSeedValidationState":
+    def from_mapping(cls, value: Mapping[str, Any]) -> "FixedSeedValidationState":
         if not isinstance(value, Mapping):
-            raise ValueError("S0 validation checkpoint state must be a mapping")
+            raise ValueError("fixed-seed validation checkpoint state must be a mapping")
         state = cls(
             interval=value.get("interval"),
             patience=value.get("patience"),
@@ -679,17 +756,20 @@ class S0FixedSeedValidationState:
             evaluations=list(value.get("evaluations", ())),
         )
         if state.best_score is not None and not math.isfinite(float(state.best_score)):
-            raise ValueError("S0 validation best_score must be finite")
+            raise ValueError("fixed-seed validation best_score must be finite")
         if state.no_improvement_count < 0 or state.last_evaluated_iteration < 0:
-            raise ValueError("S0 validation counters cannot be negative")
+            raise ValueError("fixed-seed validation counters cannot be negative")
         return state
 
 
-class _S0EarlyStopSignal(RuntimeError):
+S0FixedSeedValidationState = FixedSeedValidationState
+
+
+class _EarlyStopSignal(RuntimeError):
     pass
 
 
-def load_s0_fixed_seed_validation_score(
+def load_fixed_seed_validation_score(
     report_path: str | Path,
     *,
     checkpoint_path: str | Path,
@@ -704,25 +784,25 @@ def load_s0_fixed_seed_validation_score(
 
     report = json.loads(Path(report_path).read_text(encoding="utf-8"))
     if report.get("status") not in {"recorded", "passed"} or report.get("failures"):
-        raise RuntimeError("S0 fixed-seed evaluation report is incomplete or failed")
+        raise RuntimeError("fixed-seed evaluation report is incomplete or failed")
     inputs = report.get("inputs")
     if (
         not isinstance(inputs, Mapping)
         or inputs.get("evaluation_runtime_sources_sha256")
         != evaluation_runtime_sources_sha256()
     ):
-        raise RuntimeError("S0 fixed-seed evaluation report is stale for evaluator sources")
+        raise RuntimeError("fixed-seed evaluation report is stale for evaluator sources")
     checkpoint = report.get("checkpoint")
     if not isinstance(checkpoint, Mapping) or checkpoint.get("sha256") != sha256_file(checkpoint_path):
-        raise RuntimeError("S0 validation report checkpoint SHA256 mismatch")
+        raise RuntimeError("fixed-seed validation report checkpoint SHA256 mismatch")
     evaluation = report.get("evaluation")
     seeds = list(fixed_seeds)
     if not isinstance(evaluation, Mapping) or evaluation.get("fixed_seeds") != seeds:
-        raise RuntimeError("S0 validation report fixed seeds mismatch")
+        raise RuntimeError("fixed-seed validation report fixed seeds mismatch")
     if evaluation.get("curriculum_stages") != [curriculum_stage]:
-        raise RuntimeError("S0 validation report curriculum stage mismatch")
+        raise RuntimeError("fixed-seed validation report curriculum stage mismatch")
     if evaluation.get("episodes_per_slope_per_stage", 0) < 100:
-        raise RuntimeError("S0 validation must evaluate at least 100 episodes per slope")
+        raise RuntimeError("fixed-seed validation must evaluate at least 100 episodes per slope")
     signed_slopes = evaluation.get("signed_slopes")
     try:
         slope_labels = {f"{float(value):+.2f}" for value in signed_slopes}
@@ -730,30 +810,33 @@ def load_s0_fixed_seed_validation_score(
         slope_labels = set()
     if slope_labels != set(SIGNED_SLOPE_LABELS):
         raise RuntimeError(
-            f"S0 validation report must cover all {len(SLOPE_GRADIENTS)} slopes"
+            f"fixed-seed validation report must cover all {len(SLOPE_GRADIENTS)} slopes"
         )
     stage_report = report.get("stages", {}).get(curriculum_stage)
     if not isinstance(stage_report, Mapping):
-        raise RuntimeError("S0 validation report is missing its stage metrics")
+        raise RuntimeError("fixed-seed validation report is missing its stage metrics")
     baseline = stage_report.get("context_interventions", {}).get("baseline_return")
     minimum_episodes = 100 * len(SIGNED_SLOPE_LABELS)
     if not isinstance(baseline, Mapping) or baseline.get("episodes", 0) < minimum_episodes:
-        raise RuntimeError("S0 validation report did not complete the per-slope episode quota")
+        raise RuntimeError("fixed-seed validation report did not complete the per-slope episode quota")
     stage_per_slope = stage_report.get("per_slope")
     if not isinstance(stage_per_slope, Mapping) or set(stage_per_slope) != set(SIGNED_SLOPE_LABELS):
-        raise RuntimeError("S0 validation report is missing exact per-slope episode metrics")
+        raise RuntimeError("fixed-seed validation report is missing exact per-slope episode metrics")
     for label, slope_report in stage_per_slope.items():
         episodes = slope_report.get("episodes") if isinstance(slope_report, Mapping) else None
         count = episodes.get("completed") if isinstance(episodes, Mapping) else None
         if isinstance(count, bool) or not isinstance(count, int) or count < 100:
-            raise RuntimeError(f"S0 validation slope {label} did not complete 100 episodes")
+            raise RuntimeError(f"fixed-seed validation slope {label} did not complete 100 episodes")
     per_slope = baseline.get("per_slope_mean")
     if not isinstance(per_slope, Mapping) or set(per_slope) != set(SIGNED_SLOPE_LABELS):
-        raise RuntimeError("S0 validation return is missing one or more slopes")
+        raise RuntimeError("fixed-seed validation return is missing one or more slopes")
     score = float(baseline.get("mean"))
     if not math.isfinite(score):
-        raise RuntimeError("S0 validation mean return is not finite")
+        raise RuntimeError("fixed-seed validation mean return is not finite")
     return score
+
+
+load_s0_fixed_seed_validation_score = load_fixed_seed_validation_score
 
 
 def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, int]:
@@ -1064,6 +1147,7 @@ def load_stage_checkpoint(
     *,
     expected_stage: str | Iterable[str] | None = None,
     validate_runtime: bool = False,
+    allow_incomplete: bool = False,
 ) -> Mapping[str, Any]:
     kwargs: dict[str, Any] = {"config_files": runtime_config_files()}
     if validate_runtime:
@@ -1092,22 +1176,22 @@ def load_stage_checkpoint(
                 raise ValueError(
                     "checkpoint throughput rollout length differs from training configuration"
                 )
-            if (
-                loaded_stage == "s2_student_ppo"
-                and throughput["iterations"] != GUIDE_MAX_ITERATIONS[loaded_stage]
-            ):
-                raise ValueError("formal S2 checkpoint must contain all 2000 PPO iterations")
-            if (
-                loaded_stage == "s0_teacher"
-                and throughput["iterations"] > GUIDE_MAX_ITERATIONS[loaded_stage]
-            ):
-                raise ValueError("formal S0 checkpoint exceeds the 6000-iteration Guide target")
-            if (
-                loaded_stage == "s2_student_ppo"
-                and checkpoint.get("iter") != throughput["iterations"] - 1
+            target = GUIDE_MAX_ITERATIONS[loaded_stage]
+            if not 0 < throughput["iterations"] <= target:
+                raise ValueError(
+                    f"formal {loaded_stage} checkpoint iterations must lie in [1, {target}]"
+                )
+            if checkpoint.get("iter") != throughput["iterations"] - 1:
+                raise ValueError(
+                    f"formal {loaded_stage} checkpoint iter must be the last completed "
+                    "zero-based iteration"
+                )
+            if not allow_incomplete and not training_checkpoint_complete(
+                checkpoint, stage=loaded_stage
             ):
                 raise ValueError(
-                    "formal S2 checkpoint iter must be the last completed zero-based iteration"
+                    f"formal {loaded_stage} checkpoint has neither reached {target} "
+                    "iterations nor terminal early stop"
                 )
         if loaded_stage in {
             "s1_context_candidate",
@@ -1118,6 +1202,8 @@ def load_stage_checkpoint(
                 checkpoint,
                 training_configuration,
             )
+        if loaded_stage == "s1_context_distillation":
+            validate_s1_training_completion(checkpoint)
     elif loaded_stage == "s2_bootstrap":
         training_configuration = validate_training_configuration(
             checkpoint.get(TRAINING_CONFIGURATION_KEY),
@@ -1169,6 +1255,15 @@ def load_s2_resume_checkpoint(
         raise ValueError(
             "resumable S2 checkpoint iter must be the last completed zero-based iteration"
         )
+    if S2_VALIDATION_STATE_KEY not in checkpoint:
+        raise ValueError("resumable S2 checkpoint lacks fixed-validation state")
+    validation_state = FixedSeedValidationState.from_mapping(
+        checkpoint[S2_VALIDATION_STATE_KEY]
+    )
+    _validate_fixed_seed_validation_iteration_alignment(validation_state, iterations)
+    reports = checkpoint.get("g1_rickshaw_s2_validation_reports", {})
+    if not isinstance(reports, Mapping):
+        raise ValueError("resumable S2 checkpoint validation report history is malformed")
     validate_student_checkpoint_architecture(checkpoint, training_configuration)
     return checkpoint
 
@@ -1220,10 +1315,10 @@ def load_s0_resume_checkpoint(
         )
     if S0_VALIDATION_STATE_KEY not in checkpoint:
         raise ValueError("resumable S0 checkpoint lacks fixed-validation state")
-    validation_state = S0FixedSeedValidationState.from_mapping(
+    validation_state = FixedSeedValidationState.from_mapping(
         checkpoint[S0_VALIDATION_STATE_KEY]
     )
-    _validate_s0_validation_iteration_alignment(validation_state, iterations)
+    _validate_fixed_seed_validation_iteration_alignment(validation_state, iterations)
     reports = checkpoint.get("g1_rickshaw_s0_validation_reports", {})
     if not isinstance(reports, Mapping):
         raise ValueError("resumable S0 checkpoint validation report history is malformed")
@@ -2288,19 +2383,19 @@ def install_runner_hooks_from_environment() -> None:
             raise RuntimeError("environment does not expose set_curriculum_iteration")
         callback(int(iteration))
 
-    def run_s0_periodic_validation(runner: Any) -> None:
-        iteration = int(runner._g1_curriculum_iteration)
-        validation_state: S0FixedSeedValidationState = runner._g1_s0_validation_state
+    def run_periodic_validation(runner: Any) -> None:
+        iteration = int(runner._g1_training_iterations)
+        validation_state: FixedSeedValidationState = runner._g1_validation_state
         if not validation_state.should_evaluate(iteration):
             return
         base_env = _unwrap_env(runner.env)
         runtime_stage = base_env.curriculum_runtime_state.stage.name
         stage_alias = {"TRAINING": "training"}.get(runtime_stage)
         if stage_alias is None:
-            raise RuntimeError(f"unsupported S0 validation curriculum stage {runtime_stage!r}")
+            raise RuntimeError(f"unsupported validation curriculum stage {runtime_stage!r}")
         log_dir = getattr(getattr(runner, "logger", None), "log_dir", None)
         if not log_dir:
-            raise RuntimeError("S0 periodic validation requires an RSL runner log directory")
+            raise RuntimeError("periodic validation requires an RSL runner log directory")
         validation_dir = Path(log_dir) / "fixed_validation"
         validation_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = validation_dir / f"model_input_{iteration:06d}.pt"
@@ -2312,14 +2407,17 @@ def install_runner_hooks_from_environment() -> None:
         finally:
             runner.current_learning_iteration = previous_learning_iteration
 
-        raw_seeds = os.environ.get("G1_RICKSHAW_S0_VALIDATION_SEEDS", "42,43,44,45,46")
+        prefix = "S0" if stage == "s0_teacher" else "S2"
+        seeds_variable = f"G1_RICKSHAW_{prefix}_VALIDATION_SEEDS"
+        raw_seeds = os.environ.get(seeds_variable, "42,43,44,45,46")
         try:
             fixed_seeds = [int(value.strip()) for value in raw_seeds.split(",") if value.strip()]
         except ValueError as exc:
-            raise RuntimeError("G1_RICKSHAW_S0_VALIDATION_SEEDS must be comma-separated integers") from exc
+            raise RuntimeError(f"{seeds_variable} must be comma-separated integers") from exc
         if not fixed_seeds or len(set(fixed_seeds)) != len(fixed_seeds):
-            raise RuntimeError("S0 fixed validation seeds must be non-empty and unique")
-        command_template = os.environ.get("G1_RICKSHAW_S0_VALIDATION_COMMAND")
+            raise RuntimeError("fixed validation seeds must be non-empty and unique")
+        command_variable = f"G1_RICKSHAW_{prefix}_VALIDATION_COMMAND"
+        command_template = os.environ.get(command_variable)
         if command_template:
             command = shlex.split(
                 command_template.format(
@@ -2332,7 +2430,7 @@ def install_runner_hooks_from_environment() -> None:
         else:
             task = os.environ.get("G1_RICKSHAW_TASK")
             if not task:
-                raise RuntimeError("G1_RICKSHAW_TASK is required for S0 periodic validation")
+                raise RuntimeError("G1_RICKSHAW_TASK is required for periodic validation")
             command = [
                 sys.executable,
                 os.fspath(REPOSITORY_ROOT / "scripts" / "evaluate_policy.py"),
@@ -2350,13 +2448,18 @@ def install_runner_hooks_from_environment() -> None:
                 *(str(seed) for seed in fixed_seeds),
                 "--curriculum-stages",
                 stage_alias,
+                "--training-monitor",
                 "--headless",
             ]
-            validation_device = os.environ.get("G1_RICKSHAW_S0_VALIDATION_DEVICE")
+            if stage == "s2_student_ppo":
+                command.extend(("--allow-missing-teacher", "--no-context-interventions"))
+            validation_device = os.environ.get(
+                f"G1_RICKSHAW_{prefix}_VALIDATION_DEVICE"
+            )
             if validation_device:
                 command.extend(("--device", validation_device))
         subprocess.run(command, check=True)
-        score = load_s0_fixed_seed_validation_score(
+        score = load_fixed_seed_validation_score(
             report_path,
             checkpoint_path=checkpoint_path,
             curriculum_stage=stage_alias,
@@ -2369,14 +2472,22 @@ def install_runner_hooks_from_environment() -> None:
             score=score,
             report_sha256=report_digest,
         )
-        runner._g1_s0_validation_reports[str(iteration)] = report_digest
+        runner._g1_validation_reports[str(iteration)] = report_digest
         if should_stop:
             runner.current_learning_iteration = max(0, iteration - 1)
             final_path = validation_dir / f"model_early_stop_{iteration:06d}.pt"
             runner.save(os.fspath(final_path))
-            raise _S0EarlyStopSignal(
-                f"S0 fixed validation did not improve for {validation_state.patience} evaluations"
+            raise _EarlyStopSignal(
+                f"{stage} fixed validation did not improve for "
+                f"{validation_state.patience} evaluations"
             )
+        validated_path = validation_dir / f"model_validated_{iteration:06d}.pt"
+        previous_learning_iteration = int(runner.current_learning_iteration)
+        runner.current_learning_iteration = iteration - 1
+        try:
+            runner.save(os.fspath(validated_path))
+        finally:
+            runner.current_learning_iteration = previous_learning_iteration
 
     def hooked_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -2411,15 +2522,15 @@ def install_runner_hooks_from_environment() -> None:
                 self.cfg["num_steps_per_env"]
             )
             self._g1_training_iterations += 1
-            if stage == "s0_teacher":
-                run_s0_periodic_validation(self)
+            if stage in {"s0_teacher", "s2_student_ppo"}:
+                run_periodic_validation(self)
             return original_log(*log_args, **log_kwargs)
 
         self.logger.log = log_with_throughput
         self._g1_checkpoint_hash_by_iteration = {}
-        if stage == "s0_teacher":
-            self._g1_s0_validation_state = S0FixedSeedValidationState()
-            self._g1_s0_validation_reports = {}
+        if stage in {"s0_teacher", "s2_student_ppo"}:
+            self._g1_validation_state = FixedSeedValidationState()
+            self._g1_validation_reports = {}
         if stage == "s2_student_ppo":
             raw_start = os.environ.get("G1_RICKSHAW_CURRICULUM_START_ITERATION")
             if raw_start is None:
@@ -2463,19 +2574,22 @@ def install_runner_hooks_from_environment() -> None:
                     requested_iterations=requested,
                     completed_iterations=int(self._g1_training_iterations),
                     early_stopped=s0_validation_early_stopped(
-                        self._g1_s0_validation_state
+                        self._g1_validation_state
                     ),
                 )
             else:
                 remaining = s2_remaining_learning_iterations(
                     requested_iterations=requested,
                     completed_iterations=int(self._g1_training_iterations),
+                    early_stopped=fixed_seed_validation_early_stopped(
+                        self._g1_validation_state
+                    ),
                 )
             if remaining == 0:
                 reason = (
-                    "reached the 6000-iteration target or terminal early stop"
+                    "reached the iteration target or terminal early stop"
                     if stage == "s0_teacher"
-                    else "already contains all 2000 Guide PPO iterations"
+                    else "reached the iteration target or terminal early stop"
                 )
                 print(f"[INFO] {stage} {reason}")
                 return None
@@ -2487,7 +2601,7 @@ def install_runner_hooks_from_environment() -> None:
             kwargs = call_kwargs
         try:
             return original_learn(self, *args, **kwargs)
-        except _S0EarlyStopSignal as exc:
+        except _EarlyStopSignal as exc:
             print(f"[INFO] {exc}")
             logger = getattr(self, "logger", None)
             if logger is not None and getattr(logger, "writer", None) is not None:
@@ -2525,10 +2639,10 @@ def install_runner_hooks_from_environment() -> None:
             str(iteration): digest
             for iteration, digest in sorted(self._g1_checkpoint_hash_by_iteration.items())
         }
-        if stage == "s0_teacher":
-            checkpoint[S0_VALIDATION_STATE_KEY] = self._g1_s0_validation_state.to_mapping()
-            checkpoint["g1_rickshaw_s0_validation_reports"] = dict(
-                self._g1_s0_validation_reports
+        if stage in {"s0_teacher", "s2_student_ppo"}:
+            checkpoint[_validation_state_key(stage)] = self._g1_validation_state.to_mapping()
+            checkpoint[f"g1_rickshaw_{'s0' if stage == 's0_teacher' else 's2'}_validation_reports"] = dict(
+                self._g1_validation_reports
             )
         checkpoint[CHECKPOINT_LINEAGE_KEY] = dict(lineage)
         attach_checkpoint_metadata(checkpoint, metadata, replace=True)
@@ -2572,7 +2686,7 @@ def install_runner_hooks_from_environment() -> None:
                 f"runner stage {stage!r} cannot load checkpoint stage {loaded_stage!r}"
             )
         normalized_throughput: dict[str, float | int] | None = None
-        loaded_s0_validation_state: S0FixedSeedValidationState | None = None
+        loaded_validation_state: FixedSeedValidationState | None = None
         if loaded_stage != "s2_bootstrap":
             try:
                 normalized_throughput = validate_training_throughput(
@@ -2601,12 +2715,33 @@ def install_runner_hooks_from_environment() -> None:
                     "from the active run"
                 )
             iterations = int(normalized_throughput["iterations"])
+            if loaded_stage in {"s0_teacher", "s2_student_ppo"}:
+                state_key = _validation_state_key(loaded_stage)
+                if state_key not in checkpoint:
+                    raise RuntimeError(
+                        f"loaded {loaded_stage} checkpoint lacks fixed-validation state"
+                    )
+                try:
+                    loaded_validation_state = FixedSeedValidationState.from_mapping(
+                        checkpoint[state_key]
+                    )
+                    _validate_fixed_seed_validation_iteration_alignment(
+                        loaded_validation_state,
+                        iterations,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"loaded {loaded_stage} checkpoint has invalid or misaligned "
+                        "fixed-validation state"
+                    ) from exc
             if loaded_stage == "s0_teacher":
                 try:
                     s0_remaining_learning_iterations(
                         requested_iterations=GUIDE_MAX_ITERATIONS["s0_teacher"],
                         completed_iterations=iterations,
-                        early_stopped=False,
+                        early_stopped=fixed_seed_validation_early_stopped(
+                            loaded_validation_state
+                        ),
                     )
                 except ValueError as exc:
                     raise RuntimeError("loaded S0 checkpoint exceeds the Guide target") from exc
@@ -2614,28 +2749,14 @@ def install_runner_hooks_from_environment() -> None:
                     raise RuntimeError(
                         "loaded S0 checkpoint iter is not the last completed zero-based iteration"
                     )
-                if S0_VALIDATION_STATE_KEY not in checkpoint:
-                    raise RuntimeError("loaded S0 checkpoint lacks fixed-validation state")
-                try:
-                    loaded_s0_validation_state = S0FixedSeedValidationState.from_mapping(
-                        checkpoint[S0_VALIDATION_STATE_KEY]
-                    )
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError("loaded S0 checkpoint has invalid fixed-validation state") from exc
-                try:
-                    _validate_s0_validation_iteration_alignment(
-                        loaded_s0_validation_state,
-                        iterations,
-                    )
-                except ValueError as exc:
-                    raise RuntimeError(
-                        "loaded S0 validation state is not aligned with throughput"
-                    ) from exc
             if loaded_stage == "s2_student_ppo":
                 try:
                     s2_remaining_learning_iterations(
                         requested_iterations=GUIDE_MAX_ITERATIONS["s2_student_ppo"],
                         completed_iterations=iterations,
+                        early_stopped=fixed_seed_validation_early_stopped(
+                            loaded_validation_state
+                        ),
                     )
                 except ValueError as exc:
                     raise RuntimeError("loaded S2 checkpoint exceeds the Guide target") from exc
@@ -2672,12 +2793,17 @@ def install_runner_hooks_from_environment() -> None:
             checkpoint,
             checkpoint_path=path,
         )
-        if loaded_s0_validation_state is not None:
-            self._g1_s0_validation_state = loaded_s0_validation_state
-            reports = checkpoint.get("g1_rickshaw_s0_validation_reports", {})
+        if loaded_validation_state is not None:
+            self._g1_validation_state = loaded_validation_state
+            report_key = (
+                "g1_rickshaw_s0_validation_reports"
+                if loaded_stage == "s0_teacher"
+                else "g1_rickshaw_s2_validation_reports"
+            )
+            reports = checkpoint.get(report_key, {})
             if not isinstance(reports, Mapping):
-                raise RuntimeError("S0 validation report history must be a mapping")
-            self._g1_s0_validation_reports = dict(reports)
+                raise RuntimeError("fixed-seed validation report history must be a mapping")
+            self._g1_validation_reports = dict(reports)
         set_curriculum(self, self._g1_curriculum_iteration)
         self._g1_curriculum_reset_steps = reset_runner_environment_for_curriculum(
             self.env
@@ -2714,14 +2840,17 @@ def install_runner_hooks_from_environment() -> None:
 
 
 __all__ = [
+    "ABLATION_VALUE_OPTIONS",
     "SIGNED_SLOPE_LABELS",
     "ROLLOUT_FORMAL_NUM_ENVS",
     "ROLLOUT_MANIFEST_SCHEMA_VERSION",
     "ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION",
     "ROLLOUT_STAGE_SEQUENCE",
     "ROLLOUT_PHYSICS_PARAMETER_NAMES",
+    "FixedSeedValidationState",
     "S0FixedSeedValidationState",
     "S0_VALIDATION_STATE_KEY",
+    "S2_VALIDATION_STATE_KEY",
     "TRAINING_CONFIGURATION_KEY",
     "TRAINING_CONFIGURATION_SCHEMA_VERSION",
     "TRAINING_ARTIFACT_INTERVAL",
@@ -2731,7 +2860,6 @@ __all__ = [
     "CHECKPOINT_LINEAGE_KEY",
     "CHECKPOINT_SCHEMA_VERSION",
     "CHECKPOINT_STAGE_KEY",
-    "DEFAULT_VALIDATION_DIR",
     "GUIDE_TRAINING_NUM_ENVS",
     "GUIDE_MAX_ITERATIONS",
     "GUIDE_TRAINING_PARAMETERS",
@@ -2751,6 +2879,7 @@ __all__ = [
     "load_s0_resume_checkpoint",
     "load_s2_resume_checkpoint",
     "load_stage_checkpoint",
+    "load_fixed_seed_validation_score",
     "load_s0_fixed_seed_validation_score",
     "require_pinned_rsl_rl",
     "reset_runner_environment_for_curriculum",
@@ -2759,10 +2888,14 @@ __all__ = [
     "s0_remaining_learning_iterations",
     "s0_validation_early_stopped",
     "s2_remaining_learning_iterations",
+    "fixed_seed_validation_early_stopped",
+    "training_checkpoint_complete",
+    "training_configuration_sha256",
     "validate_rollout_stage_coverage",
     "validate_guide_training_configuration",
     "validate_policy_ablation_run_lineage",
     "validate_training_configuration",
     "validate_training_throughput",
+    "validate_s1_training_completion",
     "write_deployment_manifest",
 ]

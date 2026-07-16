@@ -20,6 +20,7 @@ from _isaaclab_wrappers import (
 add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
+    ABLATION_VARIANTS,
     COMMAND_PHASE_LABELS,
     CROSS_CASE_LABELS,
     FORMAL_EVALUATION_COMMAND_PROTOCOL,
@@ -86,13 +87,13 @@ class PolicyHandle:
 
     @property
     def latent_dim(self) -> int:
-        encoder = self.actor.context_encoder if hasattr(self.actor, "context_encoder") else self.actor.encoder
+        encoder = self.actor.context_encoder if self.student else self.actor.encoder
         return encoder.latent_dim
 
     def distribution(self, observation: Any, intervention: str = "baseline"):
         if intervention not in {"baseline", "zero", "shuffle"}:
             raise ValueError(f"unknown context intervention {intervention!r}")
-        if hasattr(self.actor, "context_encoder"):
+        if self.student:
             context = self.actor.context_encoder.encode(observation["history"])
             context = self.actor.context_projection(context)
             policy = self.actor.actor
@@ -151,9 +152,29 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Debug only; permits a student report without teacher-student KL and marks it incomplete.",
     )
-    parser.add_argument("--fat2-weight", type=float, choices=(0.0, 0.1), default=None)
-    parser.add_argument("--rollout-steps", type=int, choices=(24, 48, 64), default=None)
-    parser.add_argument("--latent-dim", type=int, choices=(8, 16, 24), default=None)
+    parser.add_argument(
+        "--training-monitor",
+        action="store_true",
+        help="Evaluate an intermediate PPO checkpoint for fixed-seed early stopping.",
+    )
+    parser.add_argument(
+        "--fat2-weight",
+        type=float,
+        choices=ABLATION_VARIANTS["fat2_weight"],
+        default=None,
+    )
+    parser.add_argument(
+        "--rollout-steps",
+        type=int,
+        choices=ABLATION_VARIANTS["rollout_steps"],
+        default=None,
+    )
+    parser.add_argument(
+        "--latent-dim",
+        type=int,
+        choices=ABLATION_VARIANTS["latent_dim"],
+        default=None,
+    )
     parser.add_argument("--ablation-id", default=None)
     parser.add_argument("--ablation-group", choices=("fat2_weight", "rollout_steps", "latent_dim"), default=None)
     parser.add_argument("--ablation-matrix-sha256", default=None)
@@ -162,6 +183,16 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace, stage: str) -> None:
+    if args.training_monitor and stage not in {"s0_teacher", "s2_student_ppo"}:
+        raise ValueError("--training-monitor applies only to PPO stages S0 and S2")
+    if args.training_monitor and (
+        args.thresholds
+        or args.threshold
+        or args.s1_baseline_report
+        or args.ablation_id
+        or args.ablation_group
+    ):
+        raise ValueError("--training-monitor cannot be combined with acceptance inputs")
     if (
         args.num_envs <= 0
         or args.num_envs % FORMAL_EVALUATION_NUM_ENVS_MULTIPLE != 0
@@ -397,9 +428,7 @@ def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  #
     arm_margin = torch.amin(torque_margin[:, 15:], dim=-1)
     power = torch.sum(torch.abs(torque * velocity), dim=-1)
 
-    wrench = getattr(base_env, "d6_incoming_joint_proxy_w", None)
-    if wrench is None:
-        raise RuntimeError("acceptance requires retained-link incoming D6 reaction wrenches")
+    wrench = base_env.d6_incoming_joint_proxy_w
     d6_channels = d6_wrench_channels(wrench)
     d6_force = d6_channels["force"]
     d6_torque = d6_channels["torque"]
@@ -619,7 +648,7 @@ def _run_mode(
                 time_outs = extras["time_outs"]
                 if not torch.is_tensor(time_outs) or time_outs.shape != dones.shape:
                     raise RuntimeError("evaluation step did not expose per-environment timeout flags")
-                cause_state = getattr(base_env, "termination_cause_state", None)
+                cause_state = base_env.termination_cause_state
                 reusable_ids: list[int] = []
                 for env_id in done_ids.detach().cpu().tolist():
                     if not bool(enrolled[env_id].item()) or not bool(active[env_id].item()):
@@ -630,14 +659,12 @@ def _run_mode(
                     slope_index = int(slope_slots[env_id].item())
                     case_index = 0
                     value = float(episode_return[env_id].item())
-                    causes: list[str] = []
-                    if cause_state is not None:
-                        cause_mask = cause_state.last_causes[env_id]
-                        causes = [
-                            name
-                            for index, name in enumerate(cause_names)
-                            if bool(cause_mask[index].item())
-                        ]
+                    cause_mask = cause_state.last_causes[env_id]
+                    causes = [
+                        name
+                        for index, name in enumerate(cause_names)
+                        if bool(cause_mask[index].item())
+                    ]
                     fell = _episode_fell(
                         timed_out=bool(time_outs[env_id].item()),
                         causes=causes,
@@ -760,6 +787,7 @@ def main() -> int:  # noqa: C901
         checkpoint_path,
         expected_stage=SUPPORTED_STAGES,
         validate_runtime=True,
+        allow_incomplete=args.training_monitor,
     )
     stage = checkpoint[CHECKPOINT_STAGE_KEY]
     training_configuration = dict(checkpoint[TRAINING_CONFIGURATION_KEY])
@@ -943,16 +971,16 @@ def main() -> int:  # noqa: C901
         # can terminate the interpreter and hide the original exception.
         raise
 
-    if is_student and teacher_checkpoint is None:
+    if is_student and teacher_checkpoint is None and not args.training_monitor:
         incomplete.append("teacher_student_action_kl_missing")
-    if is_student and args.no_context_interventions:
+    if is_student and args.no_context_interventions and not args.training_monitor:
         incomplete.append("student_context_zero_shuffle_skipped")
     for name, stage_report in stage_reports.items():
         if stage_report["metrics"]["episodes"]["completed"] != len(SIGNED_SLOPES) * args.episodes_per_slope:
             incomplete.append(f"{name}_episode_quota_incomplete")
 
     return_floor_failures: list[str] = []
-    if stage == "s2_student_ppo":
+    if stage == "s2_student_ppo" and not args.training_monitor:
         if s1_baseline_returns is None:
             incomplete.append("s1_baseline_acceptance_report_missing")
         else:
@@ -982,6 +1010,7 @@ def main() -> int:  # noqa: C901
         "s1_baseline_acceptance": s1_baseline_binding,
         "inputs": _input_binding(args),
         "evaluation": {
+            "training_monitor": bool(args.training_monitor),
             "deterministic_actions": True,
             "fixed_seeds": list(args.seeds),
             "signed_slopes": list(SIGNED_SLOPES),

@@ -65,7 +65,7 @@ class ContextEncoder(nn.Module):
     """Encode ``history[N, 61, 96]`` into a context latent and auxiliaries.
 
     ``latent_dim`` defaults to the deployed 16-D representation.  It remains a
-    constructor argument solely for the required 8/16/24 latent ablation; the
+    constructor argument solely for the required 8/16/24/32 latent ablation; the
     temporal and observation dimensions are fixed by the deployment contract.
     """
 

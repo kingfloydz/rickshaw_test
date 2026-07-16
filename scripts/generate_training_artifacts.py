@@ -141,7 +141,6 @@ def _record_video(
     checkpoint: Path,
     acceptance_report: Path,
     evaluation_manifest: Path,
-    validation_dir: Path,
     output_dir: Path,
     video_length: int,
     video_num_envs: int,
@@ -160,8 +159,6 @@ def _record_video(
         os.fspath(acceptance_report),
         "--ablation-manifest",
         os.fspath(evaluation_manifest),
-        "--validation-dir",
-        os.fspath(validation_dir),
         "--video-dir",
         os.fspath(recording_dir),
         "--headless",
@@ -190,7 +187,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--selected-run-id", default=None)
-    parser.add_argument("--validation-dir", type=Path, default=None)
     parser.add_argument("--video-length", type=int, default=1000)
     parser.add_argument("--video-num-envs", type=int, default=1)
     parser.add_argument("--device", default="cuda:0")
@@ -217,15 +213,6 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_path=checkpoint,
     )
 
-    validation_dir = None
-    if not args.skip_video:
-        if args.validation_dir is None:
-            raise ValueError("video recording requires validation-dir")
-        validation_dir = args.validation_dir.resolve()
-        if not validation_dir.is_dir():
-            raise FileNotFoundError(
-                f"selected validation directory does not exist: {validation_dir}"
-            )
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     result_path = output_dir / "results.json"
@@ -264,7 +251,6 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint=checkpoint,
             acceptance_report=acceptance,
             evaluation_manifest=manifest_path,
-            validation_dir=validation_dir,
             output_dir=output_dir,
             video_length=args.video_length,
             video_num_envs=args.video_num_envs,

@@ -34,6 +34,7 @@ from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     SLOPE_COUNT,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
+    ABLATION_VALUE_OPTIONS,
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     CHECKPOINT_HASH_HISTORY_KEY,
     CHECKPOINT_LINEAGE_KEY,
@@ -82,13 +83,14 @@ def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
 
     deviations: list[str] = []
     exact = {
-        "max_iterations": S1_GUIDE_PARAMETERS["max_iterations"],
+        "max_iterations": GUIDE_MAX_ITERATIONS["s1_context_distillation"],
         "batch_size": S1_GUIDE_PARAMETERS["batch_size"],
         "mini_batch_size": S1_GUIDE_PARAMETERS["mini_batch_size"],
         "context_lr": S1_GUIDE_PARAMETERS["context_learning_rate"],
         "actor_lr": S1_GUIDE_PARAMETERS["actor_learning_rate"],
         "max_grad_norm": S1_GUIDE_PARAMETERS["gradient_clip"],
         "validation_interval": S1_GUIDE_PARAMETERS["validation_interval"],
+        "validation_patience": S1_GUIDE_PARAMETERS["validation_patience"],
         "max_validation_candidates": S1_GUIDE_PARAMETERS["validation_candidate_count"],
     }
     for name, expected in exact.items():
@@ -438,6 +440,7 @@ def train(args: argparse.Namespace) -> Path:
             "validation_fraction": args.validation_fraction,
             "validation_seed": args.validation_seed,
             "validation_interval": args.validation_interval,
+            "validation_patience": args.validation_patience,
             "max_validation_candidates": args.max_validation_candidates,
             "evaluation_num_envs": args.eval_num_envs,
             "evaluation_episodes_per_slope": args.eval_episodes_per_slope,
@@ -467,10 +470,32 @@ def train(args: argparse.Namespace) -> Path:
         training_configuration,
         expected_stage="s1_context_distillation",
     )
+    output = Path(args.output)
+    candidate_dir = output.resolve().parent / "s1_candidates"
+    candidate_training_configuration = finalize_training_configuration(
+        {
+            **training_configuration,
+            "stage": "s1_context_candidate",
+        }
+    )
+    base_lineage = {
+        "teacher_checkpoint_sha256": sha256_file(teacher_path),
+        "rollout_manifest_sha256": sha256_file(rollout_dir / "manifest.json"),
+        "rollout_shards_sha256": dict(rollout_manifest["shards_sha256"]),
+        **reward_calibration_binding,
+    }
+    candidate_paths_by_iteration: dict[int, Path] = {}
+    candidate_hashes: dict[int, str] = {}
     last_metrics: dict[str, float] = {}
     candidates: list[tuple[float, int, dict[str, torch.Tensor]]] = []
+    validation_history: list[dict[str, float | int | bool]] = []
+    best_validation_kl = float("inf")
+    no_improvement_count = 0
+    completed_iterations = 0
+    early_stopped = False
     student.train()
     for iteration in range(1, args.max_iterations + 1):
+        completed_iterations = iteration
         if args.batch_size <= training_indices.numel():
             order = torch.randperm(
                 training_indices.numel(), generator=batch_generator
@@ -530,36 +555,15 @@ def train(args: argparse.Namespace) -> Path:
             candidates.append((validation_kl, iteration, state))
             candidates.sort(key=lambda item: item[0])
             del candidates[args.max_validation_candidates :]
-
-    output = Path(args.output)
-    selection_report: Mapping[str, Any] | None = None
-    selection_report_digest: str | None = None
-    selected_candidate_digest: str | None = None
-    if not args.skip_task_return_evaluation:
-        candidate_dir = output.resolve().parent / "s1_candidates"
-        candidate_paths: list[Path] = []
-        candidate_hashes: dict[int, str] = {}
-        base_lineage = {
-            "teacher_checkpoint_sha256": sha256_file(teacher_path),
-            "rollout_manifest_sha256": sha256_file(rollout_dir / "manifest.json"),
-            "rollout_shards_sha256": dict(rollout_manifest["shards_sha256"]),
-            **reward_calibration_binding,
-        }
-        for validation_kl, iteration, state in candidates:
-            path = candidate_dir / f"candidate_{iteration:05d}.pt"
-            candidate_training_configuration = finalize_training_configuration(
-                {
-                    **training_configuration,
-                    "stage": "s1_context_candidate",
-                }
-            )
+            candidate_path = candidate_dir / f"candidate_{iteration:05d}.pt"
             save_checkpoint_atomic(
                 {
                     "schema_version": CHECKPOINT_SCHEMA_VERSION,
                     CHECKPOINT_STAGE_KEY: "s1_context_candidate",
                     CHECKPOINT_CURRICULUM_ITERATION_KEY: teacher_curriculum_iteration,
                     CHECKPOINT_HASH_HISTORY_KEY: {
-                        str(iteration): digest for iteration, digest in teacher_checkpoint_hashes.items()
+                        str(checkpoint_iteration): digest
+                        for checkpoint_iteration, digest in teacher_checkpoint_hashes.items()
                     },
                     "candidate_iteration": iteration,
                     "validation_action_kl": validation_kl,
@@ -567,11 +571,48 @@ def train(args: argparse.Namespace) -> Path:
                     TRAINING_CONFIGURATION_CHECKPOINT_KEY: candidate_training_configuration,
                     CHECKPOINT_LINEAGE_KEY: base_lineage,
                 },
-                path,
+                candidate_path,
                 metadata=metadata,
             )
-            candidate_paths.append(path)
-            candidate_hashes[iteration] = sha256_file(path)
+            candidate_paths_by_iteration[iteration] = candidate_path
+            candidate_hashes[iteration] = sha256_file(candidate_path)
+            improved = validation_kl < best_validation_kl
+            if improved:
+                best_validation_kl = validation_kl
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
+            validation_history.append(
+                {
+                    "iteration": iteration,
+                    "validation_action_kl": validation_kl,
+                    "improved": improved,
+                    "no_improvement_count": no_improvement_count,
+                }
+            )
+            if no_improvement_count >= args.validation_patience:
+                early_stopped = iteration < args.max_iterations
+                if early_stopped:
+                    print(
+                        f"early stop at iteration {iteration}: validation action KL "
+                        f"did not improve for {args.validation_patience} evaluations"
+                    )
+                    break
+
+    selection_report: Mapping[str, Any] | None = None
+    selection_report_digest: str | None = None
+    selected_candidate_digest: str | None = None
+    if not args.skip_task_return_evaluation:
+        retained_iterations = {iteration for _, iteration, _ in candidates}
+        candidate_paths = [
+            candidate_paths_by_iteration[iteration]
+            for iteration in sorted(retained_iterations)
+        ]
+        candidate_hashes = {
+            iteration: digest
+            for iteration, digest in candidate_hashes.items()
+            if iteration in retained_iterations
+        }
         report_path = output.resolve().parent / "s1_selection_report.json"
         evaluator = Path(__file__).resolve().with_name("evaluate_context_candidates.py")
         command = [
@@ -647,6 +688,11 @@ def train(args: argparse.Namespace) -> Path:
         },
         "training": {
             "max_iterations": args.max_iterations,
+            "completed_iterations": completed_iterations,
+            "early_stopped": early_stopped,
+            "validation_interval": args.validation_interval,
+            "validation_patience": args.validation_patience,
+            "validation_history": validation_history,
             "batch_size": int(batch_indices.numel()),
             "mini_batch_size": mini_batch_size,
             "context_lr": args.context_lr,
@@ -712,7 +758,12 @@ def main() -> int:
     parser.add_argument("--output", default="logs/rsl_rl/g1_rickshaw_context/s1_context.pt")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--training-seed", type=int, default=42)
-    parser.add_argument("--latent-dim", type=int, choices=(8, 16, 24), default=16)
+    parser.add_argument(
+        "--latent-dim",
+        type=int,
+        choices=ABLATION_VALUE_OPTIONS["latent_dim"],
+        default=16,
+    )
     parser.add_argument(
         "--max-iterations",
         type=int,
@@ -731,7 +782,16 @@ def main() -> int:
         type=int,
         default=S1_GUIDE_PARAMETERS["validation_interval"],
     )
-    parser.add_argument("--max-validation-candidates", type=int, default=40)
+    parser.add_argument(
+        "--validation-patience",
+        type=int,
+        default=S1_GUIDE_PARAMETERS["validation_patience"],
+    )
+    parser.add_argument(
+        "--max-validation-candidates",
+        type=int,
+        default=S1_GUIDE_PARAMETERS["validation_candidate_count"],
+    )
     parser.add_argument(
         "--eval-num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS
     )

@@ -304,6 +304,28 @@ def test_reward_normalization_is_explicit_and_numerically_compatible() -> None:
     torch.testing.assert_close(power, torch.tensor([23.0]))
 
 
+def test_joint_position_limit_adapter_resolves_policy_and_explicit_joint_ids() -> None:
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            joint_pos=torch.tensor([[-2.0, 0.5, 3.0]]),
+            soft_joint_pos_limits=torch.tensor(
+                [[[-1.0, 1.0], [-1.0, 1.0], [-1.0, 1.0]]]
+            ),
+        )
+    )
+    env = SimpleNamespace(scene={"robot": robot}, policy_joint_ids=[0, 2])
+
+    torch.testing.assert_close(
+        rewards.joint_position_limits(env), torch.tensor([3.0])
+    )
+    torch.testing.assert_close(
+        rewards.joint_position_limits(
+            env, SimpleNamespace(name="robot", joint_ids=[1])
+        ),
+        torch.tensor([0.0]),
+    )
+
+
 def test_runtime_input_closure_covers_transitive_code_assets_and_isaaclab() -> None:
     hashes = reward_calibration_runtime_input_hashes()
     assert REQUIRED_RUNTIME_INPUT_LABELS == REQUIRED_RUNTIME_INPUT_HASHES

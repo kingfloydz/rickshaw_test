@@ -169,8 +169,6 @@ def test_record_video_builds_playback_command_without_launching_isaac_sim(
     acceptance.write_text("{}\n", encoding="utf-8")
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}\n", encoding="utf-8")
-    validation_dir = tmp_path / "validation"
-    validation_dir.mkdir()
     output_dir = tmp_path / "output"
     stale_dir = output_dir / "video_recording"
     stale_dir.mkdir(parents=True)
@@ -187,7 +185,6 @@ def test_record_video_builds_playback_command_without_launching_isaac_sim(
         checkpoint=checkpoint,
         acceptance_report=acceptance,
         evaluation_manifest=manifest,
-        validation_dir=validation_dir,
         output_dir=output_dir,
         video_length=321,
         video_num_envs=2,
@@ -198,6 +195,7 @@ def test_record_video_builds_playback_command_without_launching_isaac_sim(
     assert command[command.index("--checkpoint") + 1] == str(checkpoint)
     assert command[command.index("--acceptance-report") + 1] == str(acceptance)
     assert command[command.index("--ablation-manifest") + 1] == str(manifest)
+    assert "--validation-dir" not in command
     assert command[command.index("--video-dir") + 1] == str(stale_dir)
     assert command[command.index("--video_length") + 1] == "321"
     assert command[command.index("--num_envs") + 1] == "2"

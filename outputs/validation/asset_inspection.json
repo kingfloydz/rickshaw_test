@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-07-15T04:09:18Z",
+  "created_utc": "2026-07-16T10:25:31Z",
   "g1_dex1": {
     "dex_joint_count": 4,
     "nonfixed_joint_count": 33,
@@ -218,22 +218,22 @@
       "g1_dex1/meshes/xl330_link.STL": "3a4207216ec90bb76394760583a2056012ff6b9097e10c22937e59f3d51057e5",
       "rickshaw/body.stl": "492280ae65128c677e02028bdbe66048b18d02d8029f287807e735eb565f85d4",
       "rickshaw/body_collision.stl": "baaf732a5a245e5ae74b6c3f01b3b9f0621e8fb4b5f7e3f17c1ab0d12e4c017b",
-      "rickshaw/config.yaml": "f5009d6f1fc4c7d7808d902aa44409c14c6735adf3e8577b752f084eb78b18ff",
+      "rickshaw/config.yaml": "3db96d9c29302987dc4d36b6531f8d6ece5c934bd72a862fe906efdfc78749ab",
       "rickshaw/configuration/rickshaw_base.usd": "cdc66d1bb0bf1a9b982e54f1e6240aa2ffba2485772e2cb74abd7b73d6e8a32b",
-      "rickshaw/configuration/rickshaw_physics.usd": "42dbac8c469156205005bac0c69fa39d9aed2528de1ed26a935ff32207960b35",
+      "rickshaw/configuration/rickshaw_physics.usd": "22b8017e567964c324124222d2e567c2f0adc43b7e2d7e98cf0bd76a8816eaf1",
       "rickshaw/configuration/rickshaw_robot.usd": "3baa300ec20b74c88f5d022fbc87851bcabc1d1f753730ff9f393d531cc988aa",
       "rickshaw/configuration/rickshaw_sensor.usd": "536ef6ef392e607b7e86c47a1f31d560186aa2bac5d3876417ca754e39d1a44b",
       "rickshaw/left_wheel.stl": "7aa0a3c339006b8bbcb65723875c2ee20c2655fe6559d32f74f942c8859b1a3f",
-      "rickshaw/rickshaw.urdf": "eb026e1307d0c5ad5afb450909d4068f41f463a01bd6d1ac15361ac68835191d",
+      "rickshaw/rickshaw.urdf": "0d19fea9842711c6c7780e44897580d1051e730ae1d6f324553fc5b0a24dff45",
       "rickshaw/rickshaw.usd": "91256866af55c2c16f3f2655b16c81f1cdbfd09edd53335019f5062671073f0c",
       "rickshaw/right_wheel.stl": "c57e0cff58077a3ea9411cddec42d14b0e9665ef5afe4f29ca9a07893876adbe"
     },
-    "implementation_guide_sha256": "c4583980c2d51c7bea7de91086d6a5f1df5cc19bbb3324ffb4340aea236d27f7",
-    "inspector_sha256": "22572fbfd5650cc9536ec3d71bcbb248eee4274f3793ad462fd5916fe43113f3"
+    "implementation_guide_sha256": "62752480160d0763167facad63af59220bafa264d9c9506665f601702fb91015",
+    "inspector_sha256": "1ce30ef6ffbc8b994866d356ba4acb9b99bdf1a921b460be9a8292266632e0b9"
   },
   "rickshaw": {
     "urdf": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/assets/rickshaw/rickshaw.urdf",
-    "urdf_sha256": "eb026e1307d0c5ad5afb450909d4068f41f463a01bd6d1ac15361ac68835191d",
+    "urdf_sha256": "0d19fea9842711c6c7780e44897580d1051e730ae1d6f324553fc5b0a24dff45",
     "usd": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/assets/rickshaw/rickshaw.usd",
     "usd_sha256": "91256866af55c2c16f3f2655b16c81f1cdbfd09edd53335019f5062671073f0c"
   },
@@ -1703,16 +1703,16 @@
       "bodies": {
         "base_link": {
           "center_of_mass_m": [
-            0.7427393794059753,
+            0.7227393984794617,
             0.0,
             0.7026888728141785
           ],
           "diagonal_inertia_kg_m2": [
-            12.322620391845703,
-            37.12868118286133,
-            29.71575927734375
+            7.393571853637695,
+            22.27720832824707,
+            17.829456329345703
           ],
-          "mass_kg": 60.0,
+          "mass_kg": 36.0,
           "path": "/rickshaw/base_link"
         },
         "left_tow_hitch_link": {
@@ -1736,11 +1736,11 @@
             0.0
           ],
           "diagonal_inertia_kg_m2": [
-            0.08897999674081802,
-            0.17577999830245972,
-            0.08897999674081802
+            0.07118400186300278,
+            0.1406240016222,
+            0.07118400186300278
           ],
-          "mass_kg": 2.5,
+          "mass_kg": 2.0,
           "path": "/rickshaw/left_wheel_link"
         },
         "right_tow_hitch_link": {
@@ -1764,11 +1764,11 @@
             0.0
           ],
           "diagonal_inertia_kg_m2": [
-            0.08897999674081802,
-            0.17577999830245972,
-            0.08897999674081802
+            0.07118400186300278,
+            0.1406240016222,
+            0.07118400186300278
           ],
-          "mass_kg": 2.5,
+          "mass_kg": 2.0,
           "path": "/rickshaw/right_wheel_link"
         }
       },
@@ -1863,7 +1863,7 @@
           "type": "revolute"
         }
       },
-      "total_mass_kg": 65.03999999910593,
+      "total_mass_kg": 40.03999999910593,
       "unresolved_local_references": []
     }
   }

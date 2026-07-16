@@ -16,8 +16,8 @@ add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import atomic_torch_save, sha256_file  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
+    ABLATION_VALUE_OPTIONS,
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
-    DEFAULT_VALIDATION_DIR,
     GUIDE_MAX_ITERATIONS,
     GUIDE_TRAINING_NUM_ENVS,
     GUIDE_TRAINING_PARAMETERS,
@@ -47,7 +47,6 @@ def main() -> int:
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--teacher", required=True)
     parser.add_argument("--context", required=True)
-    parser.add_argument("--validation-dir", default=None)
     parser.add_argument("--bootstrap-dir", default="logs/rsl_rl/g1_rickshaw_student")
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument(
@@ -57,7 +56,12 @@ def main() -> int:
         type=int,
         default=GUIDE_TRAINING_NUM_ENVS,
     )
-    parser.add_argument("--rollout-steps", type=int, choices=(24, 48, 64), default=None)
+    parser.add_argument(
+        "--rollout-steps",
+        type=int,
+        choices=ABLATION_VALUE_OPTIONS["rollout_steps"],
+        default=None,
+    )
     args, remaining = parser.parse_known_args()
     validate_formal_launcher_arguments(remaining)
     teacher = require_existing_file(args.teacher, "teacher checkpoint")
@@ -83,11 +87,6 @@ def main() -> int:
     s1_training_configuration = dict(
         context_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]
     )
-    validation_dir = Path(
-        args.validation_dir
-        or os.environ.get("G1_RICKSHAW_VALIDATION_DIR", os.fspath(DEFAULT_VALIDATION_DIR))
-    ).resolve()
-    os.environ["G1_RICKSHAW_VALIDATION_DIR"] = os.fspath(validation_dir)
     resume_checkpoint_path: Path | None = None
     resume_training_configuration: dict | None = None
     if args.resume_checkpoint is None:

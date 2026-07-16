@@ -90,8 +90,8 @@ class RslRickshawActorModel(_RslModelContract):
             self.encoder = TeacherEncoder(obs[self.source_group].shape[-1])
             self.stage = "teacher"
         else:
-            if latent_dim not in {8, 16, 24}:
-                raise ValueError("student latent_dim must be one of 8, 16, or 24")
+            if latent_dim not in {8, 16, 24, 32}:
+                raise ValueError("student latent_dim must be one of 8, 16, 24, or 32")
             if tuple(obs[self.source_group].shape[1:]) != (61, 96):
                 raise ValueError("history must have shape [N,61,96]")
             self.encoder = ContextEncoder(latent_dim=latent_dim)
@@ -205,8 +205,8 @@ class RslRickshawCriticModel(_RslModelContract):
         if len(source_groups) != 1:
             raise ValueError("critic must use the same single context source as actor")
         self.source_group = source_groups[0]
-        if latent_dim not in {8, 16, 24}:
-            raise ValueError("critic latent_dim must be one of 8, 16, or 24")
+        if latent_dim not in {8, 16, 24, 32}:
+            raise ValueError("critic latent_dim must be one of 8, 16, 24, or 32")
         if self.source_group == "teacher_extrinsics" and latent_dim != 16:
             raise ValueError("the privileged teacher critic latent dimension is fixed to 16")
         privileged_dim = obs["critic"].shape[-1]

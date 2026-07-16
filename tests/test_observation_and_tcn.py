@@ -170,7 +170,7 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
     assert recurrent_modules == []
 
 
-@pytest.mark.parametrize("latent_dim", (8, 16, 24))
+@pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
 def test_latent_ablation_preserves_exact_16d_teacher_actor_interface(
     latent_dim: int,
 ) -> None:

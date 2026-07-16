@@ -532,18 +532,16 @@ def test_fixed_contact_allocator_preserves_torch_batch_for_scalar_free_axis_torq
     assert all(torch.is_tensor(component) for row in wheel_rows for component in row)
 
 
-def test_runtime_static_target_is_loaded_directly() -> None:
+def test_runtime_static_target_uses_compiled_tables() -> None:
     q_reset = torch.zeros((1, ACTION_DIM))
     q_ref = torch.full_like(q_reset, 7.0)
     env = SimpleNamespace(
         device="cpu",
         slope=torch.zeros(1),
-        reset_pose_library=SimpleNamespace(
-            pose_for_gradient=lambda _gradient: SimpleNamespace(
-                q_reset=tuple(q_reset[0].tolist()),
-                q_ref=tuple(q_ref[0].tolist()),
-            )
-        ),
+        reset_pose_gradients=torch.zeros(1),
+        reset_pose_index=torch.zeros(1, dtype=torch.long),
+        reset_q_reset_table=q_reset,
+        reset_q_ref_table=q_ref,
         action_state=SimpleNamespace(q_ref=torch.zeros_like(q_reset)),
         policy_joint_stiffness=torch.full_like(q_reset, 2.0),
         reset_policy_joint_pos=torch.zeros_like(q_reset),
@@ -913,6 +911,8 @@ def test_payload_write_updates_physx_mass_com_and_inertia_from_default() -> None
         num_envs=2,
         device="cpu",
         scene=_FakeScene(rickshaw=cart),
+        rickshaw_body_masses=view.masses.clone(),
+        rickshaw_body_com_pos_b=view.coms[..., :3].clone(),
     )
     payload_mass = torch.tensor([2.0], dtype=torch.float64)
     payload_com = torch.tensor([[1.0, 0.1, 0.9]], dtype=torch.float64)

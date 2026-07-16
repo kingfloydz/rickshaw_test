@@ -167,9 +167,6 @@ def main() -> int:  # noqa: C901
         fixed_assignment = formal_slope_environment_assignment(
             args.num_envs, device=agent_cfg.device
         )
-        curriculum_callback = getattr(base_env, "set_curriculum_iteration", None)
-        if not callable(curriculum_callback):
-            raise RuntimeError("environment does not expose set_curriculum_iteration")
         storage_dtype = torch.float16 if args.storage_dtype == "float16" else torch.float32
         pending: dict[str, list[torch.Tensor]] = {}
         shard_hashes: dict[str, str] = {}
@@ -291,7 +288,7 @@ def main() -> int:  # noqa: C901
 
         target_samples = args.num_envs * args.num_steps
         for segment_index, (expected_stage, curriculum_iteration) in enumerate(stage_specs):
-            curriculum_callback(curriculum_iteration)
+            base_env.set_curriculum_iteration(curriculum_iteration)
             actual_global_stage = base_env.curriculum_runtime_state.stage.name
             if actual_global_stage != expected_stage:
                 raise RuntimeError(

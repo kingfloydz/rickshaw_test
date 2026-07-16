@@ -166,11 +166,7 @@ class TerminationCauseState:
 
 
 def _termination_cause_state(env: Any) -> TerminationCauseState:
-    state = getattr(env, "termination_cause_state", None)
-    if state is None:
-        state = TerminationCauseState.zeros(env.num_envs, device=env.device)
-        env.termination_cause_state = state
-    return state
+    return env.termination_cause_state
 
 
 def termination_cause_histogram(env: Any, *, reset: bool = False) -> dict[str, int]:

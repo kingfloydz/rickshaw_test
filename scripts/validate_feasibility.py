@@ -525,10 +525,10 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     def configure_physical_point(point: Any) -> None:
         singleton_ranges = {
             name: (
-                float(cfg.runtime_randomization.nominal_values.get(name, 0.5 * (low + high))),
-                float(cfg.runtime_randomization.nominal_values.get(name, 0.5 * (low + high))),
+                float(cfg.runtime_randomization.nominal_values[name]),
+                float(cfg.runtime_randomization.nominal_values[name]),
             )
-            for name, (low, high) in cfg.runtime_randomization.ranges.items()
+            for name in cfg.runtime_randomization.ranges
         }
         for name, value in point.values.items():
             singleton_ranges[name] = (float(value), float(value))
@@ -728,7 +728,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             maximum_waist_ratio[active] = torch.maximum(
                 maximum_waist_ratio[active], waist_ratio[active]
             )
-            d6_proxy_wrench = getattr(base, "d6_incoming_joint_proxy_w", None)
+            d6_proxy_wrench = base.d6_incoming_joint_proxy_w
             if not torch.is_tensor(d6_proxy_wrench) or d6_proxy_wrench.shape != (
                 base.num_envs,
                 2,

@@ -24,8 +24,8 @@ from .slope_contract import SLOPE_GRADIENTS
 
 
 POLICY_ACCEPTANCE_SCHEMA_VERSION: Final[int] = 1
-POLICY_ABLATION_MATRIX_SCHEMA_VERSION: Final[int] = 3
-POLICY_ABLATION_MANIFEST_SCHEMA_VERSION: Final[int] = 3
+POLICY_ABLATION_MATRIX_SCHEMA_VERSION: Final[int] = 4
+POLICY_ABLATION_MANIFEST_SCHEMA_VERSION: Final[int] = 4
 GUIDE_POLICY_EVALUATION_TASK: Final[str] = (
     "Isaac-G1-Rickshaw-Directional-Slope-v0"
 )
@@ -53,9 +53,9 @@ THRESHOLD_OPERATORS: Final[dict[str, Any]] = {
     ">": lambda value, limit: value > limit,
 }
 ABLATION_VARIANTS: Final[dict[str, tuple[Any, ...]]] = {
-    "fat2_weight": (0.0, 0.1),
+    "fat2_weight": (0.0, 0.1, 0.2),
     "rollout_steps": (24, 48, 64),
-    "latent_dim": (8, 16, 24),
+    "latent_dim": (8, 16, 24, 32),
 }
 ABLATION_DEFAULTS: Final[dict[str, Any]] = {
     "fat2_weight": 0.1,

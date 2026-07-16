@@ -87,23 +87,6 @@ def _safety_authority(
 ) -> Path:
     guide = tmp_path / "implementation_guide.txt"
     guide.write_text("implementation guide evidence\n", encoding="utf-8")
-    asset_inspection = tmp_path / "asset_inspection.json"
-    asset_inspection.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "tool": "inspect_assets",
-                "status": "passed",
-                "inputs": {
-                    "asset_dependencies_sha256": {
-                        name: hashlib.sha256(path.read_bytes()).hexdigest()
-                        for name, path in (assets or {}).items()
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
     reset_alignment = tmp_path / "reset_alignment.json"
     reset_alignment.write_text(
         json.dumps(
@@ -174,7 +157,6 @@ def _safety_authority(
     reset_alignment.write_text(json.dumps(reset_alignment_mapping), encoding="utf-8")
     sources = {
         "implementation_guide": guide,
-        "asset_inspection": asset_inspection,
         "reset_pose_library": reset_pose,
         "reset_alignment": reset_alignment,
     }

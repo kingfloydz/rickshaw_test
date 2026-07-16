@@ -139,11 +139,15 @@ def test_candidate_cache_contract_binds_stage_a_inputs() -> None:
     same_inputs = _candidate_contract(
         SimpleNamespace(**{**vars(arguments), "output": Path("two.yaml")})
     )
+    static_only = _candidate_contract(
+        SimpleNamespace(**{**vars(arguments), "static_only": True})
+    )
     changed_seed = _candidate_contract(
         SimpleNamespace(**{**vars(arguments), "seed": 43})
     )
 
     assert original == same_inputs
+    assert original == static_only
     assert original != changed_seed
     assert set(original) == {
         "arguments",
@@ -169,10 +173,10 @@ def test_zmp_optimization_reserve_does_not_relax_hard_margin() -> None:
     args = _build_parser().parse_args([])
 
     assert args.minimum_zmp_margin == pytest.approx(0.02)
-    assert args.zmp_optimization_reserve_fraction == pytest.approx(0.10)
+    assert args.zmp_optimization_reserve_fraction == pytest.approx(0.025)
     assert _zmp_optimization_target(
         args.minimum_zmp_margin, args.zmp_optimization_reserve_fraction
-    ) == pytest.approx(0.022)
+    ) == pytest.approx(0.0205)
 
 
 def test_partial_candidate_cache_round_trips_completed_slopes(

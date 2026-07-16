@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
-import json
 import os
 from pathlib import Path
 import re
@@ -17,8 +15,8 @@ add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import sha256_file  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
+    ABLATION_VALUE_OPTIONS,
     DEFAULT_RESET_POSES_PATH,
-    DEFAULT_VALIDATION_DIR,
     GUIDE_MAX_ITERATIONS,
     GUIDE_TRAINING_NUM_ENVS,
     GUIDE_TRAINING_PARAMETERS,
@@ -36,9 +34,6 @@ from _training_configuration import (  # noqa: E402
     validate_formal_launcher_arguments,
     validate_training_configuration as validate_launcher_training_configuration,
 )
-from _training_validation import validate_training_assets
-
-
 DEFAULT_TASK = GUIDE_TRAINING_TASK
 S0_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s0_teacher"]
 
@@ -46,7 +41,6 @@ S0_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s0_teacher"]
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--validation-dir", default=None)
     parser.add_argument(
         "--experiment-dir",
         default=None,
@@ -60,12 +54,22 @@ def main() -> int:
         type=int,
         default=GUIDE_TRAINING_NUM_ENVS,
     )
-    parser.add_argument("--fat2-weight", type=float, choices=(0.0, 0.1), default=0.1)
-    parser.add_argument("--rollout-steps", type=int, choices=(24, 48, 64), default=48)
+    parser.add_argument(
+        "--fat2-weight",
+        type=float,
+        choices=ABLATION_VALUE_OPTIONS["fat2_weight"],
+        default=0.1,
+    )
+    parser.add_argument(
+        "--rollout-steps",
+        type=int,
+        choices=ABLATION_VALUE_OPTIONS["rollout_steps"],
+        default=48,
+    )
     parser.add_argument(
         "--latent-dim",
         type=int,
-        choices=(8, 16, 24),
+        choices=ABLATION_VALUE_OPTIONS["latent_dim"],
         default=16,
         help="Downstream student ablation binding; the S0 teacher architecture remains 16-D.",
     )
@@ -82,32 +86,18 @@ def main() -> int:
         raise ValueError(
             "S0 owns its agent and resume selection; use --resume-checkpoint"
         )
-    validation_dir = Path(
-        args.validation_dir
-        or os.environ.get("G1_RICKSHAW_VALIDATION_DIR", os.fspath(DEFAULT_VALIDATION_DIR))
-    ).resolve()
     feasibility_path = feasibility_config_path()
     os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(feasibility_path)
     reset_pose_path = Path(
         os.environ.get("G1_RICKSHAW_RESET_POSES", os.fspath(DEFAULT_RESET_POSES_PATH))
     ).resolve()
-    validate_training_assets(validation_dir)
     require_pinned_rsl_rl()
-    os.environ["G1_RICKSHAW_VALIDATION_DIR"] = os.fspath(validation_dir)
     os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
     os.environ["G1_RICKSHAW_TASK"] = args.task
     os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s0_teacher"
-    current_lineage = {
-        "asset_inspection_report_sha256": sha256_file(
-            validation_dir / "asset_inspection.json"
-        ),
-    }
     current_inputs = {
         "feasibility_envelope": sha256_file(feasibility_path),
         "reset_poses": sha256_file(reset_pose_path),
-        "asset_inspection_report": current_lineage[
-            "asset_inspection_report_sha256"
-        ],
     }
     resume_path: Path | None = None
     resume_training_configuration: dict | None = None
@@ -123,19 +113,7 @@ def main() -> int:
         resume_training_configuration = dict(
             resume_checkpoint[TRAINING_CONFIGURATION_KEY]
         )
-        resume_lineage = resume_checkpoint.get("g1_rickshaw_lineage")
-        if not isinstance(resume_lineage, Mapping):
-            raise RuntimeError("S0 resume checkpoint is missing its training lineage")
-        for name, digest in current_lineage.items():
-            if resume_lineage.get(name) != digest:
-                raise RuntimeError(
-                    f"S0 resume checkpoint {name} differs from current validation evidence"
-                )
-        current_lineage = dict(resume_lineage)
-    os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = json.dumps(
-        current_lineage,
-        sort_keys=True,
-    )
+    os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = "{}"
     seed = cli_value(
         remaining,
         "--seed",

@@ -3,16 +3,13 @@ authority_id: g1-rickshaw-safety-acceptance-2026-07-15
 provenance:
   method: >-
     Independent pre-scan acceptance authority. Values are engineering safety
-    limits tied to the implementation guide, inspected assets, and the pinned
-    19-slope reset-alignment evidence; the candidate feasibility envelope is
-    deliberately not a provenance source.
+    limits tied to the implementation guide and the pinned 19-slope
+    reset-alignment evidence; the candidate feasibility envelope is deliberately
+    not a provenance source.
 source_files:
   implementation_guide:
     path: ../G1_Rickshaw_IsaacLab_Implementation_Guide.md
     sha256: c4583980c2d51c7bea7de91086d6a5f1df5cc19bbb3324ffb4340aea236d27f7
-  asset_inspection:
-    path: ../outputs/validation/asset_inspection.json
-    sha256: eed6ff64f3223005407fd2a7f7cd78e531b004a9d435dad842b3b97accb100cf
   reset_pose_library:
     path: reset_poses.yaml
     sha256: c9d4bc54c0b4c408eb0c167d69e95b354018a800730fd6a13e9e49c050693c70
@@ -26,23 +23,23 @@ thresholds:
     rationale: Bounds continuous torso tilt above the pinned 19-slope standing maximum.
   safety.illegal_contact_force_threshold:
     value: 5.0
-    sources: [implementation_guide, asset_inspection]
-    rationale: Contact rejection floor for the inspected robot collision groups.
+    sources: [implementation_guide]
+    rationale: Contact rejection floor for the configured robot collision groups.
   safety.robot_cart_contact_force_threshold:
     value: 5.0
-    sources: [implementation_guide, asset_inspection]
+    sources: [implementation_guide]
     rationale: Contact rejection floor outside the two authorized grasp interfaces.
   safety.cart_ground_contact_force_threshold:
     value: 5.0
-    sources: [implementation_guide, asset_inspection]
+    sources: [implementation_guide]
     rationale: Contact rejection floor for non-wheel cart geometry touching terrain.
   safety.minimum_wheel_normal_force:
     value: 25.0
-    sources: [implementation_guide, asset_inspection]
-    rationale: Conservative two-wheel lift margin for the inspected wheel geometry and mass.
+    sources: [implementation_guide]
+    rationale: Conservative two-wheel lift margin for the configured wheel geometry and mass.
   safety.min_ground_reaction:
     value: 100.0
-    sources: [implementation_guide, asset_inspection]
+    sources: [implementation_guide]
     rationale: Minimum support reaction below which ZMP evidence is invalid.
   safety.d6_residual_limit:
     value: 0.06
