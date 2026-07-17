@@ -14,6 +14,7 @@ from g1_rickshaw_lab.slope_contract import (
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
 )
+from g1_rickshaw_lab.training_contract import STATIC_HAND_LOAD_ITERATIONS
 from .dynamics import update_slope_frame
 
 
@@ -27,7 +28,7 @@ class CurriculumScheduleCfg:
     """Iteration schedule for static hand-load pretraining and full-cart training."""
 
     rollout_steps_per_iteration: int = 48
-    static_hand_load_iterations: int = 1000
+    static_hand_load_iterations: int = STATIC_HAND_LOAD_ITERATIONS
 
     def validate(self) -> None:
         if self.rollout_steps_per_iteration <= 0:
@@ -264,12 +265,7 @@ def terrain_level_curriculum(env: Any, env_ids: torch.Tensor) -> torch.Tensor:
     state: TerrainCurriculumState = env.curriculum_state
     mean_score = state.mean_score(env_ids)
     manager = env.termination_manager
-    if hasattr(manager, "time_outs"):
-        timed_out = manager.time_outs[env_ids]
-    elif hasattr(env, "time_out_buf"):
-        timed_out = env.time_out_buf[env_ids]
-    else:
-        raise AttributeError("timeout state is required by the terrain curriculum")
+    timed_out = manager.time_outs[env_ids]
     terminated = manager.terminated[env_ids]
     early = terminated & ~timed_out
     delta = terrain_level_delta(

@@ -191,6 +191,28 @@ def test_domain_refresh_occurs_once_at_the_200_baseline_iteration_boundary(
     assert runner._g1_pending_reset_observation is None
 
 
+@pytest.mark.parametrize("rollout_steps", (24, 48, 64))
+def test_static_load_boundary_has_equal_policy_step_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    rollout_steps: int,
+) -> None:
+    runner_type = _install_fake_runner(
+        monkeypatch, stage="s0_teacher", rollout_steps=rollout_steps
+    )
+    env = _FakeEnvironment(current_epoch=0)
+    runner = runner_type(env)
+    boundary_updates = 2000 * contract.BASELINE_ROLLOUT_STEPS // rollout_steps
+
+    for _ in range(boundary_updates - 1):
+        runner.alg.update()
+    assert runner._g1_curriculum_iteration < 2000
+
+    runner.alg.update()
+
+    assert runner._g1_curriculum_iteration == 2000
+    assert runner._g1_stage_policy_steps == 2000 * contract.BASELINE_ROLLOUT_STEPS
+
+
 def test_episode_resets_do_not_request_domain_resampling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -258,16 +280,20 @@ def test_s2_bootstrap_starts_from_the_teacher_curriculum_iteration(
     assert env.global_reset_calls == 1
 
 
+@pytest.mark.parametrize("rollout_steps", (24, 48, 64))
 def test_s2_resume_reconstructs_the_stage_start_from_completed_samples(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, rollout_steps: int
 ) -> None:
     stage_start = 600
-    completed_updates = 10
-    curriculum_iteration = stage_start + completed_updates
+    completed_updates = 12
+    completed_baseline_iterations = (
+        completed_updates * rollout_steps // contract.BASELINE_ROLLOUT_STEPS
+    )
+    curriculum_iteration = stage_start + completed_baseline_iterations
     runner_type = _install_fake_runner(
         monkeypatch,
         stage="s2_student_ppo",
-        rollout_steps=48,
+        rollout_steps=rollout_steps,
         curriculum_start=curriculum_iteration,
     )
     env = _FakeEnvironment(current_epoch=curriculum_iteration // 200)
@@ -285,11 +311,13 @@ def test_s2_resume_reconstructs_the_stage_start_from_completed_samples(
     assert runner._g1_curriculum_start_iteration == stage_start
     assert runner._g1_curriculum_iteration == curriculum_iteration
     assert runner._g1_training_iterations == completed_updates
-    assert runner._g1_stage_policy_steps == completed_updates * 48
+    assert runner._g1_stage_policy_steps == completed_updates * rollout_steps
     assert runner.current_learning_iteration == completed_updates
 
     runner.alg.update()
-    assert runner._g1_curriculum_iteration == curriculum_iteration + 1
+    assert runner._g1_curriculum_iteration == stage_start + (
+        (completed_updates + 1) * rollout_steps // contract.BASELINE_ROLLOUT_STEPS
+    )
 
 
 def _stub_checkpoint_validation(

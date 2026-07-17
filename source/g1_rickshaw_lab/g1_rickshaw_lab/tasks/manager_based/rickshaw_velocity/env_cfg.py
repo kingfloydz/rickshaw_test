@@ -614,8 +614,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.enable_external_forces_every_iteration = True
-        if hasattr(self.sim.physx, "solve_articulation_contact_last"):
-            self.sim.physx.solve_articulation_contact_last = True
+        self.sim.physx.solve_articulation_contact_last = True
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
         self.scene.robot.spawn.activate_contact_sensors = True
         self.scene.rickshaw.spawn.activate_contact_sensors = True

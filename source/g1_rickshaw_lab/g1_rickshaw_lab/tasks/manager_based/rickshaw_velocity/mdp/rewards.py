@@ -324,10 +324,7 @@ def feet_slide(
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
     sensor_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    if hasattr(sensor.data, "current_contact_time"):
-        contact = sensor.data.current_contact_time[:, sensor_ids] > 0.0
-    else:
-        raise AttributeError("contact sensor must expose current_contact_time for feet_slide")
+    contact = sensor.data.current_contact_time[:, sensor_ids] > 0.0
 
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
@@ -436,13 +433,7 @@ def termination(env: Any) -> torch.Tensor:
 
     manager = env.termination_manager
     terminated = manager.terminated
-    if hasattr(manager, "time_outs"):
-        timeout = manager.time_outs
-    elif hasattr(env, "time_out_buf"):
-        timeout = env.time_out_buf
-    else:
-        raise AttributeError("TerminationManager must expose time_outs for timeout exclusion")
-    return (terminated & ~timeout).to(dtype=torch.float32)
+    return (terminated & ~manager.time_outs).to(dtype=torch.float32)
 
 
 __all__ = [

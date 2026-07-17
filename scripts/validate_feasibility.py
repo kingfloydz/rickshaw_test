@@ -706,8 +706,8 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             maximum_waist_ratio[active] = torch.maximum(
                 maximum_waist_ratio[active], waist_ratio[active]
             )
-            d6_proxy_wrench = base.d6_incoming_joint_proxy_w
-            if not torch.is_tensor(d6_proxy_wrench) or d6_proxy_wrench.shape != (
+            d6_wrench = base.rickshaw_state.d6_wrench_w
+            if not torch.is_tensor(d6_wrench) or d6_wrench.shape != (
                 base.num_envs,
                 2,
                 6,
@@ -716,10 +716,10 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                     "feasibility scan requires the retained-hitch incoming D6 proxy"
                 )
             d6_force = torch.linalg.vector_norm(
-                d6_proxy_wrench[..., :3], dim=-1
+                d6_wrench[..., :3], dim=-1
             ).amax(dim=-1)
             d6_torque = torch.linalg.vector_norm(
-                d6_proxy_wrench[..., 3:], dim=-1
+                d6_wrench[..., 3:], dim=-1
             ).amax(dim=-1)
             handle_cfg = base.d6_constraint_manager.cfg
             max_force = torch.full_like(d6_force, float(handle_cfg.max_force))

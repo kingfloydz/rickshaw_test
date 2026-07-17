@@ -89,6 +89,31 @@ class TestRickshawRLModels(unittest.TestCase):
             set(teacher.actor.state_dict()), set(student.actor.state_dict())
         )
 
+        for latent_dim in (8, 16, 24, 32):
+            with self.subTest(latent_dim=latent_dim):
+                teacher = G1RickshawTeacherActor(latent_dim)
+                student = G1RickshawStudentActor(latent_dim)
+                teacher_distribution, z_star = teacher.forward_with_context(
+                    current, history, dynamic, static
+                )
+                student_distribution, z_hat = student.forward_with_context(
+                    current, history
+                )
+                self.assertEqual(z_star.shape, (batch, latent_dim))
+                self.assertEqual(z_hat.shape, (batch, latent_dim))
+                self.assertEqual(
+                    teacher.actor.network[0].in_features,
+                    96 + latent_dim,
+                )
+                self.assertEqual(
+                    student.actor.network[0].in_features,
+                    96 + latent_dim,
+                )
+                self.assertEqual(
+                    teacher_distribution.mean.shape,
+                    student_distribution.mean.shape,
+                )
+
     def test_minimal_distillation_is_student_only(self) -> None:
         batch = 4
         current = torch.randn(batch, 96)

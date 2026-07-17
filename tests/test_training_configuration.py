@@ -6,9 +6,12 @@ import sys
 import pytest
 
 from g1_rickshaw_lab.training_contract import (
-    MAINLINE_PARAMETERS,
+    DEFAULT_TRAINING_PARAMETERS,
+    GUIDE_TRAINING_PARAMETERS,
+    SUPPORTED_FAT2_WEIGHTS,
     TRAINING_CONFIGURATION_SCHEMA_VERSION,
     finalize_training_configuration,
+    validate_guide_training_configuration,
     validate_training_configuration,
 )
 
@@ -34,7 +37,7 @@ def _configuration() -> dict:
         "resolved_parameters": {},
         "actor_initialized_from_teacher": None,
         "stage_coverage": None,
-        "mainline_parameters": dict(MAINLINE_PARAMETERS),
+        "training_parameters": dict(DEFAULT_TRAINING_PARAMETERS),
     }
 
 
@@ -42,8 +45,24 @@ def test_training_configuration_has_one_canonical_validator() -> None:
     configuration = finalize_training_configuration(_configuration())
     normalized = validate_training_configuration(configuration)
 
-    assert normalized["mainline_parameters"] == MAINLINE_PARAMETERS
+    assert normalized["training_parameters"] == DEFAULT_TRAINING_PARAMETERS
     assert validate_launcher_training_configuration(configuration) == normalized
+
+
+def test_s0_configuration_binds_the_static_load_schedule() -> None:
+    configuration = _configuration()
+    configuration["guide_parameters"] = dict(GUIDE_TRAINING_PARAMETERS["s0_teacher"])
+
+    validated = validate_guide_training_configuration(
+        configuration, expected_stage="s0_teacher"
+    )
+
+    assert validated["guide_parameters"]["static_hand_load_iterations"] == 2000
+    configuration["guide_parameters"] = {}
+    with pytest.raises(ValueError, match="guide parameters differ"):
+        validate_guide_training_configuration(
+            configuration, expected_stage="s0_teacher"
+        )
 
 
 def test_training_configuration_rejects_unknown_or_non_mainline_fields() -> None:
@@ -53,8 +72,44 @@ def test_training_configuration_rejects_unknown_or_non_mainline_fields() -> None
         validate_launcher_training_configuration(configuration)
 
     configuration = _configuration()
-    configuration["mainline_parameters"]["latent_dim"] = 24
-    with pytest.raises(ValueError, match="exactly"):
+    configuration["training_parameters"]["latent_dim"] = 7
+    with pytest.raises(ValueError, match="context dimension"):
+        validate_launcher_training_configuration(configuration)
+
+
+@pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
+@pytest.mark.parametrize("rollout_steps", (24, 48, 64))
+@pytest.mark.parametrize("fat2_weight", SUPPORTED_FAT2_WEIGHTS)
+def test_training_configuration_accepts_supported_variants(
+    fat2_weight: float, latent_dim: int, rollout_steps: int
+) -> None:
+    configuration = _configuration()
+    configuration["training_parameters"].update(
+        fat2_weight=fat2_weight,
+        latent_dim=latent_dim,
+        rollout_steps=rollout_steps,
+    )
+    normalized = validate_launcher_training_configuration(configuration)
+    assert normalized["training_parameters"]["fat2_weight"] == fat2_weight
+    assert normalized["training_parameters"]["latent_dim"] == latent_dim
+    assert normalized["training_parameters"]["rollout_steps"] == rollout_steps
+
+
+@pytest.mark.parametrize("field", ("latent_dim", "rollout_steps"))
+def test_training_configuration_rejects_non_integer_variants(field: str) -> None:
+    configuration = _configuration()
+    configuration["training_parameters"][field] = 24.5
+    with pytest.raises(ValueError, match="must be an integer"):
+        validate_launcher_training_configuration(configuration)
+
+
+@pytest.mark.parametrize("fat2_weight", (-0.1, 0.3, True, "0.1"))
+def test_training_configuration_rejects_unsupported_fat2_weight(
+    fat2_weight: object,
+) -> None:
+    configuration = _configuration()
+    configuration["training_parameters"]["fat2_weight"] = fat2_weight
+    with pytest.raises(ValueError, match="fat2_weight"):
         validate_launcher_training_configuration(configuration)
 
 

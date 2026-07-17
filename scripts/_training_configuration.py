@@ -8,7 +8,7 @@ import os
 from typing import Any
 
 from g1_rickshaw_lab.training_contract import (
-    MAINLINE_PARAMETERS,
+    DEFAULT_TRAINING_PARAMETERS,
     TRAINING_CONFIGURATION_KEY,
     TRAINING_CONFIGURATION_SCHEMA_VERSION,
     finalize_training_configuration,
@@ -47,6 +47,9 @@ def build_training_configuration(
     resolved_parameters: Mapping[str, Any],
     actor_initialized_from_teacher: bool | None,
     stage_coverage: Mapping[str, Any] | None,
+    fat2_weight: float = float(DEFAULT_TRAINING_PARAMETERS["fat2_weight"]),
+    latent_dim: int = int(DEFAULT_TRAINING_PARAMETERS["latent_dim"]),
+    rollout_steps: int = int(DEFAULT_TRAINING_PARAMETERS["rollout_steps"]),
 ) -> dict[str, Any]:
     """Build the stable configuration shared by every mainline stage."""
 
@@ -70,7 +73,11 @@ def build_training_configuration(
             "resolved_parameters": dict(resolved_parameters),
             "actor_initialized_from_teacher": actor_initialized_from_teacher,
             "stage_coverage": None if stage_coverage is None else dict(stage_coverage),
-            "mainline_parameters": dict(MAINLINE_PARAMETERS),
+            "training_parameters": {
+                "fat2_weight": fat2_weight,
+                "rollout_steps": rollout_steps,
+                "latent_dim": latent_dim,
+            },
         }
     )
 

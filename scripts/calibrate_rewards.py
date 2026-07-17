@@ -45,7 +45,6 @@ from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_STAGE_KEY,
-    MAINLINE_PARAMETERS,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )
@@ -165,7 +164,7 @@ def _checkpoint_header(
             if isinstance(iteration, int) and not isinstance(iteration, bool)
             else None
         ),
-        "mainline_parameters": dict(training_configuration["mainline_parameters"]),
+        "training_parameters": dict(training_configuration["training_parameters"]),
     }
     return header, checkpoint, training_configuration
 
@@ -337,7 +336,10 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
     _configure_training(env_cfg)
-    env_cfg.rewards.fat2_prior_exp.weight = float(MAINLINE_PARAMETERS["fat2_weight"])
+    training_parameters = training_configuration["training_parameters"]
+    env_cfg.rewards.fat2_prior_exp.weight = float(
+        training_parameters["fat2_weight"]
+    )
     registry_key = (
         "rsl_rl_cfg_entry_point"
         if policy_kind == "teacher"
@@ -345,6 +347,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     )
     agent_cfg = load_cfg_from_registry(args.task, registry_key)
     agent_cfg.device = device
+    agent_cfg.actor.latent_dim = int(training_parameters["latent_dim"])
     raw_env = gym.make(args.task, cfg=env_cfg)
     env = None
     try:

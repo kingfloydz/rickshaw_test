@@ -26,10 +26,10 @@
   ],
   "seed": 42,
   "continuous_standing": true,
-  "sample_physics_ranges": false,
+  "physics_mode": "fixed",
   "inputs": {
-    "feasibility_path": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/config/feasibility_envelope.yaml",
-    "reset_pose_path": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1/config/reset_poses.yaml"
+    "feasibility_path": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1 copy/config/feasibility_envelope.yaml",
+    "reset_pose_path": "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1 copy/config/reset_poses.yaml"
   },
   "torque_measurement_contract": {
     "numerator": "robot.data.applied_torque",
@@ -40,8 +40,8 @@
     "arm_torque_ratio": 1.0,
     "d6_residual_m_or_rad": 0.06,
     "d6_impulse_n_s": 1.7,
-    "static_lower_preload_ratio": 0.85,
-    "static_waist_preload_ratio": 0.85,
+    "static_lower_preload_ratio": 0.86,
+    "static_waist_preload_ratio": 0.86,
     "static_arm_preload_ratio": 0.86
   },
   "rickshaw_pose_contract": {

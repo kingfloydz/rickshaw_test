@@ -39,7 +39,6 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
 
 from _rollout_audit import (  # noqa: E402
     AUDIT_TENSOR_NAMES,
-    DEFAULT_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
     normalize_audit_tensors,
     validate_rollout_sample_audit,
@@ -70,8 +69,6 @@ def validate_s1_arguments(args: argparse.Namespace) -> None:
         "mini_batch_size",
         "log_interval",
         "validation_interval",
-        "collect_num_envs",
-        "collect_num_steps",
     )
     for name in positive_integers:
         value = getattr(args, name)
@@ -135,7 +132,7 @@ def _as_tensor(value: Any, name: str, path: Path) -> torch.Tensor:
     return tensor
 
 
-def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
+def _normalize_shard(path: Path, latent_dim: int = 16) -> dict[str, torch.Tensor]:
     raw = _torch_load(path)
     current = _as_tensor(raw.get("current"), "current", path).float()
     history = _as_tensor(raw.get("history"), "history", path).float()
@@ -158,7 +155,7 @@ def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
         "history": (batch_size, 61, 96),
         "teacher_action_mean": (batch_size, 29),
         "teacher_action_std": (batch_size, 29),
-        "z_star": (batch_size, 16),
+        "z_star": (batch_size, latent_dim),
     }
     for name, shape in expected_shapes.items():
         if tuple(normalized[name].shape) != shape:
@@ -170,7 +167,7 @@ def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
 
 
 def load_rollout_dataset(
-    rollout_dir: Path, manifest: Mapping[str, Any]
+    rollout_dir: Path, manifest: Mapping[str, Any], latent_dim: int
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """Load shards and independently reconstruct their formal sample audit."""
 
@@ -179,7 +176,7 @@ def load_rollout_dataset(
     )
     if not shards:
         raise FileNotFoundError(f"no .pt/.pth rollout shards found in {rollout_dir}")
-    loaded = [_normalize_shard(path) for path in shards]
+    loaded = [_normalize_shard(path, latent_dim) for path in shards]
     tensors = {
         name: torch.cat([shard[name] for shard in loaded], dim=0)
         for name in (*REQUIRED_TENSORS, *AUDIT_TENSOR_NAMES)
@@ -274,6 +271,9 @@ def train(args: argparse.Namespace) -> Path:
     teacher_training_configuration = dict(
         teacher_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]
     )
+    training_parameters = teacher_training_configuration["training_parameters"]
+    latent_dim = int(training_parameters["latent_dim"])
+    rollout_steps = int(training_parameters["rollout_steps"])
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("S1 task differs from the S0 teacher training task")
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
@@ -292,13 +292,15 @@ def train(args: argparse.Namespace) -> Path:
         raise ValueError(
             "rollout manifest training configuration differs from the S0 teacher"
         )
-    dataset, stage_coverage = load_rollout_dataset(rollout_dir, rollout_manifest)
+    dataset, stage_coverage = load_rollout_dataset(
+        rollout_dir, rollout_manifest, latent_dim
+    )
     if args.device == "auto":
         device_name = "cuda:0" if torch.cuda.is_available() else "cpu"
     else:
         device_name = args.device
     device = torch.device(device_name)
-    student = G1RickshawStudentActor().to(device)
+    student = G1RickshawStudentActor(latent_dim).to(device)
     initialize_actor_from_checkpoint(student, teacher_checkpoint)
 
     student.actor.eval()
@@ -341,6 +343,9 @@ def train(args: argparse.Namespace) -> Path:
         },
         actor_initialized_from_teacher=True,
         stage_coverage=stage_coverage,
+        fat2_weight=float(training_parameters["fat2_weight"]),
+        latent_dim=latent_dim,
+        rollout_steps=rollout_steps,
     )
     validate_guide_training_configuration(
         training_configuration,
@@ -497,8 +502,6 @@ def main() -> int:
         type=int,
         default=S1_GUIDE_PARAMETERS["validation_interval"],
     )
-    parser.add_argument("--collect-num-envs", type=int, default=DEFAULT_NUM_ENVS)
-    parser.add_argument("--collect-num-steps", type=int, default=64)
     parser.add_argument("--recollect-rollouts", action="store_true")
     args = parser.parse_args()
     validate_s1_arguments(args)
@@ -521,10 +524,6 @@ def main() -> int:
                 os.fspath(teacher_path),
                 "--output-dir",
                 args.rollout_dir,
-                "--num-envs",
-                str(args.collect_num_envs),
-                "--num-steps",
-                str(args.collect_num_steps),
                 "--seed",
                 str(args.training_seed),
                 "--headless",

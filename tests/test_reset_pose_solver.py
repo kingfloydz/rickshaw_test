@@ -366,6 +366,40 @@ def test_existing_library_validation_requires_formal_horizon(tmp_path: Path) -> 
         _validate_arguments(args)
 
 
+def test_existing_library_validation_ignores_inactive_default_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    reset_poses = tmp_path / "config" / "reset_poses.yaml"
+    reset_poses.parent.mkdir()
+    reset_poses.write_text("{}\n", encoding="utf-8")
+    args = _build_parser().parse_args(
+        ["--validate-existing", "config/reset_poses.yaml", "--steps", "1000"]
+    )
+
+    _validate_arguments(args)
+
+
+def test_existing_library_validation_rejects_active_output_collision(
+    tmp_path: Path,
+) -> None:
+    reset_poses = tmp_path / "reset_poses.yaml"
+    reset_poses.write_text("{}\n", encoding="utf-8")
+    args = _build_parser().parse_args(
+        [
+            "--validate-existing",
+            str(reset_poses),
+            "--alignment-output",
+            str(reset_poses),
+            "--steps",
+            "1000",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="paths must be distinct"):
+        _validate_arguments(args)
+
+
 def test_complete_pipeline_rejects_a_nonformal_horizon_before_search() -> None:
     args = _build_parser().parse_args(["--steps", "999"])
 

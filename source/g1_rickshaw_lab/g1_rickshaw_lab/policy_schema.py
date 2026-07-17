@@ -26,7 +26,7 @@ BUTTERWORTH_A1: Final[float] = -0.59139835
 
 
 def validate_context_dim(value: int) -> int:
-    if value not in SUPPORTED_CONTEXT_DIMS:
+    if type(value) is not int or value not in SUPPORTED_CONTEXT_DIMS:
         raise ValueError(
             f"context dimension must be one of {SUPPORTED_CONTEXT_DIMS}, got {value!r}"
         )

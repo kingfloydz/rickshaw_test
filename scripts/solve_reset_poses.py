@@ -504,73 +504,6 @@ def _foot_contact_geometry(
     return per_foot[0]
 
 
-def _tangent_difference_torque_basis(
-    *,
-    model: Any,
-    data: Any,
-    qpos: Any,
-    wrist_body_ids: tuple[int, int],
-    foot_body_ids: tuple[int, int],
-    wrist_to_grasp: Any,
-    dof_addresses: Any,
-    mujoco: Any,
-    np: Any,
-) -> tuple[Any, Any, Any]:
-    """Map one newton of cart left-minus-right tangent force to joint torque.
-
-    The equal-and-opposite force on the robot is -0.5 N at the left hand and
-    +0.5 N at the right hand.  The resulting pure yaw moment is closed by an
-    equal free-torque allocation at the two fixed foot contacts.
-    """
-
-    data.qpos[:] = qpos
-    mujoco.mj_forward(model, data)
-    generalized = np.zeros(model.nv, dtype=np.float64)
-    for body_id, force_s in zip(wrist_body_ids, (-0.5, 0.5), strict=True):
-        rotation = data.xmat[body_id].reshape(3, 3)
-        grasp_position = data.xpos[body_id] + rotation @ wrist_to_grasp
-        mujoco.mj_applyFT(
-            model,
-            data,
-            np.asarray((force_s, 0.0, 0.0), dtype=np.float64),
-            np.zeros(3, dtype=np.float64),
-            grasp_position,
-            body_id,
-            generalized,
-        )
-
-    raw_root_residual = -generalized[:6].copy()
-    torque_map = np.zeros((6, 3), dtype=np.float64)
-    for axis in range(3):
-        column = np.zeros(model.nv, dtype=np.float64)
-        unit_torque = np.zeros(3, dtype=np.float64)
-        unit_torque[axis] = 0.5
-        for foot_id in foot_body_ids:
-            mujoco.mj_applyFT(
-                model,
-                data,
-                np.zeros(3, dtype=np.float64),
-                unit_torque,
-                data.xpos[foot_id],
-                foot_id,
-                column,
-            )
-        torque_map[:, axis] = column[:6]
-    support_torque, *_ = np.linalg.lstsq(torque_map, raw_root_residual, rcond=None)
-    for foot_id in foot_body_ids:
-        mujoco.mj_applyFT(
-            model,
-            data,
-            np.zeros(3, dtype=np.float64),
-            0.5 * support_torque,
-            data.xpos[foot_id],
-            foot_id,
-            generalized,
-        )
-    root_residual = -generalized[:6]
-    return -generalized[dof_addresses], root_residual, support_torque
-
-
 def _nominal_posture(np: Any) -> Any:
     q = np.zeros(29, dtype=np.float64)
     for offset in (0, 6):
@@ -2995,15 +2928,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_arguments(args: argparse.Namespace) -> None:
-    path_roles = {
-        "output": Path(args.output).resolve(),
-        "candidate-output": args.candidate_output.resolve(),
-        "report-output": args.report_output.resolve(),
-        "alignment-output": args.alignment_output.resolve(),
-        "summary-output": args.summary_output.resolve(),
-    }
-    if args.validate_existing is not None:
-        path_roles["validate-existing"] = args.validate_existing.resolve()
+    if args.validate_existing is None:
+        path_roles = {
+            "output": Path(args.output).resolve(),
+            "candidate-output": args.candidate_output.resolve(),
+            "report-output": args.report_output.resolve(),
+            "alignment-output": args.alignment_output.resolve(),
+            "summary-output": args.summary_output.resolve(),
+        }
+    else:
+        path_roles = {
+            "validate-existing": args.validate_existing.resolve(),
+            "report-output": args.report_output.resolve(),
+            "alignment-output": args.alignment_output.resolve(),
+        }
     by_path: dict[Path, list[str]] = {}
     for role, path in path_roles.items():
         by_path.setdefault(path, []).append(role)

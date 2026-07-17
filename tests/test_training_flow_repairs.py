@@ -74,6 +74,18 @@ def test_formal_rollout_shard_accepts_only_canonical_tensor_shapes(tmp_path: Pat
     assert normalized["teacher_action_std"].shape == (2, ACTION_DIM)
 
 
+@pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
+def test_rollout_shard_uses_the_teacher_checkpoint_latent_width(
+    tmp_path: Path, latent_dim: int
+) -> None:
+    shard = tmp_path / "rollout.pt"
+    tensors = _canonical_rollout_tensors()
+    tensors["z_star"] = torch.zeros(2, latent_dim)
+    _write_rollout_shard(shard, tensors)
+
+    assert _normalize_shard(shard, latent_dim)["z_star"].shape == (2, latent_dim)
+
+
 def test_formal_rollout_shard_rejects_legacy_root(tmp_path: Path) -> None:
     shard = tmp_path / "rollout.pt"
     _write_rollout_shard(shard, _canonical_rollout_tensors(), root="data")

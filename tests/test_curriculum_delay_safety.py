@@ -160,8 +160,8 @@ def test_curriculum_switches_only_reset_environments_to_training() -> None:
     state = CurriculumRuntimeState.create(
         strata, torch.zeros_like(strata), CurriculumScheduleCfg()
     )
-    assert state.set_iteration(999) == CurriculumStage.STATIC_HAND_LOAD
-    assert state.set_iteration(1000) == CurriculumStage.TRAINING
+    assert state.set_iteration(1999) == CurriculumStage.STATIC_HAND_LOAD
+    assert state.set_iteration(2000) == CurriculumStage.TRAINING
     assert torch.all(state.stage_per_environment() == int(CurriculumStage.STATIC_HAND_LOAD))
     reset_ids = torch.tensor([0, 3, 7])
     state.activate(reset_ids)

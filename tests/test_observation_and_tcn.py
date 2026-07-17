@@ -202,6 +202,30 @@ def test_fixed_teacher_and_student_context_interfaces() -> None:
     assert not any("aux" in name for name, _ in student.named_modules())
 
 
+@pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
+def test_teacher_and_student_use_the_selected_latent_width(latent_dim: int) -> None:
+    teacher = G1RickshawTeacherActor(latent_dim).eval()
+    student = G1RickshawStudentActor(latent_dim).eval()
+    current = torch.zeros(2, 96)
+    history = torch.zeros(2, 61, 96)
+    with torch.no_grad():
+        teacher_distribution, teacher_context = teacher.forward_with_context(
+            current,
+            history,
+            torch.zeros(2, 61, 21),
+            torch.zeros(2, 40),
+        )
+        student_distribution, student_context = student.forward_with_context(
+            current, history
+        )
+
+    assert teacher_context.shape == student_context.shape == (2, latent_dim)
+    assert teacher.actor.network[0].in_features == 96 + latent_dim
+    assert student.actor.network[0].in_features == 96 + latent_dim
+    assert set(teacher.actor.state_dict()) == set(student.actor.state_dict())
+    assert teacher_distribution.mean.shape == student_distribution.mean.shape == (2, 29)
+
+
 def test_tcn_oldest_frame_is_used_but_outside_and_future_frames_are_causal() -> None:
     encoder = ContextEncoder().eval()
     with torch.no_grad():

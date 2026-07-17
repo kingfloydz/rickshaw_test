@@ -43,7 +43,6 @@ from g1_rickshaw_lab.slope_contract import (  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     CHECKPOINT_STAGE_KEY,
-    MAINLINE_PARAMETERS,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
     require_pinned_rsl_rl,
@@ -231,11 +230,14 @@ def _load_policy(
     task: str,
 ) -> tuple[PolicyHandle, list[Any]]:
     keepalive: list[Any] = []
+    latent_dim = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
+    )
     if stage == "s1_context_distillation":
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
         state = checkpoint["model_state_dict"]
-        model = G1RickshawStudentActor().to(device)
+        model = G1RickshawStudentActor(latent_dim).to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
         keepalive.append(model)
@@ -243,7 +245,7 @@ def _load_policy(
 
     from rsl_rl.runners import OnPolicyRunner
     registry_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device)
+    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device, latent_dim)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
@@ -260,11 +262,16 @@ def _load_teacher_policy(
     env: Any, checkpoint_path: Path, device: str, task: str
 ) -> tuple[PolicyHandle, list[Any]]:
     from rsl_rl.runners import OnPolicyRunner
-    load_stage_checkpoint(
+    checkpoint = load_stage_checkpoint(
         checkpoint_path,
         expected_stage="s0_teacher",
     )
-    agent_cfg = _load_rsl_runner_cfg(task, "rsl_rl_cfg_entry_point", device)
+    latent_dim = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
+    )
+    agent_cfg = _load_rsl_runner_cfg(
+        task, "rsl_rl_cfg_entry_point", device, latent_dim
+    )
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
@@ -275,13 +282,16 @@ def _load_teacher_policy(
     return PolicyHandle(runner.alg.actor, kind="rsl_teacher"), [runner]
 
 
-def _load_rsl_runner_cfg(task: str, registry_key: str, device: str):
+def _load_rsl_runner_cfg(
+    task: str, registry_key: str, device: str, latent_dim: int
+):
     """Load the fixed RSL-RL 5 runner configuration."""
 
     from isaaclab_tasks.utils import load_cfg_from_registry
 
     agent_cfg = load_cfg_from_registry(task, registry_key)
     agent_cfg.device = device
+    agent_cfg.actor.latent_dim = latent_dim
     return agent_cfg
 
 
@@ -325,7 +335,7 @@ def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  #
     arm_margin = torch.amin(torque_margin[:, 15:], dim=-1)
     power = torch.sum(torch.abs(torque * velocity), dim=-1)
 
-    wrench = base_env.d6_incoming_joint_proxy_w
+    wrench = state.d6_wrench_w
     d6_channels = d6_wrench_channels(wrench)
     d6_force = d6_channels["force"]
     d6_torque = d6_channels["torque"]
@@ -646,8 +656,10 @@ def main() -> int:  # noqa: C901
     training_configuration = dict(checkpoint[TRAINING_CONFIGURATION_KEY])
     if training_configuration["task"] != args.task:
         raise ValueError("policy evaluation task differs from checkpoint training task")
-    fat2_weight = float(MAINLINE_PARAMETERS["fat2_weight"])
-    rollout_steps = int(MAINLINE_PARAMETERS["rollout_steps"])
+    training_parameters = training_configuration["training_parameters"]
+    fat2_weight = float(training_parameters["fat2_weight"])
+    rollout_steps = int(training_parameters["rollout_steps"])
+    latent_dim = int(training_parameters["latent_dim"])
     _validate_args(args, stage)
     is_student = stage != "s0_teacher"
 
@@ -664,6 +676,13 @@ def main() -> int:  # noqa: C901
             fixed_seeds=args.seeds,
             episodes_per_slope=args.episodes_per_slope,
         )
+        baseline_parameters = s1_report["evaluation"]
+        if (
+            baseline_parameters.get("latent_dim") != latent_dim
+            or baseline_parameters.get("rollout_steps") != rollout_steps
+            or baseline_parameters.get("fat2_weight") != fat2_weight
+        ):
+            raise ValueError("S1 baseline uses different training parameters")
         s1_baseline_binding = {
             "path": os.fspath(s1_baseline_path),
             "baseline_return_mean": dict(s1_baseline_returns),
@@ -676,6 +695,11 @@ def main() -> int:  # noqa: C901
         teacher_checkpoint = load_stage_checkpoint(
             teacher_path, expected_stage="s0_teacher", validate_runtime=False
         )
+        if (
+            teacher_checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
+            != training_parameters
+        ):
+            raise ValueError("teacher checkpoint uses different training parameters")
 
     from isaaclab.app import AppLauncher
 
@@ -702,7 +726,9 @@ def main() -> int:  # noqa: C901
                     env_cfg.observations.teacher_dynamic_history = None
                     env_cfg.observations.teacher_static = None
                 agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-                agent_cfg = _load_rsl_runner_cfg(args.task, agent_key, device)
+                agent_cfg = _load_rsl_runner_cfg(
+                    args.task, agent_key, device, latent_dim
+                )
                 raw_env = gym.make(args.task, cfg=env_cfg)
                 env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
                 base_env = raw_env.unwrapped
@@ -785,6 +811,7 @@ def main() -> int:  # noqa: C901
             "cross_case_protocol": FORMAL_EVALUATION_CROSS_CASE_PROTOCOL,
             "fat2_weight": fat2_weight,
             "rollout_steps": rollout_steps,
+            "latent_dim": latent_dim,
         },
         "metric_definitions": METRIC_DEFINITIONS,
         "stages": stage_reports,

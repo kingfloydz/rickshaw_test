@@ -23,8 +23,8 @@ add_project_source_to_path()
 from g1_rickshaw_lab.provenance import atomic_torch_save, extract_checkpoint_metadata  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
+    DISTILLATION_ROLLOUT_STEPS,
     TRAINING_CONFIGURATION_KEY,
-    MAINLINE_PARAMETERS,
     load_stage_checkpoint,
     require_pinned_rsl_rl,
     validate_rollout_stage_coverage,
@@ -76,13 +76,6 @@ def main() -> int:  # noqa: C901
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--teacher", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
-    parser.add_argument(
-        "--num-steps",
-        type=int,
-        default=64,
-        help="Required valid policy transitions per environment.",
-    )
     parser.add_argument(
         "--shard-steps",
         type=int,
@@ -101,18 +94,14 @@ def main() -> int:  # noqa: C901
     )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if (
-        args.num_steps <= 0
-        or args.shard_steps <= 0
-        or args.max_collection_multiplier <= 0
-    ):
+    args.num_envs = DEFAULT_NUM_ENVS
+    args.num_steps = DISTILLATION_ROLLOUT_STEPS
+    if args.shard_steps <= 0 or args.max_collection_multiplier <= 0:
         raise ValueError(
-            "--num-steps/--shard-steps/--max-collection-multiplier must be positive"
+            "--shard-steps and --max-collection-multiplier must be positive"
         )
     if args.seed < 0 or args.seed > 2**32 - 1:
         raise ValueError("rollout collection seed must lie in [0, 2**32-1]")
-    if args.num_envs <= 0:
-        raise ValueError("--num-envs must be positive")
     if args.training_iteration is not None and args.training_iteration < 0:
         raise ValueError("--training-iteration must be non-negative")
 
@@ -138,6 +127,8 @@ def main() -> int:  # noqa: C901
     teacher_training_configuration = dict(
         teacher_checkpoint[TRAINING_CONFIGURATION_KEY]
     )
+    training_parameters = teacher_training_configuration["training_parameters"]
+    latent_dim = int(training_parameters["latent_dim"])
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("rollout task differs from the S0 teacher training task")
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
@@ -175,11 +166,12 @@ def main() -> int:  # noqa: C901
         # from advancing terrain difficulty during a short segment.
         env_cfg.curriculum = None
         env_cfg.rewards.fat2_prior_exp.weight = float(
-            MAINLINE_PARAMETERS["fat2_weight"]
+            training_parameters["fat2_weight"]
         )
         agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
         agent_cfg.seed = args.seed
         agent_cfg.device = device
+        agent_cfg.actor.latent_dim = latent_dim
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -503,6 +495,7 @@ def main() -> int:  # noqa: C901
             "num_envs": args.num_envs,
             "collection_seed": args.seed,
             "num_steps_per_stage": args.num_steps,
+            "teacher_latent_dim": latent_dim,
             "num_policy_steps": collected_steps,
             "num_samples": collected_samples,
             "signed_slopes": list(SIGNED_SLOPES),

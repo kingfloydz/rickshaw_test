@@ -25,17 +25,32 @@ export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
 "$PYTHON" scripts/train_teacher.py \
   --task Isaac-G1-Rickshaw-Directional-Slope-v0 \
   --num-envs 4096 \
+  --fat2-weight 0.1 \
+  --latent-dim 16 \
+  --rollout-steps 48 \
   --run_name mainline-s0 \
   --headless
 ```
 
 默认训练 6000 iterations。课程阶段为：
 
-- `0..999`：无真实 rickshaw，双手施加 reset 静力学恒定 wrench；
-- `>=1000`：启用真实 rickshaw 和 D6；
+- `0..1999`：无真实 rickshaw，双手施加 reset 静力学恒定 wrench；
+- `>=2000`：启用真实 rickshaw 和 D6；
 - 19 个坡度始终均衡分配；
 - 域参数在训练开始前采样并固定，每 200 个基准 PPO iteration 全局重采样；
 - 普通 episode reset 不重采样。
+
+FAT2、latent 和 rollout 消融只在 S0 选择，S1/S2 从 checkpoint 自动继承。
+`fat2_weight` 支持 `0.0/0.1/0.2`，默认 `0.1`。Rollout 等预算如下：
+
+| rollout steps | 静载结束 update | S0 updates | S2 updates | save/domain 边界 updates |
+|---:|---:|---:|---:|---:|
+| 24 | 4000 | 12000 | 4000 | 400 |
+| 48 | 2000 | 6000 | 2000 | 200 |
+| 64 | 1500 | 4500 | 1500 | 150 |
+
+三行的 `updates × rollout_steps` 相同。`latent_dim` 支持 `8/16/24/32`；每条
+S0 -> S1 -> S2 lineage 内 teacher encoder、student encoder 和 actor 输入使用同一维度。
 
 续训：
 
@@ -55,7 +70,7 @@ export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
   --output logs/rsl_rl/g1_rickshaw_context/s1_context.pt
 ```
 
-S1 固定为 16 维 student latent，只优化 context encoder。每 200 iterations 在固定
+S1 使用 S0 checkpoint 记录的 latent 维度，只优化 context encoder。每 200 iterations 在固定
 验证集计算 action KL，最终 checkpoint 恢复并保存历史最低 action KL 的完整 student
 状态。
 
@@ -74,10 +89,11 @@ S1 固定为 16 维 student latent，只优化 context encoder。每 200 iterati
 "$PYTHON" scripts/collect_teacher_rollouts.py \
   --teacher <S0_CHECKPOINT> \
   --output-dir <TEACHER_ROLLOUT_DIR> \
-  --num-envs 4096 \
-  --num-steps 64 \
   --headless
 ```
+
+S1 rollout 固定为 `4096 × 64 = 262,144` 条 transition，不随 PPO rollout
+消融项改变。
 
 ### 2.3 S2 Student PPO
 
@@ -99,6 +115,58 @@ S1 固定为 16 维 student latent，只优化 context encoder。每 200 iterati
   --resume-checkpoint <S2_CHECKPOINT> \
   --headless
 ```
+
+### 2.4 单节点 8 GPU 消融流水线
+
+该入口执行每组配置的 S0、S0 诊断、固定 rollout 采集、S1、S1 诊断、S2 和
+S2 诊断。诊断只记录结果，不阻止训练或选择模型。
+
+```bash
+cd "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1 copy"
+
+export ISAACLAB_PATH="$(cd ../IsaacLab && pwd)"
+export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
+export OUTPUT_DIR="$PWD/outputs/ablation_pipeline_v4_8gpu"
+
+"$PYTHON" scripts/run_ablation_pipeline.py \
+  --output-dir "$OUTPUT_DIR" \
+  --runs \
+    baseline \
+    fat2_weight_0.0 \
+    fat2_weight_0.2 \
+    rollout_steps_24 \
+    rollout_steps_64 \
+    latent_dim_8 \
+    latent_dim_24 \
+    latent_dim_32 \
+  --gpus 0 1 2 3 4 5 6 7 \
+  --resume
+```
+
+启动长训练前可在末尾追加 `--plan-only`；该模式不创建输出、不访问 GPU。
+`--resume` 只复用 stage、训练参数、完成 iteration 和 S0/S1 lineage 均匹配的产物。
+
+统一 TensorBoard 入口：
+
+```bash
+"$PYTHON" -m tensorboard.main \
+  --logdir "$OUTPUT_DIR/runs" \
+  --port 6006 \
+  --bind_all
+```
+
+Summary event 文件路径为：
+
+```text
+$OUTPUT_DIR/runs/<RUN_ID>/s0/<TIMESTAMP>_<RUN_NAME>/events.out.tfevents.*
+$OUTPUT_DIR/runs/<RUN_ID>/s2/<TIMESTAMP>_<RUN_NAME>/events.out.tfevents.*
+```
+
+每条 S0 -> S1 -> S2 流水线全部完成后，实际 event 文件会写入
+`$OUTPUT_DIR/runs/<RUN_ID>/summary.json`；所有请求的流水线全部完成后，总索引写入
+`$OUTPUT_DIR/summary.json`。训练过程中直接让 TensorBoard 递归读取上述 `runs` 目录，
+不依赖 JSON Summary。S1 是离线 context 训练，只写
+`$OUTPUT_DIR/runs/<RUN_ID>/logs/04_s1_context.log`，不生成 TensorBoard event。
 
 ## 3. 策略诊断
 

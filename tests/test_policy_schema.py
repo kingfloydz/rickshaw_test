@@ -22,7 +22,8 @@ from g1_rickshaw_lab.training_contract import (
 def test_policy_dimensions_are_shared_across_runtime_layers() -> None:
     assert context_encoder.OBSERVATION_DIM == policy_schema.ACTOR_OBSERVATION_DIM
     assert context_encoder.HISTORY_LENGTH == policy_schema.HISTORY_LENGTH
-    assert context_encoder.CONTEXT_DIM == policy_schema.CONTEXT_DIM
+    assert policy_schema.DEFAULT_CONTEXT_DIM == 16
+    assert policy_schema.SUPPORTED_CONTEXT_DIMS == (8, 16, 24, 32)
     assert actor_critic.CURRENT_OBSERVATION_DIM == policy_schema.ACTOR_OBSERVATION_DIM
     assert actor_critic.ACTION_DIM == policy_schema.ACTION_DIM
     assert actor_critic.CRITIC_PRIVILEGE_DIM == policy_schema.CRITIC_PRIVILEGED_DIM
@@ -33,6 +34,11 @@ def test_policy_dimensions_are_shared_across_runtime_layers() -> None:
     assert observations.TEACHER_DYNAMIC_DIM == policy_schema.TEACHER_DYNAMIC_DIM
     assert observations.TEACHER_STATIC_DIM == policy_schema.TEACHER_STATIC_DIM
     assert observations.CRITIC_PRIVILEGED_DIM == policy_schema.CRITIC_PRIVILEGED_DIM
+
+    for latent_dim in policy_schema.SUPPORTED_CONTEXT_DIMS:
+        assert policy_schema.validate_context_dim(latent_dim) == latent_dim
+    with pytest.raises(ValueError, match="context dimension"):
+        policy_schema.validate_context_dim(8.0)
 
 
 def test_action_filter_contract_is_shared_by_simulation_and_deployment() -> None:
@@ -48,7 +54,16 @@ def test_action_filter_contract_is_shared_by_simulation_and_deployment() -> None
 
 def test_deployment_manifest_uses_the_policy_schema() -> None:
     manifest = _deployment_contract(
-        {TRAINING_CONFIGURATION_KEY: {"stage": "s2_student_ppo"}}
+        {
+            TRAINING_CONFIGURATION_KEY: {
+                "stage": "s2_student_ppo",
+                "training_parameters": {
+                    "fat2_weight": 0.1,
+                    "rollout_steps": 48,
+                    "latent_dim": 24,
+                },
+            }
+        }
     )
 
     assert manifest["policy"]["inputs"] == {
@@ -59,7 +74,7 @@ def test_deployment_manifest_uses_the_policy_schema() -> None:
             policy_schema.ACTOR_OBSERVATION_DIM,
         ],
     }
-    assert manifest["policy"]["context_dim"] == policy_schema.CONTEXT_DIM
+    assert manifest["policy"]["context_dim"] == 24
     assert manifest["policy"]["output"]["normalized_action"] == [
         None,
         policy_schema.ACTION_DIM,

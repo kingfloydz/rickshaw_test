@@ -16,14 +16,15 @@ add_project_source_to_path()
 from g1_rickshaw_lab.provenance import atomic_torch_save  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
+    CHECKPOINT_LINEAGE_KEY,
     GUIDE_TRAINING_NUM_ENVS,
     GUIDE_TRAINING_PARAMETERS,
     GUIDE_TRAINING_TASK,
-    MAINLINE_PARAMETERS,
     build_s2_bootstrap_checkpoint,
     guide_max_iterations,
     load_s2_resume_checkpoint,
     load_stage_checkpoint,
+    training_artifact_interval,
     validate_guide_training_configuration,
 )
 
@@ -38,6 +39,18 @@ from _training_configuration import (  # noqa: E402
 DEFAULT_TASK = GUIDE_TRAINING_TASK
 STUDENT_AGENT_KEY = "rsl_rl_student_cfg_entry_point"
 S2_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s2_student_ppo"]
+
+
+def _validate_resume_lineage(
+    checkpoint: dict, teacher: Path, context: Path
+) -> None:
+    lineage = checkpoint.get(CHECKPOINT_LINEAGE_KEY)
+    if not isinstance(lineage, dict) or (
+        Path(str(lineage.get("teacher_checkpoint"))).resolve() != teacher.resolve()
+        or Path(str(lineage.get("context_checkpoint"))).resolve()
+        != context.resolve()
+    ):
+        raise ValueError("S2 resume checkpoint belongs to a different S0/S1 lineage")
 
 
 def main() -> int:
@@ -78,6 +91,10 @@ def main() -> int:
     s1_training_configuration = dict(
         context_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]
     )
+    training_parameters = s1_training_configuration["training_parameters"]
+    rollout_steps = int(training_parameters["rollout_steps"])
+    latent_dim = int(training_parameters["latent_dim"])
+    fat2_weight = float(training_parameters["fat2_weight"])
     resume_checkpoint_path: Path | None = None
     if args.resume_checkpoint is None:
         checkpoint = build_s2_bootstrap_checkpoint(teacher, context)
@@ -90,8 +107,14 @@ def main() -> int:
             resume_checkpoint_path,
             validate_runtime=True,
         )
+        if (
+            checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]["training_parameters"]
+            != training_parameters
+        ):
+            raise ValueError("S2 resume cannot change FAT2, latent_dim, or rollout_steps")
+        _validate_resume_lineage(checkpoint, teacher, context)
     curriculum_iteration = checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY]
-    lineage = checkpoint["g1_rickshaw_lineage"]
+    lineage = checkpoint[CHECKPOINT_LINEAGE_KEY]
     if resume_checkpoint_path is None:
         load_run = "bootstrap_" + re.sub(r"[^A-Za-z0-9_.-]+", "_", context.stem)
         experiment_root = Path(args.bootstrap_dir).resolve()
@@ -119,15 +142,13 @@ def main() -> int:
         default=42,
         cast=int,
     )
-    rollout_steps = int(MAINLINE_PARAMETERS["rollout_steps"])
     max_iterations = cli_value(
         remaining,
         "--max_iterations",
         hydra_keys=("agent.max_iterations",),
-        default=guide_max_iterations("s2_student_ppo"),
+        default=guide_max_iterations("s2_student_ppo", rollout_steps),
         cast=int,
     )
-    fat2_weight = float(MAINLINE_PARAMETERS["fat2_weight"])
     training_configuration = build_training_configuration(
         stage="s2_student_ppo",
         task=args.task,
@@ -140,6 +161,9 @@ def main() -> int:
             "max_iterations": max_iterations,
             "num_envs": args.num_envs,
             "num_steps_per_env": rollout_steps,
+            "save_interval": training_artifact_interval(rollout_steps),
+            "fat2_weight": fat2_weight,
+            "latent_dim": latent_dim,
             "launcher_arguments": list(remaining),
             "teacher_checkpoint": os.fspath(teacher.resolve()),
             "context_checkpoint": os.fspath(context.resolve()),
@@ -148,6 +172,9 @@ def main() -> int:
             s1_training_configuration.get("actor_initialized_from_teacher")
         ),
         stage_coverage=s1_training_configuration.get("stage_coverage"),
+        fat2_weight=fat2_weight,
+        latent_dim=latent_dim,
+        rollout_steps=rollout_steps,
     )
     validate_guide_training_configuration(
         training_configuration,
@@ -178,6 +205,8 @@ def main() -> int:
             load_checkpoint_name,
             *remaining,
             f"agent.num_steps_per_env={rollout_steps}",
+            f"agent.save_interval={training_artifact_interval(rollout_steps)}",
+            f"agent.actor.latent_dim={latent_dim}",
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
             "env.observations.teacher_dynamic_history=null",
             "env.observations.teacher_static=null",

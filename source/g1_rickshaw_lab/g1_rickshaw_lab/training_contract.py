@@ -57,7 +57,7 @@ CHECKPOINT_STAGE_KEY = "g1_rickshaw_stage"
 CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
-TRAINING_CONFIGURATION_SCHEMA_VERSION = 6
+TRAINING_CONFIGURATION_SCHEMA_VERSION = 7
 EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -66,11 +66,13 @@ DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
 GUIDE_TRAINING_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 GUIDE_TRAINING_NUM_ENVS = 4096
 TRAINING_ARTIFACT_INTERVAL = 200
+STATIC_HAND_LOAD_ITERATIONS = 2000
 
 SIGNED_SLOPE_LABELS = SLOPE_LABELS
 ROLLOUT_MANIFEST_SCHEMA_VERSION = 4
 ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION = 4
 ROLLOUT_DEFAULT_NUM_ENVS = GUIDE_TRAINING_NUM_ENVS
+DISTILLATION_ROLLOUT_STEPS = 64
 ROLLOUT_STAGE_SEQUENCE = ("TRAINING",)
 TRAINING_PARAMETER_KEYS = (
     "fat2_weight",
@@ -82,6 +84,7 @@ DEFAULT_TRAINING_PARAMETERS = {
     "rollout_steps": 48,
     "latent_dim": DEFAULT_CONTEXT_DIM,
 }
+SUPPORTED_FAT2_WEIGHTS = (0.0, 0.1, 0.2)
 SUPPORTED_ROLLOUT_STEPS = (24, 48, 64)
 TRAINING_CONFIGURATION_FIELDS = {
     "schema_version",
@@ -98,6 +101,7 @@ TRAINING_CONFIGURATION_FIELDS = {
 }
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
+        "static_hand_load_iterations": STATIC_HAND_LOAD_ITERATIONS,
     },
     "s1_context_distillation": {
         "context_learning_rate": 3.0e-4,
@@ -130,7 +134,13 @@ def rollout_scaled_iterations(
 ) -> int:
     """Preserve the baseline per-environment transition budget."""
 
-    if rollout_steps not in SUPPORTED_ROLLOUT_STEPS:
+    if (
+        isinstance(baseline_iterations, bool)
+        or not isinstance(baseline_iterations, int)
+        or baseline_iterations <= 0
+    ):
+        raise ValueError("baseline_iterations must be a positive integer")
+    if type(rollout_steps) is not int or rollout_steps not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
     iterations, remainder = divmod(
         baseline_iterations * BASELINE_ROLLOUT_STEPS, rollout_steps
@@ -231,15 +241,23 @@ def validate_training_configuration(
             "training configuration training_parameters must contain exactly "
             f"{TRAINING_PARAMETER_KEYS}"
         )
+    if type(training_parameters["rollout_steps"]) is not int:
+        raise ValueError("rollout_steps must be an integer")
+    if type(training_parameters["latent_dim"]) is not int:
+        raise ValueError("latent_dim must be an integer")
+    raw_fat2_weight = training_parameters["fat2_weight"]
+    if isinstance(raw_fat2_weight, bool) or not isinstance(
+        raw_fat2_weight, (int, float)
+    ):
+        raise ValueError("fat2_weight must be numeric")
     normalized_parameters = {
-        "fat2_weight": float(training_parameters["fat2_weight"]),
+        "fat2_weight": float(raw_fat2_weight),
         "rollout_steps": int(training_parameters["rollout_steps"]),
         "latent_dim": int(training_parameters["latent_dim"]),
     }
-    if normalized_parameters["fat2_weight"] != DEFAULT_TRAINING_PARAMETERS["fat2_weight"]:
+    if normalized_parameters["fat2_weight"] not in SUPPORTED_FAT2_WEIGHTS:
         raise ValueError(
-            "training configuration must use fixed FAT2 weight "
-            f"{DEFAULT_TRAINING_PARAMETERS['fat2_weight']}"
+            f"fat2_weight must be one of {SUPPORTED_FAT2_WEIGHTS}"
         )
     if normalized_parameters["rollout_steps"] not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
@@ -259,6 +277,10 @@ def validate_guide_training_configuration(
     result = validate_training_configuration(value, expected_stage=expected_stage)
     if expected_stage not in GUIDE_TRAINING_PARAMETERS:
         raise ValueError(f"no Guide training contract exists for stage {expected_stage!r}")
+    if result["guide_parameters"] != GUIDE_TRAINING_PARAMETERS[expected_stage]:
+        raise ValueError(
+            f"training configuration guide parameters differ for stage {expected_stage!r}"
+        )
     return result
 
 
@@ -302,9 +324,8 @@ def validate_student_checkpoint_architecture(
     checkpoint: Mapping[str, Any],
     training_configuration: Mapping[str, Any],
 ) -> None:
-    """Cross-check the fixed student latent width against model tensors."""
+    """Cross-check the recorded student latent width against model tensors."""
 
-    del training_configuration
     latent_dim = int(training_configuration["training_parameters"]["latent_dim"])
     state = next(iter(_state_dicts(checkpoint)), None)
     if not isinstance(state, Mapping):
@@ -330,22 +351,21 @@ def validate_student_checkpoint_architecture(
         or latent_weight.ndim != 2
         or latent_weight.shape[0] != latent_dim
     ):
-        raise ValueError("checkpoint context encoder differs from the mainline latent width")
+        raise ValueError("checkpoint context encoder differs from its recorded latent width")
     if (
         policy_weight is None
         or policy_weight.ndim != 2
         or policy_weight.shape[1] != ACTOR_OBSERVATION_DIM + latent_dim
     ):
-        raise ValueError("student actor input differs from the mainline latent width")
+        raise ValueError("student actor input differs from its recorded latent width")
 
 
 def validate_teacher_checkpoint_architecture(
     checkpoint: Mapping[str, Any],
     training_configuration: Mapping[str, Any],
 ) -> None:
-    """Cross-check the S0 encoder and policy widths against the mainline width."""
+    """Cross-check the recorded S0 encoder and policy widths."""
 
-    del training_configuration
     latent_dim = int(training_configuration["training_parameters"]["latent_dim"])
     state = next(iter(_state_dicts(checkpoint)), None)
     if not isinstance(state, Mapping):
@@ -357,13 +377,13 @@ def validate_teacher_checkpoint_architecture(
         or encoder_weight.ndim != 2
         or encoder_weight.shape[0] != latent_dim
     ):
-        raise ValueError("teacher encoder differs from the mainline latent width")
+        raise ValueError("teacher encoder differs from its recorded latent width")
     if (
         not torch.is_tensor(policy_weight)
         or policy_weight.ndim != 2
         or policy_weight.shape[1] != ACTOR_OBSERVATION_DIM + latent_dim
     ):
-        raise ValueError("teacher actor input differs from the mainline latent width")
+        raise ValueError("teacher actor input differs from its recorded latent width")
 
 
 def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, int]:
@@ -382,16 +402,11 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
         raise ValueError("rollout stage sequence must be exactly ('TRAINING',)")
     num_envs = manifest.get("num_envs")
     num_steps = manifest.get("num_steps_per_stage")
-    if (
-        isinstance(num_envs, bool)
-        or not isinstance(num_envs, int)
-        or num_envs <= 0
-        or isinstance(num_steps, bool)
-        or not isinstance(num_steps, int)
-        or num_steps <= 0
-    ):
+    if num_envs != ROLLOUT_DEFAULT_NUM_ENVS or num_steps != DISTILLATION_ROLLOUT_STEPS:
         raise ValueError(
-            "rollout requires positive num_envs and num_steps_per_stage"
+            "S1 rollout budget must be exactly "
+            f"{ROLLOUT_DEFAULT_NUM_ENVS} environments x "
+            f"{DISTILLATION_ROLLOUT_STEPS} steps"
         )
     expected_slopes = list(SLOPE_GRADIENTS)
     if manifest.get("signed_slopes") != expected_slopes:
@@ -660,7 +675,11 @@ def build_s2_bootstrap_checkpoint(
 
     teacher = load_stage_checkpoint(teacher_path, expected_stage="s0_teacher")
     context = load_stage_checkpoint(context_path, expected_stage="s1_context_distillation")
+    teacher_training_configuration = teacher[TRAINING_CONFIGURATION_KEY]
     context_training_configuration = context[TRAINING_CONFIGURATION_KEY]
+    training_parameters = dict(context_training_configuration["training_parameters"])
+    if teacher_training_configuration["training_parameters"] != training_parameters:
+        raise ValueError("S0 and S1 training parameters differ")
     teacher_metadata = extract_checkpoint_metadata(teacher)
     context_metadata = extract_checkpoint_metadata(context)
     if teacher_metadata.to_mapping() != context_metadata.to_mapping():
@@ -693,7 +712,9 @@ def build_s2_bootstrap_checkpoint(
             "task": GUIDE_TRAINING_TASK,
             "num_envs": GUIDE_TRAINING_NUM_ENVS,
             "seed": context_training_configuration["seed"],
-            "max_iterations": guide_max_iterations("s2_student_ppo"),
+            "max_iterations": guide_max_iterations(
+                "s2_student_ppo", int(training_parameters["rollout_steps"])
+            ),
             "guide_parameters": {
                 "source_stage": "s1_context_distillation",
                 "source_checkpoint": os.fspath(context_file),
@@ -701,7 +722,7 @@ def build_s2_bootstrap_checkpoint(
             "resolved_parameters": {},
             "actor_initialized_from_teacher": True,
             "stage_coverage": context_training_configuration["stage_coverage"],
-            "mainline_parameters": dict(MAINLINE_PARAMETERS),
+            "training_parameters": training_parameters,
         }),
         CHECKPOINT_LINEAGE_KEY: {
             "teacher_checkpoint": os.fspath(teacher_file),
@@ -737,6 +758,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     if raw_training_configuration.get("stage") != "s2_student_ppo":
         raise ValueError("deployment training configuration must be S2")
     training_configuration = dict(raw_training_configuration)
+    latent_dim = int(training_configuration["training_parameters"]["latent_dim"])
     with Path(os.environ.get("G1_RICKSHAW_RESET_POSES", DEFAULT_RESET_POSES_PATH)).open(
         "r", encoding="utf-8"
     ) as stream:
@@ -774,7 +796,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
                 "current": [None, ACTOR_OBSERVATION_DIM],
                 "history": [None, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM],
             },
-            "context_dim": CONTEXT_DIM,
+            "context_dim": latent_dim,
             "output": {"normalized_action": [None, ACTION_DIM], "clip": [-1.0, 1.0]},
             "forbidden_components": ["teacher_encoder", "critic", "privileged_observations", "auxiliary_heads"],
         },
@@ -950,12 +972,24 @@ def install_runner_hooks_from_environment() -> None:
     def hooked_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         if training_configuration is not None:
-            configured_steps = training_configuration["mainline_parameters"]["rollout_steps"]
+            parameters = training_configuration["training_parameters"]
+            configured_steps = parameters["rollout_steps"]
             actual_steps = int(self.cfg["num_steps_per_env"])
             if configured_steps != actual_steps:
                 raise RuntimeError(
                     "training rollout length differs from the published "
                     f"configuration: actual={actual_steps}, configured={configured_steps}"
+                )
+            actual_latent_dim = int(self.alg.actor.latent_dim)
+            if actual_latent_dim != parameters["latent_dim"]:
+                raise RuntimeError(
+                    "actor latent width differs from the published configuration"
+                )
+            if int(self.cfg["save_interval"]) != training_artifact_interval(
+                configured_steps
+            ):
+                raise RuntimeError(
+                    "checkpoint interval differs from the fixed transition cadence"
                 )
         self._g1_training_iterations = 0
         if stage == "s2_student_ppo":
@@ -1078,6 +1112,14 @@ def install_runner_hooks_from_environment() -> None:
                 checkpoint.get(TRAINING_CONFIGURATION_KEY),
                 expected_stage=loaded_stage,
             )
+        if (
+            training_configuration is not None
+            and loaded_training_configuration["training_parameters"]
+            != training_configuration["training_parameters"]
+        ):
+            raise RuntimeError(
+                "loaded checkpoint training parameters differ from the active run"
+            )
         if loaded_stage in {"s2_bootstrap", "s2_student_ppo"}:
             validate_student_checkpoint_architecture(
                 checkpoint,
@@ -1162,7 +1204,8 @@ def install_runner_hooks_from_environment() -> None:
 
 __all__ = [
     "BASELINE_ROLLOUT_STEPS",
-    "MAINLINE_PARAMETERS",
+    "DEFAULT_TRAINING_PARAMETERS",
+    "DISTILLATION_ROLLOUT_STEPS",
     "SIGNED_SLOPE_LABELS",
     "ROLLOUT_DEFAULT_NUM_ENVS",
     "ROLLOUT_MANIFEST_SCHEMA_VERSION",
@@ -1171,6 +1214,10 @@ __all__ = [
     "TRAINING_CONFIGURATION_KEY",
     "TRAINING_CONFIGURATION_SCHEMA_VERSION",
     "TRAINING_ARTIFACT_INTERVAL",
+    "STATIC_HAND_LOAD_ITERATIONS",
+    "SUPPORTED_CONTEXT_DIMS",
+    "SUPPORTED_FAT2_WEIGHTS",
+    "SUPPORTED_ROLLOUT_STEPS",
     "CHECKPOINT_CURRICULUM_ITERATION_KEY",
     "CHECKPOINT_LINEAGE_KEY",
     "CHECKPOINT_SCHEMA_VERSION",
@@ -1193,8 +1240,10 @@ __all__ = [
     "load_stage_checkpoint",
     "require_pinned_rsl_rl",
     "reset_runner_environment_for_curriculum",
+    "rollout_scaled_iterations",
     "s0_remaining_learning_iterations",
     "s2_remaining_learning_iterations",
+    "training_artifact_interval",
     "validate_rollout_stage_coverage",
     "validate_guide_training_configuration",
     "validate_training_configuration",

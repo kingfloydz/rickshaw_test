@@ -22,7 +22,6 @@ from .configuration import FIXED_G1_JOINT_ORDER, validate_joint_order
 PROVENANCE_SCHEMA_VERSION = 2
 CHECKPOINT_METADATA_KEY = "g1_rickshaw_provenance"
 RSL_RL_VERSION = "5.0.1"
-PINNED_RSL_RL_VERSION = RSL_RL_VERSION
 CUDA_NOT_AVAILABLE = "none"
 
 
@@ -438,7 +437,6 @@ __all__ = [
     "CHECKPOINT_METADATA_KEY",
     "CUDA_NOT_AVAILABLE",
     "CheckpointMetadata",
-    "PINNED_RSL_RL_VERSION",
     "PROVENANCE_SCHEMA_VERSION",
     "ProvenanceDependencyError",
     "ProvenanceError",

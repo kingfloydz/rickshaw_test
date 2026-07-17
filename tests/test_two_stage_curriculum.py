@@ -19,9 +19,16 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import 
     TerrainCurriculumState,
     balanced_slope_assignment,
 )
+from g1_rickshaw_lab.training_contract import STATIC_HAND_LOAD_ITERATIONS
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     _set_cart_gravity_disabled,
 )
+
+
+def test_default_static_hand_load_stage_is_2000_baseline_iterations() -> None:
+    cfg = CurriculumScheduleCfg()
+
+    assert cfg.static_hand_load_iterations == STATIC_HAND_LOAD_ITERATIONS == 2000
 
 
 def test_stage_transition_is_adopted_only_by_reset_environments() -> None:

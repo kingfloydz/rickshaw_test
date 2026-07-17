@@ -1440,12 +1440,11 @@ class D6ReactionResidualAdapter:
             torch.linalg.vector_norm(rotation_residual, dim=-1),
         ).amax(dim=-1)
         impulse_magnitude = d6_spatial_impulse_magnitudes(impulse)
-        state = self.env.rickshaw_state
         # Excluded external D6 joints are not part of either articulation's
         # tensor joint view. The retained-link incoming wrench is a complete
         # per-side constraint proxy for privilege and diagnostics; whole-cart
         # momentum balance owns the physical hand force used by FAT2 and ZMP.
-        self.env.d6_incoming_joint_proxy_w[:] = wrench
+        state = self.env.rickshaw_state
         state.d6_residual[:] = residual
         state.d6_impulse[:] = impulse_magnitude
         return wrench, residual, impulse_magnitude
@@ -1953,9 +1952,6 @@ def initialize_mdp_state(
     env.static_d6_preload_offset_w = torch.zeros((num_envs, 3), device=device)
     env.policy_robot_speed_s = torch.zeros(num_envs, device=device)
     env.policy_robot_velocity_n = torch.zeros(num_envs, device=device)
-    env.d6_incoming_joint_proxy_w = torch.zeros(
-        (num_envs, 2, 6), device=device
-    )
     env.rickshaw_pose_cfg = rickshaw_pose_cfg
     env.robot_mass = torch.full((num_envs,), float(robot_mass), device=device)
     env.dex_q_grasp = torch.tensor(dex_q_grasp, device=device, dtype=torch.float32)
@@ -2286,7 +2282,6 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.rickshaw_state.d6_wrench_w[env_ids] = 0.0
     env.rickshaw_state.hand_force_w[env_ids] = 0.0
     env.rickshaw_state.hand_torque_w[env_ids] = 0.0
-    env.d6_incoming_joint_proxy_w[env_ids] = 0.0
     static_ids = env_ids[
         curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD)[env_ids]
     ]
@@ -2473,7 +2468,6 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
         env.rickshaw_state.d6_wrench_w[static_load] = external_wrenches
         env.rickshaw_state.d6_residual[static_load] = 0.0
         env.rickshaw_state.d6_impulse[static_load] = 0.0
-        env.d6_incoming_joint_proxy_w[static_load] = 0.0
         env.cart_interaction_wrench_valid[static_load] = True
         env.analytic_force_state.a_s[static_load] = 0.0
         env.analytic_force_state.alpha_ddot[static_load] = 0.0
