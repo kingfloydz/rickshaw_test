@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from g1_rickshaw_lab.validation import (
-    synchronize_runtime_randomization_events,
-    write_json_atomic,
-)
+from g1_rickshaw_lab.validation import write_json_atomic
 
-from scripts import validate_feasibility
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+import validate_feasibility
 
 
 def _pending_report() -> dict:
@@ -28,36 +30,6 @@ def _pending_report() -> dict:
         "failures": ["feasibility scan has not completed"],
         "metadata": {"failure_phase": "pending"},
     }
-
-
-def test_runtime_randomization_rebinds_startup_and_reset_events_atomically() -> None:
-    stale = object()
-    runtime = object()
-    initialize = SimpleNamespace(params={"cfg": stale, "sentinel": "startup"})
-    sample = SimpleNamespace(params={"cfg": stale, "sentinel": "reset"})
-    cfg = SimpleNamespace(
-        runtime_randomization=stale,
-        events=SimpleNamespace(
-            initialize_curriculum=initialize,
-            sample_physics=sample,
-        ),
-    )
-
-    synchronize_runtime_randomization_events(cfg, runtime)
-
-    assert cfg.runtime_randomization is runtime
-    assert initialize.params == {"cfg": runtime, "sentinel": "startup"}
-    assert sample.params == {"cfg": runtime, "sentinel": "reset"}
-    assert initialize.params["cfg"] is sample.params["cfg"]
-
-    incomplete = SimpleNamespace(
-        runtime_randomization=stale,
-        events=SimpleNamespace(sample_physics=SimpleNamespace(params={"cfg": stale})),
-    )
-    with pytest.raises(ValueError, match="initialize_curriculum"):
-        synchronize_runtime_randomization_events(incomplete, runtime)
-    assert incomplete.runtime_randomization is stale
-    assert incomplete.events.sample_physics.params["cfg"] is stale
 
 
 def test_kit_exception_writes_failed_report_before_app_close(tmp_path: Path) -> None:

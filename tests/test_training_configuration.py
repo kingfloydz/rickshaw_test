@@ -6,9 +6,9 @@ import sys
 import pytest
 
 from g1_rickshaw_lab.training_contract import (
+    MAINLINE_PARAMETERS,
     TRAINING_CONFIGURATION_SCHEMA_VERSION,
     finalize_training_configuration,
-    training_configuration_sha256,
     validate_training_configuration,
 )
 
@@ -26,47 +26,36 @@ def _configuration() -> dict:
     return {
         "schema_version": TRAINING_CONFIGURATION_SCHEMA_VERSION,
         "stage": "s0_teacher",
-        "formal": False,
         "task": "Isaac-G1-Rickshaw-Directional-Slope-v0",
         "num_envs": 32,
         "seed": 42,
         "max_iterations": 10,
-        "argv": [],
-        "hydra_overrides": [],
         "guide_parameters": {},
         "resolved_parameters": {},
         "actor_initialized_from_teacher": None,
         "stage_coverage": None,
-        "ablation_values": {
-            "fat2_weight": "0.1",
-            "rollout_steps": "48",
-            "latent_dim": "16",
-        },
-        "inputs_sha256": {"feasibility": "0" * 64},
+        "mainline_parameters": dict(MAINLINE_PARAMETERS),
     }
 
 
-def test_training_configuration_has_one_canonical_validator_and_digest() -> None:
-    signed = finalize_training_configuration(_configuration())
-    signed["content_sha256"] = signed["content_sha256"].upper()
+def test_training_configuration_has_one_canonical_validator() -> None:
+    configuration = finalize_training_configuration(_configuration())
+    normalized = validate_training_configuration(configuration)
 
-    normalized = validate_training_configuration(signed, require_formal=False)
-
-    assert normalized["ablation_values"] == {
-        "fat2_weight": 0.1,
-        "rollout_steps": 48,
-        "latent_dim": 16,
-    }
-    assert normalized["content_sha256"] == training_configuration_sha256(normalized)
-    assert validate_launcher_training_configuration(signed) == normalized
+    assert normalized["mainline_parameters"] == MAINLINE_PARAMETERS
+    assert validate_launcher_training_configuration(configuration) == normalized
 
 
-def test_training_configuration_digest_rejects_mutation() -> None:
-    signed = finalize_training_configuration(_configuration())
-    signed["stage"] = "s2_student_ppo"
+def test_training_configuration_rejects_unknown_or_non_mainline_fields() -> None:
+    configuration = finalize_training_configuration(_configuration())
+    configuration["legacy_digest"] = "removed"
+    with pytest.raises(ValueError, match="missing or unknown"):
+        validate_launcher_training_configuration(configuration)
 
-    with pytest.raises(ValueError, match="content_sha256 mismatch"):
-        validate_launcher_training_configuration(signed)
+    configuration = _configuration()
+    configuration["mainline_parameters"]["latent_dim"] = 24
+    with pytest.raises(ValueError, match="exactly"):
+        validate_launcher_training_configuration(configuration)
 
 
 def test_training_configuration_finalize_rejects_non_json_values() -> None:

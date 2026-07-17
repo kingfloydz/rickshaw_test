@@ -53,6 +53,7 @@ DEX_JOINT_NAMES = (
     "right_dex1_finger_joint_2",
 )
 FOOT_BODY_NAMES = ("left_ankle_roll_link", "right_ankle_roll_link")
+PELVIS_BODY_NAME = "pelvis"
 TORSO_BODY_NAME = "torso_link"
 ILLEGAL_CONTACT_BODY_NAMES = (
     "pelvis",
@@ -96,8 +97,9 @@ ILLEGAL_CONTACT_BODY_NAMES = (
     "right_dex1_finger_link_1",
     "right_dex1_finger_link_2",
 )
-TEACHER_EXTRINSIC_NAMES = mdp.INDEPENDENT_EXTRINSIC_NAMES
-CRITIC_PRIVILEGED_DIM = len(TEACHER_EXTRINSIC_NAMES) + 27
+TEACHER_STATIC_DIM = mdp.TEACHER_STATIC_DIM
+TEACHER_DYNAMIC_DIM = mdp.TEACHER_DYNAMIC_DIM
+CRITIC_PRIVILEGED_DIM = mdp.CRITIC_PRIVILEGED_DIM
 
 
 def _configured_path(env_var: str, default: Path) -> Path:
@@ -113,11 +115,6 @@ def _range_pairs(envelope) -> dict[str, tuple[float, float]]:
 
 def _range_upper(envelope, name: str) -> float:
     return float(envelope.ranges[name].maximum)
-
-
-def _range_pair(envelope, name: str) -> tuple[float, float]:
-    interval = envelope.ranges[name]
-    return float(interval.minimum), float(interval.maximum)
 
 
 def _cal(calibration: dict[str, Any], name: str) -> Any:
@@ -220,10 +217,21 @@ class ObservationsCfg:
             self.concatenate_terms = True
 
     @configclass
-    class TeacherExtrinsicsCfg(ObsGroup):
-        extrinsics = ObsTerm(
-            func=mdp.teacher_extrinsics,
-            params={"expected_dim": len(TEACHER_EXTRINSIC_NAMES)},
+    class TeacherDynamicHistoryCfg(ObsGroup):
+        history = ObsTerm(
+            func=mdp.teacher_dynamic_history,
+            params={"expected_dim": TEACHER_DYNAMIC_DIM},
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    @configclass
+    class TeacherStaticCfg(ObsGroup):
+        static = ObsTerm(
+            func=mdp.teacher_static,
+            params={"expected_dim": TEACHER_STATIC_DIM},
         )
 
         def __post_init__(self):
@@ -243,7 +251,8 @@ class ObservationsCfg:
 
     policy: PolicyCfg = PolicyCfg()
     history: HistoryCfg | None = HistoryCfg()
-    teacher_extrinsics: TeacherExtrinsicsCfg = TeacherExtrinsicsCfg()
+    teacher_dynamic_history: TeacherDynamicHistoryCfg = TeacherDynamicHistoryCfg()
+    teacher_static: TeacherStaticCfg = TeacherStaticCfg()
     critic: CriticCfg = CriticCfg()
 
 
@@ -252,10 +261,9 @@ class EventCfg:
     """Startup, reset, and global policy-rate events."""
 
     initialize_mdp = EventTerm(func=mdp.initialize_mdp_state, mode="startup", params={})
-    initialize_curriculum = EventTerm(
-        func=mdp.initialize_curriculum_runtime, mode="startup", params={}
+    initialize_domain = EventTerm(
+        func=mdp.initialize_domain_randomization, mode="startup", params={}
     )
-    sample_physics = EventTerm(func=mdp.sample_episode_physics, mode="reset", params={})
     reset_closed_chain = EventTerm(func=mdp.reset_closed_chain, mode="reset", params={})
     policy_interval = EventTerm(
         func=mdp.advance_policy_interval,
@@ -278,11 +286,24 @@ class RewardsCfg:
         weight=mdp.REWARD_WEIGHTS["zmp_margin_barrier"],
     )
     hitch_height_exp = RewTerm(func=mdp.hitch_height_exp, weight=mdp.REWARD_WEIGHTS["hitch_height_exp"])
+    hitch_height_recovery_l2 = RewTerm(
+        func=mdp.hitch_height_recovery_l2,
+        weight=mdp.REWARD_WEIGHTS["hitch_height_recovery_l2"],
+        params={
+            "deadband": mdp.HITCH_HEIGHT_RECOVERY_DEADBAND_M,
+            "scale": mdp.HITCH_HEIGHT_RECOVERY_SCALE_M,
+        },
+    )
     fat2_prior_exp = RewTerm(func=mdp.fat2_prior_exp, weight=mdp.REWARD_WEIGHTS["fat2_prior_exp"])
-    feet_air_time = RewTerm(
-        func=mdp.feet_air_time,
-        weight=mdp.REWARD_WEIGHTS["feet_air_time"],
-        params={"sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True)},
+    feet_single_stance = RewTerm(
+        func=mdp.feet_single_stance,
+        weight=mdp.REWARD_WEIGHTS["feet_single_stance"],
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True
+            ),
+            "cap": mdp.FEET_SINGLE_STANCE_CAP_S,
+        },
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -304,6 +325,25 @@ class RewardsCfg:
     processed_action_jerk_l2 = RewTerm(
         func=mdp.processed_action_jerk_l2,
         weight=mdp.REWARD_WEIGHTS["processed_action_jerk_l2"],
+    )
+    hip_yaw_roll_reference_l2 = RewTerm(
+        func=mdp.hip_yaw_roll_reference_l2,
+        weight=mdp.REWARD_WEIGHTS["hip_yaw_roll_reference_l2"],
+        params={
+            "policy_indices": mdp.HIP_YAW_ROLL_POLICY_INDICES,
+            "scale": mdp.HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
+        },
+    )
+    pelvis_height_limits_l2 = RewTerm(
+        func=mdp.pelvis_height_limits_l2,
+        weight=mdp.REWARD_WEIGHTS["pelvis_height_limits_l2"],
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", body_names=[PELVIS_BODY_NAME], preserve_order=True
+            ),
+            "bounds": mdp.PELVIS_HEIGHT_BOUNDS_M,
+            "scale": mdp.PELVIS_HEIGHT_ERROR_SCALE_M,
+        },
     )
     joint_position_limits = RewTerm(
         func=mdp.joint_position_limits,
@@ -351,9 +391,6 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
 
     feasibility_path: str = os.fspath(DEFAULT_FEASIBILITY_PATH)
     reset_pose_path: str = os.fspath(DEFAULT_RESET_POSES_PATH)
-    # Replicated physics requires identical physical schemas in every environment.
-    sample_physics_ranges: bool = False
-
     @property
     def reset_pose_library(self):
         """Validated runtime pose data, intentionally excluded from Hydra serialization."""
@@ -377,12 +414,12 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.feasibility_path = os.fspath(feasibility_path)
         self.reset_pose_path = os.fspath(reset_pose_path)
         self.__dict__["__reset_pose_library"] = reset_library
-        self.runtime_randomization = mdp.RuntimeRandomizationCfg(
-            ranges=ranges,
+        self.domain_randomization = mdp.DomainRandomizationCfg(
+            enabled=True,
+            refresh_interval_iterations=200,
             calibration=calibration,
-            sample_ranges=self.sample_physics_ranges,
-            teacher_extrinsic_names=TEACHER_EXTRINSIC_NAMES,
-            nominal_values={
+            ranges={name: ranges[name] for name in mdp.DOMAIN_PARAMETER_NAMES},
+            nominal={
                 "payload.mass": 0.0,
                 "payload.com.x": 0.5 * sum(ranges["payload.com.x"]),
                 "payload.com.y": 0.0,
@@ -393,20 +430,6 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 "terrain.friction": _cal(calibration, "terrain.friction_nominal"),
                 "wheel.left_damping": RICKSHAW_URDF_SPEC.wheel_joint_damping,
                 "wheel.right_damping": RICKSHAW_URDF_SPEC.wheel_joint_damping,
-                "d6.linear_stiffness": _cal(
-                    calibration, "d6.linear_stiffness_nominal"
-                ),
-                "d6.linear_damping": _cal(calibration, "d6.linear_damping_nominal"),
-                "d6.angular_stiffness": _cal(
-                    calibration, "d6.angular_stiffness_nominal"
-                ),
-                "d6.angular_damping": _cal(
-                    calibration, "d6.angular_damping_nominal"
-                ),
-                "d6.max_force": _cal(calibration, "d6.max_force_nominal"),
-                "d6.max_torque": _cal(calibration, "d6.max_torque_nominal"),
-                "d6.linear_limit": _cal(calibration, "d6.linear_limit_nominal"),
-                "d6.angular_limit": _cal(calibration, "d6.angular_limit_nominal"),
                 "motor.strength": 1.0,
                 "joint.model_error": 0.0,
                 "control.delay": 0.0,
@@ -450,10 +473,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 calibration, "rickshaw_pose.hitch_vertical_speed_tolerance"
             ),
         )
-        self.rolling_resistance = mdp.RollingResistanceCfg(
-            c_rr=_range_pair(envelope, "rolling_resistance.c_rr"),
-            enabled=True,
-        )
+        self.rolling_resistance = mdp.RollingResistanceCfg(enabled=True)
         self.reset_validation = mdp.ResetValidationCfg(
             hand_position_tolerance=_cal(
                 calibration, "reset.hand_position_tolerance"
@@ -552,8 +572,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
             "robot_mass": self.robot_mass,
             "dex_q_grasp": self.dex_q_grasp,
         }
-        self.events.sample_physics.params = {"cfg": self.runtime_randomization}
-        self.events.initialize_curriculum.params = {"cfg": self.runtime_randomization}
+        self.events.initialize_domain.params = {"cfg": self.domain_randomization}
         self.events.policy_interval.params = {"cfg": policy_update}
 
         self.terminations.refresh_policy_state.params = {"cfg": policy_update}
@@ -615,6 +634,8 @@ class G1RickshawDirectionalSlopePlayEnvCfg(G1RickshawDirectionalSlopeEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 64
         self.curriculum = None
+        self.domain_randomization.enabled = False
+        self.domain_randomization.curriculum.static_hand_load_iterations = 0
 
 
 def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) -> None:
@@ -626,8 +647,7 @@ def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) ->
     initialize_params["rolling_resistance_cfg"] = env_cfg.rolling_resistance
     initialize_params["entity_names_cfg"] = env_cfg.task_entity_names
     initialize_params["rickshaw_pose_cfg"] = env_cfg.rickshaw_pose
-    env_cfg.events.sample_physics.params["cfg"] = env_cfg.runtime_randomization
-    env_cfg.events.initialize_curriculum.params["cfg"] = env_cfg.runtime_randomization
+    env_cfg.events.initialize_domain.params["cfg"] = env_cfg.domain_randomization
     env_cfg.events.policy_interval.params["cfg"] = env_cfg.policy_update
     env_cfg.terminations.refresh_policy_state.params["cfg"] = env_cfg.policy_update
 

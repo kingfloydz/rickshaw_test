@@ -1,11 +1,8 @@
-"""Pure CPU contracts for content-audited S1 teacher rollouts."""
+"""Pure CPU structural contracts for S1 teacher rollouts."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-import hashlib
-import json
-import math
 from typing import Any
 
 import torch
@@ -25,31 +22,9 @@ from g1_rickshaw_lab.training_contract import (
 
 ACTION_DIM = 29
 SIGNED_SLOPES = SLOPE_GRADIENTS
-FORMAL_NUM_ENVS = GUIDE_TRAINING_NUM_ENVS
+DEFAULT_NUM_ENVS = GUIDE_TRAINING_NUM_ENVS
 
-PHYSICS_VALUE_NAMES = (
-    "payload.mass",
-    "payload.com.x",
-    "payload.com.y",
-    "payload.com.z",
-    "rolling_resistance.c_rr",
-    "terrain.friction",
-    "wheel.left_damping",
-    "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
-    "motor.strength",
-    "control.delay",
-    "observation.delay",
-)
 AUDIT_TENSOR_NAMES = (
-    "teacher_extrinsics",
     "curriculum_stage",
     "collection_segment",
     "environment_id",
@@ -57,9 +32,6 @@ AUDIT_TENSOR_NAMES = (
     "slope",
     "terrain_level",
     "terrain_type",
-    "physics_values",
-    "joint_model_error",
-    "observation_noise_scale",
 )
 INTEGER_AUDIT_TENSORS = frozenset(
     {
@@ -73,24 +45,13 @@ INTEGER_AUDIT_TENSORS = frozenset(
 )
 
 
-def canonical_sha256(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def formal_slope_environment_assignment(
+def slope_environment_assignment(
     num_envs: int, *, device: torch.device | str = "cpu"
 ) -> dict[str, torch.Tensor]:
-    """Return the deterministic formal assignment over configured slopes."""
+    """Return the deterministic assignment over configured slopes."""
 
-    if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs != FORMAL_NUM_ENVS:
-        raise ValueError(f"formal rollout num_envs must equal {FORMAL_NUM_ENVS}")
+    if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:
+        raise ValueError("rollout num_envs must be positive")
     environment_ids = torch.arange(num_envs, device=device, dtype=torch.long)
     slope_index = environment_ids.remainder(len(SIGNED_SLOPES))
     return {
@@ -128,43 +89,12 @@ def normalize_audit_tensors(
             raise ValueError(f"rollout audit tensor {name} has the wrong sample count")
         result[name] = tensor
     expected = {
-        "teacher_extrinsics": (batch_size, len(PHYSICS_VALUE_NAMES)),
         "slope": (batch_size, 1),
-        "physics_values": (batch_size, len(PHYSICS_VALUE_NAMES)),
-        "joint_model_error": (batch_size, ACTION_DIM),
-        "observation_noise_scale": (batch_size, 1),
     }
     for name, shape in expected.items():
         if tuple(result[name].shape) != shape or torch.any(~torch.isfinite(result[name])):
             raise ValueError(f"rollout audit tensor {name} must be finite with shape {shape}")
     return result
-
-
-def _distribution(values: torch.Tensor) -> dict[str, float]:
-    values = values.double().reshape(-1)
-    if values.numel() == 0 or torch.any(~torch.isfinite(values)):
-        raise ValueError("cannot summarize empty or non-finite rollout values")
-    return {
-        "minimum": float(values.min()),
-        "mean": float(values.mean()),
-        "maximum": float(values.max()),
-    }
-
-
-def _bounds(value: Any, label: str) -> tuple[float, float]:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"{label} must contain [minimum, maximum]")
-    low, high = map(float, value)
-    if not math.isfinite(low) or not math.isfinite(high) or low > high:
-        raise ValueError(f"{label} is invalid")
-    return low, high
-
-
-def _check_range(values: torch.Tensor, bounds: tuple[float, float], label: str) -> None:
-    low, high = bounds
-    tolerance = max(1.0e-6, abs(low) * 1.0e-6, abs(high) * 1.0e-6)
-    if torch.any(values < low - tolerance) or torch.any(values > high + tolerance):
-        raise ValueError(f"actual rollout samples for {label} lie outside configured range")
 
 
 def _slope_indices(tensors: Mapping[str, torch.Tensor]) -> torch.Tensor:
@@ -223,14 +153,12 @@ def summarize_segment_samples(
     segment_index: int,
     num_envs: int,
     samples_per_environment: int,
-    physics_bounds: Mapping[str, Any],
-    joint_model_error_bounds: Any,
 ) -> dict[str, Any]:
     """Validate and summarize the single TRAINING segment from stored samples."""
 
     if segment_index != 0:
         raise ValueError("collection segment must be 0")
-    assignment = formal_slope_environment_assignment(num_envs)
+    assignment = slope_environment_assignment(num_envs)
     expected_samples = num_envs * samples_per_environment
     if tensors["environment_id"].shape[0] != expected_samples:
         raise ValueError("TRAINING segment has the wrong sample count")
@@ -253,20 +181,6 @@ def summarize_segment_samples(
     if _slope_histogram(slope_indices) != expected_sample_slopes:
         raise ValueError("rollout lacks the deterministic balanced slope allocation")
 
-    raw = tensors["physics_values"]
-    normalized = []
-    for index, name in enumerate(PHYSICS_VALUE_NAMES):
-        low, high = _bounds(physics_bounds.get(name), f"physics_bounds.{name}")
-        _check_range(raw[:, index], (low, high), name)
-        normalized.append(
-            torch.zeros_like(raw[:, index])
-            if high == low
-            else torch.clamp(2.0 * (raw[:, index] - low) / (high - low) - 1.0, -1.0, 1.0)
-        )
-    expected_extrinsics = torch.stack(normalized, dim=-1)
-    if not torch.allclose(tensors["teacher_extrinsics"], expected_extrinsics, atol=2.0e-3, rtol=1.0e-3):
-        raise ValueError("teacher_extrinsics do not match raw episode physics")
-    _check_range(tensors["joint_model_error"], _bounds(joint_model_error_bounds, "joint_model_error_bounds"), "joint.model_error")
     episodes = _validate_episode_binding(tensors)
 
     summary = {
@@ -286,40 +200,29 @@ def summarize_segment_samples(
             str(int(value)): int(count)
             for value, count in zip(*torch.unique(tensors["terrain_type"], return_counts=True), strict=True)
         },
-        "physics_distribution": {
-            name: _distribution(raw[:, index]) for index, name in enumerate(PHYSICS_VALUE_NAMES)
-        },
-        "observation_noise_scale": _distribution(tensors["observation_noise_scale"]),
     }
-    summary["content_sha256"] = canonical_sha256(summary)
     return summary
 
 
 def validate_rollout_sample_audit(
     manifest: Mapping[str, Any], tensors: Mapping[str, torch.Tensor]
 ) -> dict[str, Any]:
-    """Recompute and bind the single-segment rollout audit."""
+    """Recompute the single-segment rollout structure and coverage audit."""
 
     if manifest.get("schema_version") != ROLLOUT_MANIFEST_SCHEMA_VERSION:
-        raise ValueError(f"formal S1 requires manifest schema {ROLLOUT_MANIFEST_SCHEMA_VERSION}")
+        raise ValueError(f"S1 rollout requires manifest schema {ROLLOUT_MANIFEST_SCHEMA_VERSION}")
     audit = manifest.get("sample_audit")
     if not isinstance(audit, Mapping) or audit.get("schema_version") != ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION:
         raise ValueError("rollout manifest is missing its sample audit")
-    if tuple(audit.get("physics_value_names", ())) != PHYSICS_VALUE_NAMES:
-        raise ValueError("sample audit physics ABI differs")
     if (
         tuple(float(value) for value in audit.get("signed_slopes", ())) != SIGNED_SLOPES
         or tuple(int(value) for value in audit.get("terrain_levels", ())) != SLOPE_TERRAIN_LEVELS
         or tuple(int(value) for value in audit.get("terrain_types", ())) != SLOPE_TERRAIN_TYPES
-        or audit.get("formal_num_envs") != FORMAL_NUM_ENVS
     ):
         raise ValueError("sample audit slope/terrain ABI differs")
-    physics_bounds = audit.get("physics_bounds")
-    if not isinstance(physics_bounds, Mapping) or set(physics_bounds) != set(PHYSICS_VALUE_NAMES):
-        raise ValueError("sample audit has incomplete physics bounds")
     segments = manifest.get("stage_segments")
     if not isinstance(segments, list) or len(segments) != 1:
-        raise ValueError("formal S1 requires exactly one TRAINING segment")
+        raise ValueError("S1 rollout requires exactly one TRAINING segment")
     for name in AUDIT_TENSOR_NAMES:
         if name not in tensors:
             raise ValueError(f"rollout is missing audit tensor {name!r}")
@@ -328,8 +231,6 @@ def validate_rollout_sample_audit(
         segment_index=0,
         num_envs=int(manifest.get("num_envs", 0)),
         samples_per_environment=int(manifest.get("num_steps_per_stage", 0)),
-        physics_bounds=physics_bounds,
-        joint_model_error_bounds=audit.get("joint_model_error_bounds"),
     )
     segment = segments[0]
     if segment.get("global_stage") != "TRAINING" or segment.get("actual_sample_audit") != summary:
@@ -344,7 +245,6 @@ def validate_rollout_sample_audit(
     compact = {
         "manifest_schema_version": ROLLOUT_MANIFEST_SCHEMA_VERSION,
         "sample_audit_schema_version": ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION,
-        "sample_audit_sha256": canonical_sha256({"sample_audit": dict(audit), "segments": [summary]}),
         "signed_slopes": list(SIGNED_SLOPES),
         **bindings,
         "stages": {
@@ -353,29 +253,24 @@ def validate_rollout_sample_audit(
                 "episodes": summary["episodes"],
                 "stage_distribution": summary["stage_distribution"],
                 **bindings,
-                "content_sha256": summary["content_sha256"],
             }
         },
     }
-    if manifest.get("sample_audit_sha256") != compact["sample_audit_sha256"]:
-        raise ValueError("sample_audit_sha256 differs from shard samples")
     return compact
 
 
 __all__ = [
     "ACTION_DIM",
     "AUDIT_TENSOR_NAMES",
-    "FORMAL_NUM_ENVS",
+    "DEFAULT_NUM_ENVS",
     "INTEGER_AUDIT_TENSORS",
-    "PHYSICS_VALUE_NAMES",
     "ROLLOUT_MANIFEST_SCHEMA_VERSION",
     "ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION",
     "SIGNED_SLOPES",
     "SLOPE_LABELS",
     "SLOPE_TERRAIN_LEVELS",
     "SLOPE_TERRAIN_TYPES",
-    "canonical_sha256",
-    "formal_slope_environment_assignment",
+    "slope_environment_assignment",
     "normalize_audit_tensors",
     "summarize_segment_samples",
     "validate_rollout_sample_audit",

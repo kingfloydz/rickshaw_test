@@ -11,4 +11,5 @@ SOURCE_ROOT = REPOSITORY_ROOT / "source" / "g1_rickshaw_lab"
 
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
-
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(1, str(REPOSITORY_ROOT))

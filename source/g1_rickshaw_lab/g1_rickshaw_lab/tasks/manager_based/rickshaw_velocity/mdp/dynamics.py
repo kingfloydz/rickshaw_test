@@ -172,7 +172,6 @@ def low_pass(
 
 @dataclass
 class RollingResistanceCfg:
-    c_rr: tuple[float, float] = MISSING
     enabled: bool = True
     velocity_epsilon: float = 0.05
     normal_force_filter_hz: float = 20.0
@@ -180,8 +179,6 @@ class RollingResistanceCfg:
     def validate(self) -> None:
         if type(self.enabled) is not bool:
             raise ValueError("rolling-resistance enabled must be boolean")
-        if len(self.c_rr) != 2 or self.c_rr[0] < 0.0 or self.c_rr[1] < self.c_rr[0]:
-            raise ValueError("c_rr must be a non-negative ordered (low, high) pair")
         if self.velocity_epsilon <= 0.0:
             raise ValueError("velocity_epsilon must be positive")
         if self.normal_force_filter_hz <= 0.0:
@@ -437,9 +434,10 @@ def update_cart_interaction_wrench(
 
     if not hasattr(env, "read_d6_reaction_residual"):
         raise RuntimeError("D6 residual/impulse adapter was not installed at startup")
-    # The incoming-joint reader remains a conservative residual/impulse proxy;
-    # its wrench is not a valid external D6 force for excluded closed-loop joints.
-    env.read_d6_reaction_residual()
+    # The per-side proxy is the only complete D6 wrench available to privileged
+    # observations. Whole-cart momentum balance below remains the physical force
+    # source used by FAT2 and the analytic interaction-force diagnostics.
+    d6_wrench_w, _, _ = env.read_d6_reaction_residual()
     state = getattr(env, "cart_interaction_wrench_state", None)
     if state is None:
         raise RuntimeError("cart interaction wrench state is not initialized")
@@ -462,8 +460,7 @@ def update_cart_interaction_wrench(
     hand_force_w = -force_on_cart_w
     env.rickshaw_state.hand_force_w[:] = hand_force_w
     env.rickshaw_state.hand_torque_w.zero_()
-    env.rickshaw_state.d6_wrench_w.zero_()
-    env.rickshaw_state.d6_wrench_w[..., :3] = 0.5 * hand_force_w[:, None, :]
+    env.rickshaw_state.d6_wrench_w[:] = d6_wrench_w
     env.cart_interaction_wrench_valid = valid
     return hand_force_w
 

@@ -24,23 +24,28 @@ if str(SCRIPTS_ROOT) not in sys.path:
 import solve_reset_poses as solver_module  # noqa: E402
 from solve_reset_poses import (  # noqa: E402
     DEFAULT_URDF,
-    DEFAULT_HARDWARE_TORQUE_LIMIT,
+    DEFAULT_STAGE_B_CANDIDATES_PER_SLOPE,
+    RESET_TORQUE_LIMIT_FRACTION,
     _allocate_support_torques,
     _assembled_validation_report_errors,
     _assembled_validation_command,
     _bind_reset_pose_library,
     _build_parser,
     _candidate_contract,
+    _candidate_batch_mapping,
+    _candidate_batches,
     _candidate_constraint_violation,
     _candidate_output_mapping,
     _candidate_rank_key,
     _commit_pipeline_publications,
+    _configure_validation_horizon,
     _foot_contact_geometry,
     _per_foot_support_wrench_ratios,
     _prepare_atomic_text,
     _solver_worker_count,
     _stage_a_solve_plan,
     _load_candidate_progress,
+    _load_candidate_batch,
     _static_load_scales,
     _retarget_validation_report,
     _run_multistarts,
@@ -123,7 +128,108 @@ def test_solver_help_exits_successfully() -> None:
 
 
 def test_canonical_output_is_the_default() -> None:
-    assert _build_parser().parse_args([]).output == Path("config/reset_poses.yaml")
+    args = _build_parser().parse_args([])
+
+    assert args.output == Path("config/reset_poses.yaml")
+    assert (
+        args.stage_b_candidates_per_slope == DEFAULT_STAGE_B_CANDIDATES_PER_SLOPE
+    )
+    assert RESET_TORQUE_LIMIT_FRACTION == pytest.approx(0.86)
+    assert not any(
+        hasattr(args, name)
+        for name in (
+            "lower_torque_limit_fraction",
+            "waist_torque_limit_fraction",
+            "arm_torque_limit_fraction",
+            "static_lower_preload_limit",
+            "static_waist_preload_limit",
+            "static_arm_preload_limit",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    (
+        "--lower-torque-limit-fraction",
+        "--waist-torque-limit-fraction",
+        "--arm-torque-limit-fraction",
+        "--static-lower-preload-limit",
+        "--static-waist-preload-limit",
+        "--static-arm-preload-limit",
+    ),
+)
+def test_reset_torque_limit_is_not_runtime_adjustable(flag: str) -> None:
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([flag, "0.85"])
+
+
+def test_validation_horizon_ends_before_the_environment_timeout() -> None:
+    cfg = SimpleNamespace(
+        sim=SimpleNamespace(dt=0.005),
+        decimation=4,
+        episode_length_s=20.0,
+    )
+
+    _configure_validation_horizon(cfg, 1000)
+
+    assert cfg.episode_length_s == pytest.approx(20.02)
+    assert math.ceil(cfg.episode_length_s / (cfg.sim.dt * cfg.decimation)) == 1001
+
+
+def test_stage_b_packs_candidates_onto_unique_equivalent_terrain_tiles(
+    tmp_path: Path,
+) -> None:
+    counts = (3, 7, 15, 11, 16, 26, 19, 23, 31, 17, 19, 24, 22, 24, 19, 21, 20, 18, 24)
+    pose_by_slope = {
+        float(row["gradient"]): row
+        for row in _synthetic_reset_pose_mapping()["poses"]
+    }
+    candidate_bank = {
+        float(slope): [
+            {
+                "candidate_id": candidate_id,
+                "pose": pose_by_slope[float(slope)],
+                "static_metrics": {},
+            }
+            for candidate_id in range(count)
+        ]
+        for slope, count in zip(solver_module.SLOPE_GRADIENTS, counts, strict=True)
+    }
+
+    batches = _candidate_batches(candidate_bank, 9)
+
+    assert len(batches) == 4
+    assert sum(len(batch) for batch in batches) == sum(counts) == 359
+    seen: set[tuple[float, int]] = set()
+    for batch in batches:
+        tiles = {(level, column) for _source, level, column in batch}
+        assert len(tiles) == len(batch)
+        per_slope: dict[float, int] = {}
+        for source, _level, _column in batch:
+            slope = float(source["pose"]["gradient"])
+            per_slope[slope] = per_slope.get(slope, 0) + 1
+            seen.add((slope, int(source["candidate_id"])))
+        assert max(per_slope.values()) <= 9
+    assert len(seen) == 359
+
+    batch_path = tmp_path / "candidate_batch.json"
+    batch_path.write_text(
+        json.dumps(_candidate_batch_mapping(batches[0])),
+        encoding="utf-8",
+    )
+    loaded = _load_candidate_batch(batch_path)
+    assert len(loaded) == len(batches[0])
+    assert loaded[0]["candidate_id"] == batches[0][0][0]["candidate_id"]
+
+
+def test_stage_b_rejects_more_candidates_than_equivalent_terrain_columns() -> None:
+    args = _build_parser().parse_args(
+        ["--steps", "1000", "--stage-b-candidates-per-slope", "10"]
+    )
+
+    with pytest.raises(ValueError, match="must lie in"):
+        _validate_arguments(args)
 
 
 def test_candidate_cache_contract_binds_stage_a_inputs() -> None:
@@ -222,7 +328,7 @@ def test_internal_worker_writes_public_candidate_progress(
     staging = tmp_path / "staging.json"
     public = tmp_path / "public.json"
     args = _build_parser().parse_args(
-        ["--candidate-output", os.fspath(staging), "--_pipeline-worker", "token"]
+        ["--candidate-output", os.fspath(staging), "--_pipeline-worker"]
     )
     slope = 0.0
     pose = next(
@@ -267,15 +373,9 @@ def test_complete_pipeline_rejects_a_nonformal_horizon_before_search() -> None:
         _validate_arguments(args)
 
 
-def test_internal_pipeline_worker_rejects_direct_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    args = _build_parser().parse_args(["--_pipeline-worker", "forged-token"])
-    monkeypatch.delenv("G1_RICKSHAW_RESET_WORKER_TOKEN", raising=False)
-    monkeypatch.delenv("G1_RICKSHAW_RESET_WORKER_STAGING", raising=False)
-
-    with pytest.raises(ValueError, match="requires parent authorization"):
-        _validate_arguments(args)
+def test_internal_pipeline_worker_flag_is_boolean() -> None:
+    assert _build_parser().parse_args([])._pipeline_worker is False
+    assert _build_parser().parse_args(["--_pipeline-worker"])._pipeline_worker is True
 
 
 def test_reset_pipeline_rejects_input_output_path_collisions(tmp_path: Path) -> None:
@@ -357,9 +457,6 @@ def test_assembled_validation_uses_the_same_pipeline_in_a_fresh_process(
         seed=42,
         timeseries_stride=100,
         stable_displacement_limit=0.05,
-        static_lower_preload_limit=0.85,
-        static_waist_preload_limit=0.85,
-        static_arm_preload_limit=0.85,
         device="cuda:0",
         foot_stiffness=None,
         foot_damping=None,
@@ -380,17 +477,40 @@ def test_assembled_validation_uses_the_same_pipeline_in_a_fresh_process(
     assert "--headless" in command
 
 
-def test_candidate_validation_process_accepts_a_failed_physics_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mismatch", (None, "path", "candidate_id"))
+def test_candidate_validation_process_checks_path_and_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str | None
 ) -> None:
     reset_poses = tmp_path / "reset_poses.json"
     reset_poses.write_text("library\n", encoding="utf-8")
+    candidate_batch = tmp_path / "candidate_batch.json"
+    pose = _synthetic_reset_pose_mapping()["poses"][0]
+    candidate_batch.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidates": [
+                    {
+                        "slope": pose["gradient"],
+                        "candidate_id": 3,
+                        "terrain_level": 7,
+                        "terrain_column": 18,
+                        "pose": pose,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     output_dir = tmp_path / "batch"
     output_dir.mkdir()
     calls: list[list[str]] = []
 
-    def fake_run(command: list[str], *, check: bool) -> SimpleNamespace:
+    def fake_run(
+        command: list[str], *, check: bool, env: dict[str, str]
+    ) -> SimpleNamespace:
         assert check is False
+        assert env[solver_module.CANDIDATE_BATCH_ENV] == str(candidate_batch.resolve())
         calls.append(command)
         failure_path = Path(command[command.index("--report-output") + 1])
         failure_path.write_text(
@@ -402,10 +522,24 @@ def test_candidate_validation_process_accepts_a_failed_physics_report(
                     "steps": 1000,
                     "inputs": {
                         "reset_pose_path": str(reset_poses.resolve()),
+                        "candidate_batch_path": str(
+                            (tmp_path / "other_batch.json").resolve()
+                            if mismatch == "path"
+                            else candidate_batch.resolve()
+                        ),
                     },
-                    "slopes": [float(value) for value in solver_module.SLOPE_GRADIENTS],
-                    "initial": [{} for _ in solver_module.SLOPE_GRADIENTS],
-                    "rollout": [{} for _ in solver_module.SLOPE_GRADIENTS],
+                    "slopes": [pose["gradient"]],
+                    "candidate_bindings": [
+                        {
+                            "environment_index": 0,
+                            "slope": pose["gradient"],
+                            "candidate_id": 4 if mismatch == "candidate_id" else 3,
+                            "terrain_level": 7,
+                            "terrain_column": 18,
+                        }
+                    ],
+                    "initial": [{}],
+                    "rollout": [{}],
                 }
             ),
             encoding="utf-8",
@@ -417,9 +551,6 @@ def test_candidate_validation_process_accepts_a_failed_physics_report(
         seed=42,
         timeseries_stride=0,
         stable_displacement_limit=0.05,
-        static_lower_preload_limit=0.85,
-        static_waist_preload_limit=0.85,
-        static_arm_preload_limit=0.85,
         device="cuda:0",
         foot_stiffness=None,
         foot_damping=None,
@@ -429,9 +560,22 @@ def test_candidate_validation_process_accepts_a_failed_physics_report(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    report = _run_candidate_validation_process(args, reset_poses, output_dir)
+    if mismatch is None:
+        report = _run_candidate_validation_process(
+            args, reset_poses, candidate_batch, output_dir
+        )
+        assert report["status"] == "failed"
+    else:
+        message = (
+            "different candidate batch"
+            if mismatch == "path"
+            else "candidate rollout report slope rows are invalid"
+        )
+        with pytest.raises(RuntimeError, match=message):
+            _run_candidate_validation_process(
+                args, reset_poses, candidate_batch, output_dir
+            )
 
-    assert report["status"] == "failed"
     assert len(calls) == 1
     assert calls[0][1] == str(SCRIPTS_ROOT / "solve_reset_poses.py")
     assert "--validate-existing" in calls[0]
@@ -462,25 +606,31 @@ def test_candidate_rollout_batches_use_distinct_process_workspaces(
             "static_metrics": {"fat2_error": 0.0, "zmp_margin": 1.0},
         }
     )
-    workspaces: list[tuple[Path, Path]] = []
+    workspaces: list[tuple[Path, Path, Path]] = []
 
     def fake_validation(
-        args: SimpleNamespace, reset_pose_path: Path, output_dir: Path
+        args: SimpleNamespace,
+        reset_pose_path: Path,
+        candidate_batch_path: Path,
+        output_dir: Path,
     ) -> dict[str, object]:
-        workspaces.append((reset_pose_path, output_dir))
+        workspaces.append((reset_pose_path, candidate_batch_path, output_dir))
+        batch = json.loads(candidate_batch_path.read_text(encoding="utf-8"))[
+            "candidates"
+        ]
         rollout = [
             {
                 "max_arm_torque_ratio": 0.1,
                 "maximum_lower_torque_ratio": 0.1,
                 "max_d6_residual_m_or_rad": 0.0,
             }
-            for _ in solver_module.SLOPE_GRADIENTS
+            for _ in batch
         ]
         return {
             "status": "failed",
             "safety_thresholds": {},
             "rickshaw_pose_contract": {"hitch_height_target_m": 0.85},
-            "initial": [{} for _ in solver_module.SLOPE_GRADIENTS],
+            "initial": [{} for _ in batch],
             "rollout": rollout,
         }
 
@@ -500,6 +650,7 @@ def test_candidate_rollout_batches_use_distinct_process_workspaces(
         report_output=tmp_path / "report.json",
         summary_output=tmp_path / "report.md",
         full_pose_multistarts=50,
+        stage_b_candidates_per_slope=1,
         steps=1000,
     )
     monkeypatch.setattr(
@@ -509,8 +660,9 @@ def test_candidate_rollout_batches_use_distinct_process_workspaces(
 
     assert _run_isolated_candidate_rollouts(args, baseline, candidate_bank) == 0
     assert len(workspaces) == 2
-    assert workspaces[0][0] != workspaces[1][0]
+    assert workspaces[0][0] == workspaces[1][0]
     assert workspaces[0][1] != workspaces[1][1]
+    assert workspaces[0][2] != workspaces[1][2]
 
 
 def test_pipeline_parent_publishes_only_after_isolated_validation(
@@ -531,6 +683,8 @@ def test_pipeline_parent_publishes_only_after_isolated_validation(
         assert check is False
         calls.append(command)
         if "--_pipeline-worker" in command:
+            worker_flag = command.index("--_pipeline-worker")
+            assert command[worker_flag + 1] == "--output"
             option_path(command, "--output").write_text("library\n", encoding="utf-8")
             option_path(command, "--candidate-output").write_text(
                 "candidates\n", encoding="utf-8"
@@ -575,9 +729,6 @@ def test_pipeline_parent_publishes_only_after_isolated_validation(
         seed=42,
         timeseries_stride=0,
         stable_displacement_limit=0.05,
-        static_lower_preload_limit=0.85,
-        static_waist_preload_limit=0.85,
-        static_arm_preload_limit=0.85,
         device="cuda:0",
         foot_stiffness=None,
         foot_damping=None,
@@ -669,9 +820,6 @@ def test_pipeline_parent_rejects_a_report_bound_to_a_different_library(
         seed=42,
         timeseries_stride=0,
         stable_displacement_limit=0.05,
-        static_lower_preload_limit=0.85,
-        static_waist_preload_limit=0.85,
-        static_arm_preload_limit=0.85,
         device="cuda:0",
         foot_stiffness=None,
         foot_damping=None,
@@ -707,9 +855,6 @@ def test_pipeline_parent_publishes_partial_stage_a_cache_on_worker_failure(
         seed=42,
         timeseries_stride=0,
         stable_displacement_limit=0.05,
-        static_lower_preload_limit=0.85,
-        static_waist_preload_limit=0.85,
-        static_arm_preload_limit=0.85,
         device="cuda:0",
         foot_stiffness=None,
         foot_damping=None,
@@ -836,11 +981,8 @@ def _valid_metrics() -> dict[str, float | int]:
         "hard_residual": 1.0e-5,
         "hard_tolerance": 1.0e-3,
         "lower_torque_ratio": 0.4,
-        "lower_torque_limit": 0.7,
         "waist_torque_ratio": 0.4,
-        "waist_torque_limit": 0.7,
         "arm_torque_ratio": 0.6,
-        "arm_torque_limit": 0.7,
         "q_ref_joint_margin": 0.01,
         "joint_margin": 0.06,
         "minimum_dex_forward_dot": 0.6,
@@ -1042,14 +1184,9 @@ def test_candidate_rank_includes_post_solve_static_gates(
     "field",
     ("lower_torque_ratio", "waist_torque_ratio", "arm_torque_ratio"),
 )
-def test_hardware_torque_gate_uses_the_relaxed_085_limit(field: str) -> None:
+def test_hardware_torque_gate_uses_the_086_limit(field: str) -> None:
     metrics = _valid_metrics()
-    metrics.update(
-        lower_torque_limit=DEFAULT_HARDWARE_TORQUE_LIMIT,
-        waist_torque_limit=DEFAULT_HARDWARE_TORQUE_LIMIT,
-        arm_torque_limit=DEFAULT_HARDWARE_TORQUE_LIMIT,
-    )
-    metrics[field] = DEFAULT_HARDWARE_TORQUE_LIMIT
+    metrics[field] = RESET_TORQUE_LIMIT_FRACTION
     assert _candidate_constraint_violation(**metrics) == 0.0
     metrics[field] += 1.0e-4
     assert _candidate_constraint_violation(**metrics) > 0.0
@@ -1086,7 +1223,7 @@ def test_foot_contact_height_is_derived_from_coplanar_urdf_spheres() -> None:
     (
         (("--waist-stiffness", "0"), "waist-stiffness"),
         (
-            ("--arm-torque-limit-fraction", "0.5"),
+            ("--ik-arm-torque-target-fraction", "0.9"),
             "ik-arm-torque-target-fraction",
         ),
     ),

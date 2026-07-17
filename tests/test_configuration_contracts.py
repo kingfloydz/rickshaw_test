@@ -110,7 +110,7 @@ def test_feasibility_envelope_requires_exact_schema_fields() -> None:
     assert set(envelope.calibration) == set(REQUIRED_CALIBRATION_FIELDS)
 
     missing = _valid_feasibility_mapping()
-    del missing["ranges"]["d6.linear_limit"]
+    del missing["ranges"]["motor.strength"]
     with pytest.raises(ConfigurationContractError, match="missing"):
         FeasibilityEnvelope.from_mapping(missing)
 
@@ -136,17 +136,12 @@ def test_feasibility_envelope_rejects_joint_order_and_d6_axis_drift() -> None:
         FeasibilityEnvelope.from_mapping(invalid_axis)
 
 
-def test_d6_nominal_calibration_is_explicit_and_range_checked() -> None:
+def test_d6_nominal_calibration_is_explicit_and_not_a_runtime_range() -> None:
     mapping = _valid_feasibility_mapping()
     mapping["calibration"]["d6.linear_stiffness_nominal"] = 5.0
     envelope = FeasibilityEnvelope.from_mapping(mapping)
     assert envelope.calibration["d6.linear_stiffness_nominal"] == 5.0
-    assert envelope.ranges["d6.linear_stiffness"].maximum == 10.0
-
-    invalid = _valid_feasibility_mapping()
-    invalid["calibration"]["d6.linear_stiffness_nominal"] = 11.0
-    with pytest.raises(ConfigurationContractError, match="outside"):
-        FeasibilityEnvelope.from_mapping(invalid)
+    assert not any(name.startswith("d6.") for name in envelope.ranges)
 
 
 def test_reset_pose_library_requires_all_19_slopes_and_fixed_order() -> None:

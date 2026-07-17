@@ -1,4 +1,4 @@
-"""Pure regression tests for curriculum, latency, and safety contracts."""
+"""Pure regression tests for curriculum, domain physics, and safety contracts."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import (
-    ControlDelayState,
-)
+from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actuation import (
     actuator_effort_limits,
 )
@@ -21,17 +19,14 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import 
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     CommandState,
-    RuntimeRandomizationCfg,
+    DOMAIN_PARAMETER_NAMES,
+    DomainRandomizationCfg,
     SpeedCommandSamplingCfg,
     _write_actuator_parameters,
     advance_speed_command_resampling,
-    initialize_curriculum_runtime,
-)
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations import (
-    ACTOR_OBSERVATION_DIM,
-    ObservationDelayState,
-    ObservationNoiseCfg,
-    assemble_actor_observation,
+    domain_epoch_seed,
+    initialize_domain_randomization,
+    sample_domain_parameters,
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations import (
     IMMEDIATE_CAUSES,
@@ -46,103 +41,134 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations impo
 
 
 def test_startup_event_signature_accepts_event_manager_env_ids() -> None:
-    parameters = tuple(inspect.signature(initialize_curriculum_runtime).parameters)
+    parameters = tuple(inspect.signature(initialize_domain_randomization).parameters)
     assert parameters[:3] == ("env", "env_ids", "cfg")
 
 
-def _runtime_randomization_cfg(
-    *, sample_ranges: bool, payload_range: tuple[float, float], joint_range: tuple[float, float]
-) -> RuntimeRandomizationCfg:
-    return RuntimeRandomizationCfg(
-        ranges={
-            "payload.mass": payload_range,
-            "joint.model_error": joint_range,
-        },
+def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
+    ranges = {
+        "payload.mass": (0.0, 1.0),
+        "payload.com.x": (0.3, 0.9),
+        "payload.com.y": (-0.15, 0.15),
+        "payload.com.z": (0.45, 0.95),
+        "rolling_resistance.c_rr": (0.01, 0.03),
+        "terrain.friction": (0.6, 1.2),
+        "wheel.left_damping": (0.015, 0.025),
+        "wheel.right_damping": (0.015, 0.025),
+        "motor.strength": (0.9, 1.1),
+        "control.delay": (0.0, 0.04),
+        "observation.delay": (0.0, 0.04),
+        "joint.model_error": (-0.05, 0.05),
+    }
+    nominal = {
+        "payload.mass": 0.0,
+        "payload.com.x": 0.6,
+        "payload.com.y": 0.0,
+        "payload.com.z": 0.7,
+        "rolling_resistance.c_rr": 0.02,
+        "terrain.friction": 1.0,
+        "wheel.left_damping": 0.02,
+        "wheel.right_damping": 0.02,
+        "motor.strength": 1.0,
+        "control.delay": 0.0,
+        "observation.delay": 0.0,
+        "joint.model_error": 0.0,
+    }
+    return DomainRandomizationCfg(
+        enabled=enabled,
+        ranges=ranges,
+        nominal=nominal,
         calibration={},
-        nominal_values={
-            "payload.mass": payload_range[0],
-            "joint.model_error": joint_range[0],
-        },
         curriculum=CurriculumScheduleCfg(),
-        sample_ranges=sample_ranges,
-        teacher_extrinsic_names=("payload.mass",),
     )
 
 
-def test_replicated_physics_accepts_singleton_scan_ranges() -> None:
-    _runtime_randomization_cfg(
-        sample_ranges=True,
-        payload_range=(0.5, 0.5),
-        joint_range=(0.1, 0.1),
-    ).validate()
+def test_domain_schema_is_11_scalars_plus_per_joint_error() -> None:
+    cfg = _domain_cfg()
+    cfg.validate()
+    assert set(cfg.ranges) == set(DOMAIN_PARAMETER_NAMES)
+    assert not any(name.startswith("d6.") for name in cfg.ranges)
+    generator = torch.Generator().manual_seed(domain_epoch_seed(7, 3))
+    values, joint_error = sample_domain_parameters(cfg, 8, generator=generator)
+    assert len(values) == 11
+    assert joint_error.shape == (8, 29)
+    assert torch.any(joint_error[:, 0] != joint_error[:, 1])
 
 
-@pytest.mark.parametrize("varying", ("teacher", "joint"))
-def test_replicated_physics_rejects_non_singleton_scan_ranges(varying: str) -> None:
-    cfg = _runtime_randomization_cfg(
-        sample_ranges=True,
-        payload_range=(0.5, 0.6) if varying == "teacher" else (0.5, 0.5),
-        joint_range=(0.1, 0.2) if varying == "joint" else (0.1, 0.1),
+def test_disabled_domain_uses_nominal_values_and_never_changes_by_epoch() -> None:
+    cfg = _domain_cfg(enabled=False)
+    first, first_error = sample_domain_parameters(cfg, 3)
+    second, second_error = sample_domain_parameters(cfg, 3)
+    for name in first:
+        torch.testing.assert_close(first[name], second[name])
+        assert torch.all(first[name] == cfg.nominal[name])
+    assert torch.all(first_error == 0.0)
+    torch.testing.assert_close(first_error, second_error)
+
+
+def test_domain_epoch_seed_supports_resume_without_sampling_prior_epochs() -> None:
+    cfg = _domain_cfg()
+    direct = torch.Generator().manual_seed(domain_epoch_seed(123, 4))
+    resumed = torch.Generator().manual_seed(domain_epoch_seed(123, 4))
+    direct_values, direct_error = sample_domain_parameters(cfg, 5, generator=direct)
+    resumed_values, resumed_error = sample_domain_parameters(cfg, 5, generator=resumed)
+    for name in direct_values:
+        torch.testing.assert_close(direct_values[name], resumed_values[name])
+    torch.testing.assert_close(direct_error, resumed_error)
+
+
+def test_domain_iteration_refreshes_once_per_epoch_and_supports_direct_resume(
+    monkeypatch,
+) -> None:
+    cfg = _domain_cfg()
+    calls: list[int] = []
+
+    monkeypatch.setattr(events_module, "install_balanced_slope_assignment", lambda _env: None)
+
+    def apply_epoch(env, _cfg, epoch: int) -> None:
+        calls.append(epoch)
+        env.domain_randomization_epoch = epoch
+
+    monkeypatch.setattr(events_module, "_apply_domain_epoch", apply_epoch)
+    env = SimpleNamespace(
+        num_envs=4,
+        device="cpu",
+        step_dt=0.02,
+        slope=torch.zeros(4),
+        cfg=SimpleNamespace(seed=17),
+        scene=SimpleNamespace(
+            terrain=SimpleNamespace(terrain_types=torch.arange(4, dtype=torch.long))
+        ),
     )
-    with pytest.raises(ValueError, match="singleton scan ranges"):
-        cfg.validate()
+    initialize_domain_randomization(env, None, cfg)
+
+    assert calls == [0]
+    assert env.set_domain_randomization_iteration(199) is False
+    assert calls == [0]
+    assert env.set_domain_randomization_iteration(200) is True
+    assert calls == [0, 1]
+    assert env.set_domain_randomization_iteration(200) is False
+    assert calls == [0, 1]
+    assert env.set_domain_randomization_iteration(600) is True
+    assert calls == [0, 1, 3]
+    with pytest.raises(ValueError, match="backwards"):
+        env.set_domain_randomization_iteration(400)
 
 
-def test_curriculum_is_single_training_stage_for_all_iterations() -> None:
+def test_curriculum_switches_only_reset_environments_to_training() -> None:
     strata = torch.arange(30)
     state = CurriculumRuntimeState.create(
         strata, torch.zeros_like(strata), CurriculumScheduleCfg()
     )
-    for iteration in (0, 999, 1000, 6000):
-        assert state.set_iteration(iteration) == CurriculumStage.TRAINING
-        assert torch.all(
-            state.stage_per_environment() == int(CurriculumStage.TRAINING)
-        )
+    assert state.set_iteration(999) == CurriculumStage.STATIC_HAND_LOAD
+    assert state.set_iteration(1000) == CurriculumStage.TRAINING
+    assert torch.all(state.stage_per_environment() == int(CurriculumStage.STATIC_HAND_LOAD))
+    reset_ids = torch.tensor([0, 3, 7])
+    state.activate(reset_ids)
+    assert torch.all(state.stage_per_environment()[reset_ids] == int(CurriculumStage.TRAINING))
 
 
-def test_control_and_observation_delay_are_exact_integer_steps() -> None:
-    delays = torch.tensor([0, 1, 2], dtype=torch.long)
-    control = ControlDelayState.zeros(3, 1, 2)
-    assert control.apply(torch.ones(3, 1), delays).squeeze(-1).tolist() == [1.0, 0.0, 0.0]
-    assert control.apply(torch.full((3, 1), 2.0), delays).squeeze(-1).tolist() == [2.0, 1.0, 0.0]
-    assert control.apply(torch.full((3, 1), 3.0), delays).squeeze(-1).tolist() == [3.0, 2.0, 1.0]
-
-    observation = ObservationDelayState.zeros(3, 2)
-    first = torch.ones(3, ACTOR_OBSERVATION_DIM)
-    second = torch.full_like(first, 2.0)
-    third = torch.full_like(first, 3.0)
-    assert torch.all(observation.apply(first, delays) == 1.0)
-    delayed_second = observation.apply(second, delays)[:, 0]
-    delayed_third = observation.apply(third, delays)[:, 0]
-    assert delayed_second.tolist() == [2.0, 1.0, 1.0]
-    assert delayed_third.tolist() == [3.0, 2.0, 1.0]
-
-
-def test_observation_corruption_can_be_disabled_per_environment() -> None:
-    batch = 2
-    zeros3 = torch.zeros(batch, 3)
-    zeros29 = torch.zeros(batch, 29)
-    scalar = torch.zeros(batch)
-    noise = ObservationNoiseCfg().scaled(torch.tensor([0.0, 1.0]))
-    generator = torch.Generator().manual_seed(7)
-    result = assemble_actor_observation(
-        zeros3,
-        zeros3,
-        scalar,
-        scalar,
-        scalar,
-        zeros29,
-        zeros29,
-        zeros29,
-        zeros29,
-        noise_cfg=noise,
-        generator=generator,
-    )
-    assert torch.all(result[0] == 0.0)
-    assert torch.any(result[1] != 0.0)
-
-
-def test_motor_randomization_updates_explicit_model_without_enabling_solver_pd() -> None:
+def test_nominal_actuator_domain_preserves_configured_gains_and_binds_limits() -> None:
     class FakeRobot:
         def __init__(self) -> None:
             self.num_joints = 2
@@ -187,23 +213,20 @@ def test_motor_randomization_updates_explicit_model_without_enabling_solver_pd()
         device="cpu",
     )
     env_ids = torch.tensor([0, 1], dtype=torch.long)
-    strength = torch.tensor([0.9, 1.1])
     _write_actuator_parameters(
-        env, env_ids, strength, torch.zeros(2, 2)
+        env,
+        env_ids,
+        torch.ones(2),
+        torch.zeros((2, 2)),
     )
 
     assert torch.all(robot.data.joint_stiffness[:, 0] == 0.0)
-    assert torch.allclose(robot.data.joint_stiffness[:, 1], torch.tensor([18.0, 22.0]))
-    assert torch.allclose(
-        robot.actuators["explicit"].stiffness[:, 0], torch.tensor([90.0, 110.0])
-    )
-    assert torch.allclose(
-        robot.actuators["explicit"]._saturation_effort[:, 0],
-        torch.tensor([72.0, 88.0]),
-    )
+    assert torch.all(robot.data.joint_stiffness[:, 1] == 20.0)
+    assert torch.all(robot.actuators["explicit"].stiffness[:, 0] == 100.0)
+    assert torch.all(robot.actuators["explicit"]._saturation_effort[:, 0] == 80.0)
     assert torch.allclose(
         robot.data.joint_effort_limits,
-        torch.tensor([[45.0, 36.0], [55.0, 44.0]]),
+        torch.tensor([[50.0, 40.0], [50.0, 40.0]]),
     )
     assert torch.allclose(
         actuator_effort_limits(robot, [0, 1]),

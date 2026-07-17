@@ -234,6 +234,15 @@ def _run() -> tuple[dict[str, object], list[str], dict[str, object]]:
         raise RuntimeError("environment did not load the requested reset-pose library")
     cfg.scene.num_envs = NUM_ENVS
     cfg.sim.device = args.device
+    cfg.domain_randomization = replace(
+        cfg.domain_randomization,
+        enabled=False,
+        curriculum=replace(
+            cfg.domain_randomization.curriculum,
+            static_hand_load_iterations=0,
+        ),
+    )
+    cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
     cfg.curriculum = None
     # Prescribed velocities and pelvis forces intentionally violate policy
     # overspeed/pose envelopes.  This isolated check gates force balance via
@@ -242,10 +251,6 @@ def _run() -> tuple[dict[str, object], list[str], dict[str, object]]:
     cfg.terminations.persistent_safety = None
     # Keep the directional generator structured. Only the level manager is disabled.
     cfg.scene.terrain.terrain_generator.curriculum = True
-    runtime_cfg = replace(cfg.runtime_randomization, sample_ranges=False)
-    cfg.runtime_randomization = runtime_cfg
-    cfg.events.sample_physics.params = {"cfg": runtime_cfg}
-
     env = gym.make(args.task, cfg=cfg)
     base = env.unwrapped
     failures: list[str] = []

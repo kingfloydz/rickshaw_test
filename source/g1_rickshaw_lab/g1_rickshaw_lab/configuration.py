@@ -54,6 +54,7 @@ FEASIBILITY_SCHEMA_VERSION = 1
 RESET_POSE_SCHEMA_VERSION = 4
 RESET_POSE_GRADIENTS = SLOPE_GRADIENTS
 SLOPE_MATCH_TOLERANCE = 1.0e-9
+RESET_TORQUE_LIMIT_FRACTION = 0.86
 
 # This is the source-URDF order after applying the guide's one-time grouping
 # rule: lower_names + waist_names + arm_names.  Runtime regex ordering is never
@@ -99,8 +100,7 @@ LOWER_HARDWARE_EFFORT_LIMITS = (88.0, 88.0, 88.0, 139.0, 50.0, 50.0) * 2
 WAIST_HARDWARE_EFFORT_LIMITS = (88.0, 50.0, 50.0)
 ARM_HARDWARE_EFFORT_LIMITS = (25.0, 25.0, 25.0, 25.0, 25.0, 13.4, 13.4) * 2
 
-# Marginal bounds produced by the feasibility scan.  Singleton intervals are
-# used for fixed C1 values, so fixed and randomized curricula share one schema.
+# Marginal bounds produced by the feasibility scan for runtime domain parameters.
 REQUIRED_FEASIBILITY_RANGES = (
     "payload.mass",
     "payload.com.x",
@@ -110,14 +110,6 @@ REQUIRED_FEASIBILITY_RANGES = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
     "motor.strength",
     "joint.model_error",
     "control.delay",
@@ -278,14 +270,6 @@ _NONNEGATIVE_RANGE_NAMES = frozenset(
 _NOMINAL_CALIBRATION_BY_RANGE = {
     "rolling_resistance.c_rr": "rolling_resistance.c_rr_nominal",
     "terrain.friction": "terrain.friction_nominal",
-    "d6.linear_stiffness": "d6.linear_stiffness_nominal",
-    "d6.linear_damping": "d6.linear_damping_nominal",
-    "d6.angular_stiffness": "d6.angular_stiffness_nominal",
-    "d6.angular_damping": "d6.angular_damping_nominal",
-    "d6.max_force": "d6.max_force_nominal",
-    "d6.max_torque": "d6.max_torque_nominal",
-    "d6.linear_limit": "d6.linear_limit_nominal",
-    "d6.angular_limit": "d6.angular_limit_nominal",
 }
 
 
@@ -617,14 +601,6 @@ class FeasibilityEnvelope:
             "terrain.friction",
             "wheel.left_damping",
             "wheel.right_damping",
-            "d6.linear_stiffness",
-            "d6.linear_damping",
-            "d6.angular_stiffness",
-            "d6.angular_damping",
-            "d6.max_force",
-            "d6.max_torque",
-            "d6.linear_limit",
-            "d6.angular_limit",
             "motor.strength",
             "command.acceleration_limit",
             "command.jerk_limit",
@@ -1222,6 +1198,7 @@ __all__ = [
     "REQUIRED_CALIBRATION_FIELDS",
     "REQUIRED_FEASIBILITY_RANGES",
     "RESET_POSE_SCHEMA_VERSION",
+    "RESET_TORQUE_LIMIT_FRACTION",
     "RESET_ARM_STIFFNESS",
     "RESET_LOWER_STIFFNESS",
     "RESET_WAIST_STIFFNESS",

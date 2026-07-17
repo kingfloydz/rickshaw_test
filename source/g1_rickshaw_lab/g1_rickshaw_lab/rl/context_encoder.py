@@ -1,8 +1,4 @@
-"""Causal history encoder for the G1 rickshaw policy.
-
-The encoder intentionally has one temporal input only.  Its final feature sees
-exactly the 61 observations preceding the current policy observation.
-"""
+"""Causal observation-history encoder used by the deployable student."""
 
 from __future__ import annotations
 
@@ -12,11 +8,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from g1_rickshaw_lab.policy_schema import (
+    ACTOR_OBSERVATION_DIM,
+    DEFAULT_CONTEXT_DIM,
+    HISTORY_LENGTH,
+    validate_context_dim,
+)
 
-HISTORY_LENGTH: Final[int] = 61
-OBSERVATION_DIM: Final[int] = 96
-FEATURE_DIM: Final[int] = 128
-CONTEXT_DIM: Final[int] = 16
+OBSERVATION_DIM: Final[int] = ACTOR_OBSERVATION_DIM
+FEATURE_DIM: Final[int] = 64
 KERNEL_SIZE: Final[int] = 5
 DILATIONS: Final[tuple[int, ...]] = (1, 2, 4, 8)
 
@@ -24,122 +24,76 @@ DILATIONS: Final[tuple[int, ...]] = (1, 2, 4, 8)
 def temporal_receptive_field(
     kernel_size: int = KERNEL_SIZE, dilations: tuple[int, ...] = DILATIONS
 ) -> int:
-    """Return the receptive field of one convolution per causal block."""
-
-    if kernel_size < 1:
-        raise ValueError(f"kernel_size must be positive, got {kernel_size}")
-    if not dilations or any(dilation < 1 for dilation in dilations):
-        raise ValueError(f"dilations must contain positive integers, got {dilations}")
+    if kernel_size < 1 or not dilations or any(value < 1 for value in dilations):
+        raise ValueError("kernel size and dilations must be positive")
     return 1 + (kernel_size - 1) * sum(dilations)
 
 
 class CausalBlock(nn.Module):
-    """One residual causal dilated convolution followed by a 1x1 mix."""
+    """One residual causal convolution and one channel-mixing projection."""
 
     def __init__(self, channels: int, dilation: int) -> None:
         super().__init__()
-        if channels < 1:
-            raise ValueError(f"channels must be positive, got {channels}")
-        if dilation < 1:
-            raise ValueError(f"dilation must be positive, got {dilation}")
-
-        self.channels = channels
-        self.dilation = dilation
         self.left_pad = (KERNEL_SIZE - 1) * dilation
         self.conv = nn.Conv1d(
             channels,
             channels,
             kernel_size=KERNEL_SIZE,
             dilation=dilation,
-            stride=1,
         )
         self.mix = nn.Conv1d(channels, channels, kernel_size=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.conv(F.pad(x, (self.left_pad, 0)))
-        y = self.mix(F.elu(y))
-        return F.elu(x + y)
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        residual = self.conv(F.pad(value, (self.left_pad, 0)))
+        return F.elu(value + self.mix(F.elu(residual)))
+
+
+def validate_history(
+    history: torch.Tensor,
+    *,
+    feature_dim: int,
+    name: str,
+) -> None:
+    if history.ndim != 3 or history.shape[1:] != (HISTORY_LENGTH, feature_dim):
+        raise ValueError(
+            f"{name} must have shape [N, {HISTORY_LENGTH}, {feature_dim}], "
+            f"got {tuple(history.shape)}"
+        )
+    if not history.is_floating_point():
+        raise TypeError(f"{name} must be floating point")
 
 
 class ContextEncoder(nn.Module):
-    """Encode ``history[N, 61, 96]`` into a context latent and auxiliaries.
-
-    ``latent_dim`` defaults to the deployed 16-D representation.  It remains a
-    constructor argument solely for the required 8/16/24/32 latent ablation; the
-    temporal and observation dimensions are fixed by the deployment contract.
-    """
+    """Encode the preceding 61 actor observations into the selected latent."""
 
     history_length: Final[int] = HISTORY_LENGTH
     observation_dim: Final[int] = OBSERVATION_DIM
     feature_dim: Final[int] = FEATURE_DIM
     receptive_field: Final[int] = temporal_receptive_field()
 
-    def __init__(self, latent_dim: int = CONTEXT_DIM) -> None:
+    def __init__(self, latent_dim: int = DEFAULT_CONTEXT_DIM) -> None:
         super().__init__()
-        if latent_dim < 1:
-            raise ValueError(f"latent_dim must be positive, got {latent_dim}")
-
-        self.latent_dim = latent_dim
+        self.latent_dim = validate_context_dim(latent_dim)
         self.input = nn.Conv1d(OBSERVATION_DIM, FEATURE_DIM, kernel_size=1)
         self.blocks = nn.Sequential(
             *(CausalBlock(FEATURE_DIM, dilation) for dilation in DILATIONS)
         )
-        self.context = nn.Sequential(
-            nn.Linear(FEATURE_DIM, 64),
-            nn.ELU(),
-            nn.Linear(64, latent_dim),
-        )
-        self.phase = nn.Linear(FEATURE_DIM, 2)
-        self.frequency = nn.Linear(FEATURE_DIM, 1)
-        self.contact = nn.Linear(FEATURE_DIM, 2)
-        self.cart_lag = nn.Linear(FEATURE_DIM, 1)
-
-    @staticmethod
-    def _validate_history(history: torch.Tensor) -> None:
-        if history.ndim != 3:
-            raise ValueError(
-                "ContextEncoder expects history with shape [N, 61, 96], "
-                f"got {tuple(history.shape)}"
-            )
-        if history.shape[1:] != (HISTORY_LENGTH, OBSERVATION_DIM):
-            raise ValueError(
-                "ContextEncoder expects history with shape [N, 61, 96], "
-                f"got {tuple(history.shape)}"
-            )
-        if not history.is_floating_point():
-            raise TypeError(
-                f"ContextEncoder expects floating-point history, got {history.dtype}"
-            )
+        self.context = nn.Linear(FEATURE_DIM, self.latent_dim)
 
     def extract_feature(self, history: torch.Tensor) -> torch.Tensor:
-        """Return the 128-D feature at the final causal time step."""
-
-        self._validate_history(history)
-        x = self.input(history.transpose(1, 2))
-        x = self.blocks(x)
-        return x[:, :, -1]
+        validate_history(history, feature_dim=OBSERVATION_DIM, name="history")
+        encoded = self.blocks(self.input(history.transpose(1, 2)))
+        return encoded[:, :, -1]
 
     def encode(self, history: torch.Tensor) -> torch.Tensor:
-        """Return only ``z_hat`` for deployment wrappers."""
-
         return self.context(self.extract_feature(history))
 
-    def forward(
-        self, history: torch.Tensor
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        feature = self.extract_feature(history)
-        context = self.context(feature)
-        auxiliary = {
-            "phase": self.phase(feature),
-            "frequency": self.frequency(feature),
-            "contact": self.contact(feature),
-            "cart_lag": self.cart_lag(feature),
-        }
-        return context, auxiliary
+    def forward(self, history: torch.Tensor) -> torch.Tensor:
+        return self.encode(history)
 
 
 __all__ = [
-    "CONTEXT_DIM",
+    "DEFAULT_CONTEXT_DIM",
     "DILATIONS",
     "FEATURE_DIM",
     "HISTORY_LENGTH",
@@ -148,4 +102,5 @@ __all__ = [
     "CausalBlock",
     "ContextEncoder",
     "temporal_receptive_field",
+    "validate_history",
 ]

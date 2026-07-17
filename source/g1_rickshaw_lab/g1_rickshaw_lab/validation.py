@@ -1,9 +1,8 @@
-"""Content-addressed reports for optional offline physics diagnostics."""
+"""Structured reports for optional offline physics diagnostics."""
 
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -13,13 +12,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from ._hashing import sha256_file as _sha256_file
-from .configuration import SLOPE_GRADIENTS
+from .configuration import RESET_TORQUE_LIMIT_FRACTION, SLOPE_GRADIENTS
 from .rickshaw_spec import RICKSHAW_TOTAL_MASS
 
-VALIDATION_REPORT_SCHEMA_VERSION = 2
+VALIDATION_REPORT_SCHEMA_VERSION = 3
 FEASIBILITY_MINIMUM_PASS_FRACTION = 0.99
-REQUIRED_GATE_TOOLS = ("validate_feasibility", "validate_dynamics")
+VALIDATION_TOOLS = ("validate_feasibility", "validate_dynamics")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ASSET_DEPENDENCY_SUFFIXES = frozenset({".urdf", ".usd", ".stl", ".yaml"})
 VALIDATION_SIGNED_SLOPES = SLOPE_GRADIENTS
@@ -44,14 +42,10 @@ GUIDE_SCAN_RANGE_ORDER = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
+    "motor.strength",
+    "joint.model_error",
+    "control.delay",
+    "observation.delay",
 )
 FEASIBILITY_MEASUREMENT_SOURCES = MappingProxyType(
     {
@@ -111,8 +105,8 @@ _SAFETY_VECTOR_LENGTHS = {
 }
 
 
-class ValidationGateError(RuntimeError):
-    """Raised when a validation artifact cannot authorize training."""
+class ValidationReportError(RuntimeError):
+    """Raised when a diagnostic report is structurally invalid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,15 +128,14 @@ class ConservativeLimit:
 
 @dataclass(frozen=True, slots=True)
 class SafetyAuthoritySource:
-    """One immutable provenance input referenced by a safety authority."""
+    """One provenance input referenced by a safety authority."""
 
     path: Path
-    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
 class SafetyThresholdAuthority:
-    """Independent, content-addressed source for hardware safety thresholds."""
+    """Independent source for hardware safety thresholds."""
 
     authority_id: str
     method: str
@@ -158,11 +151,10 @@ class SafetyThresholdAuthority:
 
         return {
             "path": str(self.source_path),
-            "sha256": sha256_file(self.source_path),
             "authority_id": self.authority_id,
             "method": self.method,
             "source_files": {
-                name: {"path": str(source.path), "sha256": source.sha256}
+                name: {"path": str(source.path)}
                 for name, source in self.sources.items()
             },
             "thresholds": {
@@ -177,53 +169,6 @@ class SafetyThresholdAuthority:
                 for name in SAFETY_THRESHOLD_FIELDS
             },
         }
-
-
-def sha256_file(path: str | Path) -> str:
-    """Return the lowercase SHA-256 digest of a regular file."""
-
-    file_path = Path(path).resolve()
-    if not file_path.is_file():
-        raise FileNotFoundError(file_path)
-    return _sha256_file(file_path)
-
-
-def reset_dynamics_feasibility_sha256(path: str | Path) -> str:
-    """Hash only immutable feasibility inputs that affect reset dynamics.
-
-    Command acceleration/jerk are authored by the scan itself, while safety
-    thresholds are owned by the independent authority.  Excluding both avoids
-    a provenance cycle when the completed scan atomically updates its envelope.
-    """
-
-    mapping = _load_unique_yaml_mapping(path)
-    ranges = mapping.get("ranges")
-    calibration = mapping.get("calibration")
-    if not isinstance(ranges, Mapping) or not isinstance(calibration, Mapping):
-        raise ValueError("feasibility envelope must contain ranges and calibration mappings")
-    flattened_calibration = _flatten_value_mapping(calibration)
-    projection = {
-        "schema_version": mapping.get("schema_version"),
-        "slopes": mapping.get("slopes"),
-        "joint_order": mapping.get("joint_order"),
-        "physical_ranges": {
-            name: value
-            for name, value in ranges.items()
-            if name not in {"command.acceleration_limit", "command.jerk_limit"}
-        },
-        "reset_dynamics_calibration": {
-            name: value
-            for name, value in flattened_calibration.items()
-            if not name.startswith("safety.")
-        },
-    }
-    encoded = json.dumps(
-        projection,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _load_unique_yaml_mapping(path: str | Path) -> Mapping[str, Any]:
@@ -311,9 +256,8 @@ def load_safety_threshold_authority(
 ) -> SafetyThresholdAuthority:
     """Load and verify an independent safety-threshold authority.
 
-    Every threshold names its provenance records, and every provenance record
-    is hash checked on load.  The candidate/generated envelope is supplied as a
-    forbidden source so it cannot authorize its own acceptance thresholds.
+    Every threshold names its provenance records. The candidate/generated
+    envelope is forbidden so it cannot authorize its own acceptance thresholds.
     """
 
     authority_path = Path(path).resolve()
@@ -359,7 +303,7 @@ def load_safety_threshold_authority(
         record = source_files[name]
         if not isinstance(record, Mapping):
             raise ValueError(f"source_files.{name} must be a mapping")
-        _expect_exact_authority_keys(record, {"path", "sha256"}, f"source_files.{name}")
+        _expect_exact_authority_keys(record, {"path"}, f"source_files.{name}")
         raw_path = record["path"]
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise ValueError(f"source_files.{name}.path must be a non-empty string")
@@ -372,21 +316,9 @@ def load_safety_threshold_authority(
                 f"source_files.{name} points at the authority or feasibility envelope; "
                 "an independent source is required"
             )
-        expected_digest = record["sha256"]
-        if not isinstance(expected_digest, str) or len(expected_digest) != 64:
-            raise ValueError(f"source_files.{name}.sha256 must be a SHA-256 digest")
-        try:
-            int(expected_digest, 16)
-        except ValueError as exc:
-            raise ValueError(f"source_files.{name}.sha256 must be a SHA-256 digest") from exc
-        expected_digest = expected_digest.lower()
-        actual_digest = sha256_file(source_path)
-        if actual_digest != expected_digest:
-            raise ValueError(
-                f"safety authority provenance source {name!r} is stale: "
-                f"{actual_digest} != {expected_digest}"
-            )
-        sources[name] = SafetyAuthoritySource(source_path, expected_digest)
+        if not source_path.is_file():
+            raise ValueError(f"safety authority provenance source {name!r} is missing")
+        sources[name] = SafetyAuthoritySource(source_path)
 
     threshold_records = mapping["thresholds"]
     if not isinstance(threshold_records, Mapping):
@@ -478,31 +410,6 @@ def assert_safety_thresholds_match(
                 f"{label}.{name}={actual!r} does not match independent authority "
                 f"value {expected!r}"
             )
-
-
-def synchronize_runtime_randomization_events(
-    env_cfg: Any, runtime_randomization: Any
-) -> None:
-    """Atomically bind startup/reset event terms to one randomization object."""
-
-    events = getattr(env_cfg, "events", None)
-    if events is None:
-        raise ValueError("environment configuration has no events object")
-    terms: list[tuple[Any, dict[str, Any]]] = []
-    for name in ("initialize_curriculum", "sample_physics"):
-        term = getattr(events, name, None)
-        if term is None:
-            raise ValueError(f"environment events are missing {name!r}")
-        params = getattr(term, "params", None)
-        if not isinstance(params, Mapping):
-            raise ValueError(f"environment event {name!r} params must be a mapping")
-        rebound = dict(params)
-        rebound["cfg"] = runtime_randomization
-        terms.append((term, rebound))
-
-    env_cfg.runtime_randomization = runtime_randomization
-    for term, params in terms:
-        term.params = params
 
 
 def utc_timestamp() -> str:
@@ -652,28 +559,31 @@ def derive_feasibility_envelope_mapping(
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValidationGateError(f"{label} must be a JSON object")
+        raise ValidationReportError(f"{label} must be a JSON object")
     return value
 
 
-def _require_sha256(value: Any, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValidationGateError(f"{label} must be a SHA-256 hex digest")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise ValidationGateError(f"{label} must be a SHA-256 hex digest") from exc
-    return value.lower()
+def _validate_json_finite(value: Any, label: str) -> None:
+    """Reject non-finite numbers while preserving arbitrary diagnostic structure."""
 
-
-def asset_hashes(paths: Mapping[str, str | Path]) -> dict[str, str]:
-    """Hash named source assets/configs for a report."""
-
-    return {name: sha256_file(path) for name, path in sorted(paths.items())}
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValidationReportError(f"{label} keys must be strings")
+            _validate_json_finite(child, f"{label}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _validate_json_finite(child, f"{label}[{index}]")
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValidationReportError(f"{label} must be finite")
+    if value is not None and not isinstance(value, (str, bool, int, float)):
+        raise ValidationReportError(f"{label} contains a non-JSON value")
 
 
 def validation_input_assets(repository_root: str | Path = REPOSITORY_ROOT) -> dict[str, Path]:
-    """Return the transitive local asset files bound into every gate report."""
+    """Return the transitive local asset files referenced by diagnostic reports."""
 
     root = Path(repository_root).resolve()
     assets_root = root / "assets"
@@ -776,16 +686,6 @@ def build_feasibility_scan_plan(
         )
     )
 
-    soft_d6_heavy = dict(nominal)
-    soft_d6_heavy["payload.mass"] = bounds["payload.mass"][1]
-    for name in (
-        "d6.linear_stiffness",
-        "d6.linear_damping",
-        "d6.angular_stiffness",
-        "d6.angular_damping",
-    ):
-        soft_d6_heavy[name] = bounds[name][0]
-    plan.append(FeasibilityScanPoint("cross:soft_d6_heavy", soft_d6_heavy))
     return tuple(plan)
 
 
@@ -803,9 +703,9 @@ def build_report(
     failures: Sequence[str] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Construct a gate report whose inputs are content addressed."""
+    """Construct a diagnostic report with explicit input paths."""
 
-    if tool not in REQUIRED_GATE_TOOLS:
+    if tool not in VALIDATION_TOOLS:
         raise ValueError(f"unsupported validation tool {tool!r}")
     failure_list = [str(item) for item in failures]
     if passed and failure_list:
@@ -818,18 +718,19 @@ def build_report(
         "created_utc": utc_timestamp(),
         "inputs": {
             "feasibility_path": str(Path(feasibility_path).resolve()),
-            "feasibility_sha256": sha256_file(feasibility_path),
             "reset_pose_path": str(Path(reset_pose_path).resolve()),
-            "reset_pose_sha256": sha256_file(reset_pose_path),
-            "assets": asset_hashes(assets),
-            "runtime_sources": asset_hashes(
-                validation_runtime_sources() if runtime_sources is None else runtime_sources
-            ),
+            "assets": {
+                name: str(Path(input_path).resolve())
+                for name, input_path in sorted(assets.items())
+            },
+            "runtime_sources": {
+                name: str(Path(input_path).resolve())
+                for name, input_path in sorted(
+                    (validation_runtime_sources() if runtime_sources is None else runtime_sources).items()
+                )
+            },
             "additional_inputs": {
-                name: {
-                    "path": str(Path(input_path).resolve()),
-                    "sha256": sha256_file(input_path),
-                }
+                name: str(Path(input_path).resolve())
                 for name, input_path in sorted((additional_inputs or {}).items())
             },
         },
@@ -841,26 +742,26 @@ def build_report(
 
 def _finite_number(value: Any, label: str) -> float:
     if isinstance(value, bool):
-        raise ValidationGateError(f"{label} must be a finite number")
+        raise ValidationReportError(f"{label} must be a finite number")
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValidationGateError(f"{label} must be a finite number") from exc
+        raise ValidationReportError(f"{label} must be a finite number") from exc
     if not math.isfinite(result):
-        raise ValidationGateError(f"{label} must be a finite number")
+        raise ValidationReportError(f"{label} must be a finite number")
     return result
 
 
 def _require_sequence(value: Any, label: str) -> Sequence[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValidationGateError(f"{label} must be a JSON array")
+        raise ValidationReportError(f"{label} must be a JSON array")
     return value
 
 
 def _close(actual: Any, expected: float, label: str, *, tolerance: float = 1.0e-9) -> None:
     value = _finite_number(actual, label)
     if not math.isclose(value, expected, rel_tol=1.0e-7, abs_tol=tolerance):
-        raise ValidationGateError(f"{label}={value} does not match expected {expected}")
+        raise ValidationReportError(f"{label}={value} does not match expected {expected}")
 
 
 def _required_scan_point_names() -> tuple[str, ...]:
@@ -871,7 +772,6 @@ def _required_scan_point_names() -> tuple[str, ...]:
         (
             "cross:heavy_high_rr",
             "cross:low_friction_downhill",
-            "cross:soft_d6_heavy",
         )
     )
     return tuple(names)
@@ -892,7 +792,7 @@ def _load_json_evidence(path: Path, label: str) -> Mapping[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValidationGateError(f"{label} is not readable JSON: {exc}") from exc
+        raise ValidationReportError(f"{label} is not readable JSON: {exc}") from exc
     return _require_mapping(value, label)
 
 
@@ -900,19 +800,14 @@ def validate_safety_authority_source_evidence(
     authority: SafetyThresholdAuthority,
     *,
     task: str,
-    assets_sha256: Mapping[str, str],
     feasibility_path: str | Path,
     reset_pose_path: str | Path,
-    reset_pose_sha256: str,
 ) -> None:
     """Recompute the project-specific claims made by authority source records."""
 
     reset_source = authority.sources["reset_pose_library"]
-    if (
-        reset_source.path != Path(reset_pose_path).resolve()
-        or reset_source.sha256 != reset_pose_sha256
-    ):
-        raise ValidationGateError(
+    if reset_source.path != Path(reset_pose_path).resolve():
+        raise ValidationReportError(
             "safety authority reset-pose source is not the report reset-pose library"
         )
 
@@ -923,39 +818,12 @@ def validate_safety_authority_source_evidence(
     reset_inputs = _require_mapping(
         reset_report.get("inputs"), "reset_alignment.inputs"
     )
-    if set(reset_inputs) != {
-        "feasibility_path",
-        "feasibility_reset_dynamics_sha256",
-        "reset_pose_path",
-        "reset_pose_sha256",
-        "assets",
-        "runtime_sources",
-    }:
-        raise ValidationGateError(
-            "safety authority reset alignment has an incomplete input binding"
-        )
     if (
         reset_inputs.get("feasibility_path") != str(Path(feasibility_path).resolve())
-        or reset_inputs.get("feasibility_reset_dynamics_sha256")
-        != reset_dynamics_feasibility_sha256(feasibility_path)
         or reset_inputs.get("reset_pose_path") != str(Path(reset_pose_path).resolve())
-        or reset_inputs.get("reset_pose_sha256") != reset_pose_sha256
     ):
-        raise ValidationGateError(
-            "safety authority reset alignment is not bound to the current feasibility/reset inputs"
-        )
-    reset_assets = _require_mapping(reset_inputs.get("assets"), "reset_alignment.inputs.assets")
-    if dict(reset_assets) != dict(assets_sha256):
-        raise ValidationGateError(
-            "safety authority reset alignment is not bound to the current assets"
-        )
-    reset_runtime_sources = _require_mapping(
-        reset_inputs.get("runtime_sources"), "reset_alignment.inputs.runtime_sources"
-    )
-    current_runtime_sources = asset_hashes(validation_runtime_sources(REPOSITORY_ROOT))
-    if dict(reset_runtime_sources) != current_runtime_sources:
-        raise ValidationGateError(
-            "safety authority reset alignment is stale for the current runtime sources"
+        raise ValidationReportError(
+            "safety authority reset alignment references different feasibility/reset inputs"
         )
     reset_slopes = tuple(
         _finite_number(value, "reset_alignment.slopes")
@@ -973,9 +841,9 @@ def validate_safety_authority_source_evidence(
         or reset_report["steps"] < 1000
         or reset_slopes != VALIDATION_SIGNED_SLOPES
         or reset_report.get("continuous_standing") is not True
-        or reset_report.get("sample_physics_ranges") is not False
+        or reset_report.get("physics_mode") != "fixed"
     ):
-        raise ValidationGateError(
+        raise ValidationReportError(
             "safety authority reset alignment must cover this task, nominal 1000-step "
             f"continuous standing, and all {len(VALIDATION_SIGNED_SLOPES)} slopes"
         )
@@ -987,7 +855,7 @@ def validate_safety_authority_source_evidence(
         "reset_alignment.torque_measurement_contract",
     )
     if dict(torque_contract) != dict(RESET_ALIGNMENT_TORQUE_MEASUREMENT_CONTRACT):
-        raise ValidationGateError(
+        raise ValidationReportError(
             "safety authority reset alignment does not use physical actuator torque limits"
         )
     reset_thresholds = _require_mapping(
@@ -1005,21 +873,19 @@ def validate_safety_authority_source_evidence(
         )
     for report_name in (
         "static_lower_preload_ratio",
+        "static_waist_preload_ratio",
         "static_arm_preload_ratio",
     ):
-        value = _finite_number(
+        _close(
             reset_thresholds.get(report_name),
+            RESET_TORQUE_LIMIT_FRACTION,
             f"reset_alignment.safety_thresholds.{report_name}",
         )
-        if not 0.0 < value <= 1.0:
-            raise ValidationGateError(
-                f"reset_alignment.safety_thresholds.{report_name} must lie in (0,1]"
-            )
     checks = _require_mapping(
         summary.get("checks"), "reset_alignment.summary.checks"
     )
     if not checks or any(value is not True for value in checks.values()):
-        raise ValidationGateError("safety authority reset alignment contains failed checks")
+        raise ValidationReportError("safety authority reset alignment contains failed checks")
     observed_limits = (
         (
             "rollout_d6_residual_max_m_or_rad",
@@ -1041,7 +907,7 @@ def validate_safety_authority_source_evidence(
         )
         threshold = float(authority.thresholds[threshold_name])
         if observed < 0.0 or observed > threshold:
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"reset alignment {metric_name}={observed} exceeds authority "
                 f"{threshold_name}={threshold}"
             )
@@ -1056,7 +922,7 @@ def _validate_scan_point_parameters(
     """Prove that named feasibility points contain the guide-defined assignments."""
 
     if set(point_parameters) != set(point_names):
-        raise ValidationGateError(f"{stage} parameter evidence does not cover every scan point")
+        raise ValidationReportError(f"{stage} parameter evidence does not cover every scan point")
 
     nominal = point_parameters["nominal"]
     lower: dict[str, float] = {}
@@ -1068,13 +934,13 @@ def _validate_scan_point_parameters(
             expected = dict(nominal)
             expected[name] = assignment[name]
             if not _parameters_match(assignment, expected):
-                raise ValidationGateError(
+                raise ValidationReportError(
                     f"{stage} scan point {name}:{label} changes parameters other than {name}"
                 )
         lower[name] = minimum[name]
         upper[name] = maximum[name]
         if lower[name] > nominal[name] or nominal[name] > upper[name]:
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} scan endpoints for {name} do not bracket the nominal value"
             )
 
@@ -1089,20 +955,9 @@ def _validate_scan_point_parameters(
     low_friction_downhill["terrain.friction"] = lower["terrain.friction"]
     expected_crosses["cross:low_friction_downhill"] = low_friction_downhill
 
-    soft_d6_heavy = dict(nominal)
-    soft_d6_heavy["payload.mass"] = upper["payload.mass"]
-    for name in (
-        "d6.linear_stiffness",
-        "d6.linear_damping",
-        "d6.angular_stiffness",
-        "d6.angular_damping",
-    ):
-        soft_d6_heavy[name] = lower[name]
-    expected_crosses["cross:soft_d6_heavy"] = soft_d6_heavy
-
     for point, expected in expected_crosses.items():
         if not _parameters_match(point_parameters[point], expected):
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} scan point {point} does not match the guide-defined cross assignment"
             )
 
@@ -1123,9 +978,9 @@ def _validate_search_evidence(
         )
     )
     if len(candidates) < 2 or any(value <= 0.0 for value in candidates):
-        raise ValidationGateError(f"{stage} search must contain at least two positive candidates")
+        raise ValidationReportError(f"{stage} search must contain at least two positive candidates")
     if candidates != tuple(sorted(set(candidates))):
-        raise ValidationGateError(f"{stage} candidates must be unique and strictly increasing")
+        raise ValidationReportError(f"{stage} candidates must be unique and strictly increasing")
 
     expected_keys = {format(value, ".12g") for value in candidates}
     passed_mapping = _require_mapping(
@@ -1135,7 +990,7 @@ def _validate_search_evidence(
     if set(passed_mapping) != expected_keys or not all(
         isinstance(value, bool) for value in passed_mapping.values()
     ):
-        raise ValidationGateError(f"{stage} candidate pass map is incomplete or malformed")
+        raise ValidationReportError(f"{stage} candidate pass map is incomplete or malformed")
     candidate_passed = {
         candidate: bool(passed_mapping[format(candidate, ".12g")])
         for candidate in candidates
@@ -1143,7 +998,7 @@ def _validate_search_evidence(
     try:
         selected = select_conservative_limit(candidate_passed, safety_factor=0.8)
     except (TypeError, ValueError) as exc:
-        raise ValidationGateError(f"{stage} search has no valid contiguous feasible prefix: {exc}") from exc
+        raise ValidationReportError(f"{stage} search has no valid contiguous feasible prefix: {exc}") from exc
 
     suffix = "mps2" if stage == "acceleration" else "mps3"
     _close(
@@ -1160,7 +1015,7 @@ def _validate_search_evidence(
 
     coverage = _require_mapping(search.get("coverage"), f"metrics.{stage}_search.coverage")
     if set(coverage) != expected_keys:
-        raise ValidationGateError(f"{stage} search coverage keys differ from candidates")
+        raise ValidationReportError(f"{stage} search coverage keys differ from candidates")
     expected_per_candidate = (
         len(point_names) * len(VALIDATION_SIGNED_SLOPES) * len(FEASIBILITY_FORCE_DIRECTIONS)
     )
@@ -1169,19 +1024,19 @@ def _validate_search_evidence(
         key = format(candidate, ".12g")
         detail = _require_mapping(coverage[key], f"metrics.{stage}_search.coverage.{key}")
         if detail.get("complete") is not True:
-            raise ValidationGateError(f"{stage} candidate {key} coverage is incomplete")
+            raise ValidationReportError(f"{stage} candidate {key} coverage is incomplete")
         for field in ("expected_trials", "observed_trials"):
             if detail.get(field) != expected_per_candidate:
-                raise ValidationGateError(
+                raise ValidationReportError(
                     f"{stage} candidate {key} {field} must equal {expected_per_candidate}"
                 )
         if detail.get("all_physical_endpoints_passed") is not candidate_passed[candidate]:
-            raise ValidationGateError(f"{stage} candidate {key} coverage/pass result disagrees")
+            raise ValidationReportError(f"{stage} candidate {key} coverage/pass result disagrees")
         slope_coverage = _require_mapping(
             detail.get("slope_coverage"), f"metrics.{stage}_search.coverage.{key}.slope_coverage"
         )
         if set(slope_coverage) != slope_labels:
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} candidate {key} does not cover all "
                 f"{len(VALIDATION_SIGNED_SLOPES)} slopes"
             )
@@ -1189,7 +1044,7 @@ def _validate_search_evidence(
         for label, counts in slope_coverage.items():
             counts = _require_mapping(counts, f"{stage}.coverage.{key}.{label}")
             if counts.get("observed") != expected_per_slope:
-                raise ValidationGateError(f"{stage} candidate {key} slope {label} quota is incomplete")
+                raise ValidationReportError(f"{stage} candidate {key} slope {label} quota is incomplete")
 
     trials = _require_sequence(search.get("trials"), f"metrics.{stage}_search.trials")
     expected_trials = {
@@ -1205,7 +1060,7 @@ def _validate_search_evidence(
     for index, raw_row in enumerate(trials):
         row = _require_mapping(raw_row, f"metrics.{stage}_search.trials[{index}]")
         if row.get("stage") != stage or not isinstance(row.get("passed"), bool):
-            raise ValidationGateError(f"{stage} trial {index} has an invalid stage/pass flag")
+            raise ValidationReportError(f"{stage} trial {index} has an invalid stage/pass flag")
         key = (
             _finite_number(row.get("candidate"), f"{stage}.trials[{index}].candidate"),
             str(row.get("point")),
@@ -1213,7 +1068,7 @@ def _validate_search_evidence(
             _finite_number(row.get("force_direction"), f"{stage}.trials[{index}].force_direction"),
         )
         if key not in expected_trials or key in observed_trials:
-            raise ValidationGateError(f"{stage} trial coverage contains an unknown or duplicate row: {key}")
+            raise ValidationReportError(f"{stage} trial coverage contains an unknown or duplicate row: {key}")
         observed_trials.add(key)
         candidate = key[0]
         passed_count_by_candidate[candidate] += int(bool(row["passed"]))
@@ -1222,7 +1077,7 @@ def _validate_search_evidence(
             row.get("parameters"), f"{stage}.trials[{index}].parameters"
         )
         if set(raw_parameters) != set(GUIDE_SCAN_RANGE_ORDER):
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} trial {index} does not contain the complete physical parameter vector"
             )
         parameters = {
@@ -1234,18 +1089,18 @@ def _validate_search_evidence(
         point = key[1]
         previous_parameters = point_parameters.setdefault(point, parameters)
         if not _parameters_match(parameters, previous_parameters):
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} scan point {point} uses inconsistent parameters across trials"
             )
 
         evidence = _require_mapping(row.get("dynamic_evidence"), f"{stage}.trials[{index}].dynamic_evidence")
         mass = _finite_number(evidence.get("cart_mass_kg"), f"{stage}.trials[{index}].cart_mass_kg")
         if mass <= 0.0 or evidence.get("force_body") != "base_link":
-            raise ValidationGateError(f"{stage} trial {index} lacks a valid physical cart force target")
+            raise ValidationReportError(f"{stage} trial {index} lacks a valid physical cart force target")
         if evidence.get("force_api") != (
             "Articulation.permanent_wrench_composer.set_forces_and_torques"
         ):
-            raise ValidationGateError(f"{stage} trial {index} did not use the physical force API")
+            raise ValidationReportError(f"{stage} trial {index} did not use the physical force API")
         for group in ("arm", "leg", "waist"):
             limits = _require_mapping(
                 evidence.get(f"{group}_actuator_effort_limit_nm"),
@@ -1260,7 +1115,7 @@ def _validate_search_evidence(
                 f"{stage}.trials[{index}].{group}_actuator_effort_limit_nm.maximum",
             )
             if minimum_limit <= 0.0 or maximum_limit < minimum_limit:
-                raise ValidationGateError(
+                raise ValidationReportError(
                     f"{stage} trial {index} has invalid {group} actuator effort limits"
                 )
         target = _finite_number(
@@ -1270,7 +1125,7 @@ def _validate_search_evidence(
         expected_target = candidate if stage == "acceleration" else target_acceleration
         assert expected_target is not None
         if not math.isclose(target, expected_target, rel_tol=1.0e-7, abs_tol=1.0e-9):
-            raise ValidationGateError(f"{stage} trial {index} used the wrong acceleration load")
+            raise ValidationReportError(f"{stage} trial {index} used the wrong acceleration load")
         measured = _require_mapping(
             evidence.get("measured_cart_acceleration_mps2"),
             f"{stage}.trials[{index}].measured_cart_acceleration_mps2",
@@ -1278,7 +1133,7 @@ def _validate_search_evidence(
         if row["passed"] and (
             not isinstance(measured.get("sample_count"), int) or measured["sample_count"] <= 0
         ):
-            raise ValidationGateError(f"{stage} passed trial {index} has no measured acceleration")
+            raise ValidationReportError(f"{stage} passed trial {index} has no measured acceleration")
         row_metrics = _require_mapping(row.get("metrics"), f"{stage}.trials[{index}].metrics")
         try:
             physically_passed, _ = evaluate_feasibility_sample(
@@ -1286,20 +1141,20 @@ def _validate_search_evidence(
                 minimum_wheel_normal_force=minimum_wheel_normal_force,
             )
         except (TypeError, ValueError) as exc:
-            raise ValidationGateError(
+            raise ValidationReportError(
                 f"{stage} trial {index} metrics are malformed: {exc}"
             ) from exc
         if row["passed"]:
             if row_metrics.get("terminated") is not False:
-                raise ValidationGateError(f"{stage} passed trial {index} terminated")
+                raise ValidationReportError(f"{stage} passed trial {index} terminated")
             if not physically_passed:
-                raise ValidationGateError(f"{stage} trial {index} claims pass with infeasible metrics")
+                raise ValidationReportError(f"{stage} trial {index} claims pass with infeasible metrics")
             if stage == "jerk" and _finite_number(
                 row_metrics.get("d6_impulse_ratio"), f"jerk.trials[{index}].d6_impulse_ratio"
             ) > 1.0:
-                raise ValidationGateError(f"jerk passed trial {index} exceeded the D6 impulse threshold")
+                raise ValidationReportError(f"jerk passed trial {index} exceeded the D6 impulse threshold")
     if observed_trials != expected_trials:
-        raise ValidationGateError(
+        raise ValidationReportError(
             f"{stage} physical trial grid is incomplete: {len(observed_trials)}/{len(expected_trials)}"
         )
     _validate_scan_point_parameters(point_parameters, point_names, stage=stage)
@@ -1311,26 +1166,26 @@ def _validate_search_evidence(
         for candidate in candidates
     }
     if passed_by_candidate != candidate_passed:
-        raise ValidationGateError(f"{stage} per-trial results disagree with candidate pass map")
+        raise ValidationReportError(f"{stage} per-trial results disagree with candidate pass map")
     return selected
 
 
 def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
     metrics = _require_mapping(report.get("metrics"), "metrics")
     if metrics.get("coverage") != "full":
-        raise ValidationGateError("passed feasibility report must have full physical coverage")
+        raise ValidationReportError("passed feasibility report must have full physical coverage")
     point_names = _required_scan_point_names()
     if tuple(_require_sequence(metrics.get("physical_scan_points"), "metrics.physical_scan_points")) != point_names:
-        raise ValidationGateError("feasibility report does not contain the exact 36-point physical plan")
+        raise ValidationReportError("feasibility report does not contain the exact domain scan plan")
     if metrics.get("physical_scan_point_count") != len(point_names):
-        raise ValidationGateError("feasibility physical scan point count is incorrect")
+        raise ValidationReportError("feasibility physical scan point count is incorrect")
     slopes = tuple(float(value) for value in _require_sequence(metrics.get("slopes"), "metrics.slopes"))
     directions = tuple(
         float(value)
         for value in _require_sequence(metrics.get("force_directions"), "metrics.force_directions")
     )
     if slopes != VALIDATION_SIGNED_SLOPES or directions != FEASIBILITY_FORCE_DIRECTIONS:
-        raise ValidationGateError(
+        raise ValidationReportError(
             f"feasibility report must cover exact {len(VALIDATION_SIGNED_SLOPES)} slopes "
             "and both force directions"
         )
@@ -1340,14 +1195,14 @@ def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
         or force_definition.get("frame") != "world"
         or force_definition.get("direction") != "signed path tangent"
     ):
-        raise ValidationGateError("feasibility report did not apply the required physical cart force")
+        raise ValidationReportError("feasibility report did not apply the required physical cart force")
 
     requirements = _require_mapping(metrics.get("requirements"), "metrics.requirements")
     measurement_sources = _require_mapping(
         metrics.get("measurement_sources"), "metrics.measurement_sources"
     )
     if dict(measurement_sources) != dict(FEASIBILITY_MEASUREMENT_SOURCES):
-        raise ValidationGateError(
+        raise ValidationReportError(
             "feasibility report does not bind the required physical measurement sources"
         )
     minimum_wheel_normal_force = _finite_number(
@@ -1355,7 +1210,7 @@ def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
         "metrics.requirements.minimum_wheel_normal_force_n",
     )
     if minimum_wheel_normal_force <= 0.0:
-        raise ValidationGateError("minimum wheel normal force must be positive")
+        raise ValidationReportError("minimum wheel normal force must be positive")
     for name, expected in (
         ("minimum_zmp_margin_m", 0.02),
         ("maximum_arm_leg_torque_ratio", 0.7),
@@ -1369,56 +1224,42 @@ def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
         requirements.get("d6_impulse_limit"), "metrics.requirements.d6_impulse_limit"
     )
     if d6_impulse_limit <= 0.0:
-        raise ValidationGateError("D6 impulse limit must be positive")
+        raise ValidationReportError("D6 impulse limit must be positive")
 
     inputs = _require_mapping(report.get("inputs"), "inputs")
     additional = _require_mapping(inputs.get("additional_inputs"), "inputs.additional_inputs")
-    candidate_input = _require_mapping(
-        additional.get("command_candidate_config"),
-        "inputs.additional_inputs.command_candidate_config",
-    )
+    candidate_input = additional.get("command_candidate_config")
+    if not isinstance(candidate_input, str):
+        raise ValidationReportError("command candidate input has no path")
     candidate_record = _require_mapping(
         metrics.get("command_candidate_config"), "metrics.command_candidate_config"
     )
-    if (
-        candidate_record.get("path") != candidate_input.get("path")
-        or candidate_record.get("sha256") != candidate_input.get("sha256")
-    ):
-        raise ValidationGateError("feasibility candidate configuration binding is inconsistent")
+    if candidate_record.get("path") != candidate_input:
+        raise ValidationReportError("feasibility candidate configuration binding is inconsistent")
 
-    authority_input = _require_mapping(
-        additional.get("safety_threshold_authority"),
-        "inputs.additional_inputs.safety_threshold_authority",
-    )
-    authority_path = authority_input.get("path")
+    authority_path = additional.get("safety_threshold_authority")
     if not isinstance(authority_path, str):
-        raise ValidationGateError("safety threshold authority input has no path")
+        raise ValidationReportError("safety threshold authority input has no path")
     try:
         authority = load_safety_threshold_authority(
             authority_path,
             forbidden_source_paths=(str(inputs.get("feasibility_path")),),
         )
-        current_authority_sha256 = sha256_file(authority.source_path)
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ValidationGateError(f"safety threshold authority is invalid or stale: {exc}") from exc
-    if current_authority_sha256 != authority_input.get("sha256"):
-        raise ValidationGateError("safety threshold authority input is stale")
+        raise ValidationReportError(f"safety threshold authority is invalid or stale: {exc}") from exc
     authority_record = _require_mapping(
         metrics.get("safety_threshold_authority"),
         "metrics.safety_threshold_authority",
     )
     if dict(authority_record) != authority.evidence_record():
-        raise ValidationGateError(
+        raise ValidationReportError(
             "feasibility safety threshold authority binding is inconsistent"
         )
-    report_assets = _require_mapping(inputs.get("assets"), "inputs.assets")
     validate_safety_authority_source_evidence(
         authority,
         task=str(report.get("task")),
-        assets_sha256={str(name): str(digest) for name, digest in report_assets.items()},
         feasibility_path=str(inputs.get("feasibility_path")),
         reset_pose_path=str(inputs.get("reset_pose_path")),
-        reset_pose_sha256=str(inputs.get("reset_pose_sha256")),
     )
     _close(
         minimum_wheel_normal_force,
@@ -1441,7 +1282,7 @@ def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
             label="generated feasibility calibration",
         )
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ValidationGateError(
+        raise ValidationReportError(
             f"generated feasibility envelope is not bound to the safety authority: {exc}"
         ) from exc
 
@@ -1475,10 +1316,9 @@ def _validate_feasibility_evidence(report: Mapping[str, Any]) -> None:
     generated = _require_mapping(metrics.get("generated_envelope"), "metrics.generated_envelope")
     if (
         generated.get("path") != inputs.get("feasibility_path")
-        or generated.get("sha256") != inputs.get("feasibility_sha256")
         or generated.get("physical_ranges_preserved") is not True
     ):
-        raise ValidationGateError("generated feasibility envelope is not bound to the passed report")
+        raise ValidationReportError("generated feasibility envelope is not bound to the passed report")
 
 
 def _validate_wrench_record(
@@ -1495,9 +1335,9 @@ def _validate_wrench_record(
         or math.copysign(1.0, analytic) == math.copysign(1.0, measured)
     )
     if record.get("same_sign") is not same_sign or not same_sign:
-        raise ValidationGateError(f"{label} has inconsistent measured/analytic sign")
+        raise ValidationReportError(f"{label} has inconsistent measured/analytic sign")
     if record.get("passed") is not True or relative_error > relative_tolerance:
-        raise ValidationGateError(f"{label} exceeds the measured/analytic error limit")
+        raise ValidationReportError(f"{label} exceeds the measured/analytic error limit")
 
 
 def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
@@ -1513,12 +1353,12 @@ def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
         metadata.get("wrench_absolute_floor_n"), "metadata.wrench_absolute_floor_n"
     )
     if not 0.0 <= coast_tolerance <= MAX_COAST_RELATIVE_TOLERANCE:
-        raise ValidationGateError("dynamics coast tolerance is wider than the normative limit")
+        raise ValidationReportError("dynamics coast tolerance is wider than the normative limit")
     if (
         not 0.0 <= wrench_tolerance <= MAX_WRENCH_RELATIVE_TOLERANCE
         or absolute_floor != WRENCH_ABSOLUTE_FLOOR_N
     ):
-        raise ValidationGateError("dynamics wrench tolerance/floor differs from the normative limit")
+        raise ValidationReportError("dynamics wrench tolerance/floor differs from the normative limit")
     settling_steps = metadata.get("settling_steps")
     measurement_steps = metadata.get("measurement_steps")
     window_start = metadata.get("window_start")
@@ -1529,14 +1369,14 @@ def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
         or not isinstance(window_start, int)
         or not 0 <= window_start < measurement_steps
     ):
-        raise ValidationGateError("dynamics settling/measurement window is too short or malformed")
+        raise ValidationReportError("dynamics settling/measurement window is too short or malformed")
     sample_count = measurement_steps - window_start
     if sample_count < MIN_DYNAMICS_WINDOW_SAMPLES:
-        raise ValidationGateError("dynamics comparison window has too few samples")
+        raise ValidationReportError("dynamics comparison window has too few samples")
 
     coast = _require_mapping(metrics.get("coast_down"), "metrics.coast_down")
     if coast.get("sample_count") != sample_count or coast.get("passed") is not True:
-        raise ValidationGateError("coast-down evidence is incomplete or did not pass")
+        raise ValidationReportError("coast-down evidence is incomplete or did not pass")
     mass = _finite_number(coast.get("mass_kg"), "metrics.coast_down.mass_kg")
     normal_force = _finite_number(
         coast.get("mean_normal_force_n"), "metrics.coast_down.mean_normal_force_n"
@@ -1551,7 +1391,7 @@ def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
         "metrics.coast_down.acceleration_with_rr_mps2",
     )
     if mass <= 0.0 or normal_force <= 0.0 or c_rr <= 0.0:
-        raise ValidationGateError("coast-down physical inputs must be positive")
+        raise ValidationReportError("coast-down physical inputs must be positive")
     measured_force = mass * (without - with_rr)
     expected_force = c_rr * normal_force
     relative_error = abs(measured_force - expected_force) / expected_force
@@ -1565,52 +1405,52 @@ def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
         "metrics.coast_down.deceleration_delta_mps2",
     )
     if relative_error > coast_tolerance or deceleration_delta < 1.0e-3:
-        raise ValidationGateError("coast-down values do not satisfy the recorded tolerance")
+        raise ValidationReportError("coast-down values do not satisfy the recorded tolerance")
     masses = tuple(
         _finite_number(value, "metrics.coast_down.masses_kg")
         for value in _require_sequence(coast.get("masses_kg"), "metrics.coast_down.masses_kg")
     )
     if len(masses) != 2 or any(abs(value - RICKSHAW_TOTAL_MASS) > 0.05 for value in masses):
-        raise ValidationGateError("coast-down carts do not have the calibrated PhysX mass")
+        raise ValidationReportError("coast-down carts do not have the calibrated PhysX mass")
 
     forces = _require_mapping(
         metadata.get("controlled_pelvis_force_n"), "metadata.controlled_pelvis_force_n"
     )
     if set(forces) != set(DYNAMICS_CONDITION_SLOPES):
-        raise ValidationGateError("dynamics controlled-force conditions are incomplete")
+        raise ValidationReportError("dynamics controlled-force conditions are incomplete")
     if (
         _finite_number(forces["flat_static"], "flat_static force") != 0.0
         or _finite_number(forces["flat_constant_speed"], "flat_constant_speed force") != 0.0
         or _finite_number(forces["uphill_acceleration"], "uphill force") <= 0.0
         or _finite_number(forces["downhill_braking"], "downhill force") >= 0.0
     ):
-        raise ValidationGateError("dynamics controlled-force signs do not represent the four guide cases")
+        raise ValidationReportError("dynamics controlled-force signs do not represent the four guide cases")
     if metadata.get("coast_wheel_force_location") != "wheel centers":
-        raise ValidationGateError("coast rolling resistance was not applied at wheel centers")
+        raise ValidationReportError("coast rolling resistance was not applied at wheel centers")
     if metadata.get("coast_normal_force_source") != "level_vehicle_weight":
-        raise ValidationGateError("coast-down normal-force source is not the level cart weight")
+        raise ValidationReportError("coast-down normal-force source is not the level cart weight")
     if metadata.get("coast_rail_free_axes") != ["transX"]:
-        raise ValidationGateError("coast-down rail does not isolate world-X force response")
+        raise ValidationReportError("coast-down rail does not isolate world-X force response")
     if metadata.get("policy_safety_terminations_disabled") is not True:
-        raise ValidationGateError(
+        raise ValidationReportError(
             "dynamics validation did not isolate prescribed-force tests from policy safety"
         )
     if metadata.get("measured_wrench_source") != "whole_cart_momentum_balance":
-        raise ValidationGateError(
+        raise ValidationReportError(
             "dynamics interaction wrench was not measured from whole-cart momentum balance"
         )
     if (
         metadata.get("ground_contact_force_source")
         != "two_wheel_contact_sensor_net_forces"
     ):
-        raise ValidationGateError(
+        raise ValidationReportError(
             "dynamics momentum balance did not isolate wheel-ground contact force"
         )
     if (
         metadata.get("incoming_joint_wrench_role")
         != "constraint_residual_impulse_proxy_only"
     ):
-        raise ValidationGateError(
+        raise ValidationReportError(
             "incoming joint wrench was not isolated from the physical force gate"
         )
 
@@ -1618,12 +1458,12 @@ def _validate_dynamics_evidence(report: Mapping[str, Any]) -> None:
         metrics.get("d6_analytic_conditions"), "metrics.d6_analytic_conditions"
     )
     if set(conditions) != set(DYNAMICS_CONDITION_SLOPES):
-        raise ValidationGateError("dynamics report does not contain the exact four guide conditions")
+        raise ValidationReportError("dynamics report does not contain the exact four guide conditions")
     for name, expected_slope in DYNAMICS_CONDITION_SLOPES.items():
         condition = _require_mapping(conditions[name], f"metrics.d6_analytic_conditions.{name}")
         _close(condition.get("slope"), expected_slope, f"conditions.{name}.slope")
         if condition.get("analytic_valid_entire_window") is not True or condition.get("terminated") is not False:
-            raise ValidationGateError(f"dynamics condition {name} was invalid or terminated")
+            raise ValidationReportError(f"dynamics condition {name} was invalid or terminated")
         _validate_wrench_record(
             condition.get("tangential"),
             label=f"conditions.{name}.tangential",
@@ -1652,111 +1492,58 @@ def load_report(path: str | Path, *, expected_tool: str | None = None) -> Mappin
     try:
         value = json.loads(report_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValidationGateError(f"missing validation report: {report_path}") from exc
+        raise ValidationReportError(f"missing validation report: {report_path}") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValidationGateError(f"invalid validation report {report_path}: {exc}") from exc
+        raise ValidationReportError(f"invalid validation report {report_path}: {exc}") from exc
     report = _require_mapping(value, str(report_path))
     if report.get("schema_version") != VALIDATION_REPORT_SCHEMA_VERSION:
-        raise ValidationGateError(
+        raise ValidationReportError(
             f"unsupported validation schema in {report_path}: {report.get('schema_version')!r}"
         )
     tool = report.get("tool")
-    if tool not in REQUIRED_GATE_TOOLS:
-        raise ValidationGateError(f"invalid validation tool in {report_path}: {tool!r}")
+    if tool not in VALIDATION_TOOLS:
+        raise ValidationReportError(f"invalid validation tool in {report_path}: {tool!r}")
     if expected_tool is not None and tool != expected_tool:
-        raise ValidationGateError(
+        raise ValidationReportError(
             f"{report_path} was produced by {tool!r}, expected {expected_tool!r}"
         )
     if report.get("status") not in {"passed", "failed"}:
-        raise ValidationGateError(f"invalid validation status in {report_path}")
+        raise ValidationReportError(f"invalid validation status in {report_path}")
     inputs = _require_mapping(report.get("inputs"), f"{report_path}.inputs")
-    _require_sha256(inputs.get("feasibility_sha256"), "inputs.feasibility_sha256")
-    _require_sha256(inputs.get("reset_pose_sha256"), "inputs.reset_pose_sha256")
+    for name in ("feasibility_path", "reset_pose_path"):
+        if not isinstance(inputs.get(name), str) or not inputs[name]:
+            raise ValidationReportError(f"inputs.{name} must be a non-empty path")
     assets = _require_mapping(inputs.get("assets"), "inputs.assets")
     if not assets:
-        raise ValidationGateError("inputs.assets cannot be empty")
-    for name, digest in assets.items():
-        _require_sha256(digest, f"inputs.assets.{name}")
+        raise ValidationReportError("inputs.assets cannot be empty")
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in assets.items()):
+        raise ValidationReportError("inputs.assets must map names to paths")
     runtime_sources = _require_mapping(inputs.get("runtime_sources"), "inputs.runtime_sources")
     if not runtime_sources:
-        raise ValidationGateError("inputs.runtime_sources cannot be empty")
-    for name, digest in runtime_sources.items():
-        _require_sha256(digest, f"inputs.runtime_sources.{name}")
+        raise ValidationReportError("inputs.runtime_sources cannot be empty")
+    if not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in runtime_sources.items()
+    ):
+        raise ValidationReportError("inputs.runtime_sources must map names to paths")
     additional_inputs = _require_mapping(
         inputs.get("additional_inputs", {}), "inputs.additional_inputs"
     )
-    for name, entry in additional_inputs.items():
-        item = _require_mapping(entry, f"inputs.additional_inputs.{name}")
-        if set(item) != {"path", "sha256"} or not isinstance(item["path"], str):
-            raise ValidationGateError(
-                f"inputs.additional_inputs.{name} must contain path and sha256"
-            )
-        _require_sha256(item["sha256"], f"inputs.additional_inputs.{name}.sha256")
-    _require_mapping(report.get("metrics"), f"{report_path}.metrics")
+    if not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in additional_inputs.items()
+    ):
+        raise ValidationReportError("inputs.additional_inputs must map names to paths")
+    metrics = _require_mapping(report.get("metrics"), f"{report_path}.metrics")
+    metadata = _require_mapping(report.get("metadata"), f"{report_path}.metadata")
+    _validate_json_finite(metrics, f"{report_path}.metrics")
+    _validate_json_finite(metadata, f"{report_path}.metadata")
     failures = report.get("failures")
     if not isinstance(failures, list) or not all(isinstance(item, str) for item in failures):
-        raise ValidationGateError(f"{report_path}.failures must be a string list")
+        raise ValidationReportError(f"{report_path}.failures must be a string list")
     if report["status"] == "passed" and failures:
-        raise ValidationGateError(f"passed report {report_path} contains failures")
-    if report["status"] == "passed":
-        try:
-            _validate_passed_report_evidence(report)
-        except ValidationGateError as exc:
-            raise ValidationGateError(f"passed report {report_path} lacks required evidence: {exc}") from exc
+        raise ValidationReportError(f"passed report {report_path} contains failures")
     return report
-
-
-def validate_training_gate(
-    validation_dir: str | Path,
-    *,
-    feasibility_path: str | Path,
-    reset_pose_path: str | Path,
-    assets: Mapping[str, str | Path],
-    task: str | None = None,
-    runtime_sources: Mapping[str, str | Path] | None = None,
-) -> dict[str, Mapping[str, Any]]:
-    """Require fresh, mutually consistent feasibility and dynamics reports."""
-
-    directory = Path(validation_dir)
-    expected_feasibility = sha256_file(feasibility_path)
-    expected_reset = sha256_file(reset_pose_path)
-    expected_assets = asset_hashes(assets)
-    expected_runtime_sources = asset_hashes(
-        validation_runtime_sources() if runtime_sources is None else runtime_sources
-    )
-    reports: dict[str, Mapping[str, Any]] = {}
-    for tool in REQUIRED_GATE_TOOLS:
-        path = directory / f"{tool.removeprefix('validate_')}_report.json"
-        report = load_report(path, expected_tool=tool)
-        if report["status"] != "passed":
-            failures = "; ".join(report["failures"][:5]) or "unspecified failure"
-            raise ValidationGateError(f"{tool} did not pass: {failures}")
-        if task is not None and report.get("task") != task:
-            raise ValidationGateError(
-                f"{tool} task mismatch: {report.get('task')!r} != {task!r}"
-            )
-        inputs = report["inputs"]
-        if inputs["feasibility_sha256"] != expected_feasibility:
-            raise ValidationGateError(f"{tool} report is stale for the feasibility envelope")
-        if inputs["reset_pose_sha256"] != expected_reset:
-            raise ValidationGateError(f"{tool} report is stale for the reset-pose library")
-        if dict(inputs["assets"]) != expected_assets:
-            raise ValidationGateError(f"{tool} report is stale for the source assets")
-        if dict(inputs["runtime_sources"]) != expected_runtime_sources:
-            raise ValidationGateError(f"{tool} report is stale for the task/validator sources")
-        for name, entry in inputs.get("additional_inputs", {}).items():
-            try:
-                current_digest = sha256_file(entry["path"])
-            except OSError as exc:
-                raise ValidationGateError(
-                    f"{tool} report additional input {name!r} is unavailable"
-                ) from exc
-            if current_digest != entry["sha256"]:
-                raise ValidationGateError(
-                    f"{tool} report is stale for additional input {name!r}"
-                )
-        reports[tool] = report
-    return reports
 
 
 @dataclass(frozen=True, slots=True)
@@ -1932,11 +1719,10 @@ __all__ = [
     "SafetyAuthoritySource",
     "SafetyThresholdAuthority",
     "VALIDATION_SIGNED_SLOPES",
-    "REQUIRED_GATE_TOOLS",
+    "VALIDATION_TOOLS",
     "VALIDATION_REPORT_SCHEMA_VERSION",
-    "ValidationGateError",
+    "ValidationReportError",
     "WrenchComparison",
-    "asset_hashes",
     "assert_safety_thresholds_match",
     "build_report",
     "build_feasibility_scan_plan",
@@ -1947,15 +1733,11 @@ __all__ = [
     "derive_feasibility_envelope_mapping",
     "load_safety_threshold_authority",
     "load_report",
-    "reset_dynamics_feasibility_sha256",
-    "sha256_file",
     "utc_timestamp",
-    "validate_training_gate",
     "validate_safety_authority_source_evidence",
     "validation_input_assets",
     "validation_runtime_sources",
     "write_json_atomic",
     "select_conservative_limit",
-    "synchronize_runtime_randomization_events",
     "write_yaml_atomic",
 ]

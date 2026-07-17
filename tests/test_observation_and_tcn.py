@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from g1_rickshaw_lab.rl.actor_critic import G1RickshawStudentActor
+from g1_rickshaw_lab.rl.teacher_model import G1RickshawTeacherActor
 from g1_rickshaw_lab.rl.context_encoder import (
     DILATIONS,
     HISTORY_LENGTH as TCN_HISTORY_LENGTH,
@@ -124,7 +125,7 @@ def test_history_is_61x96_and_explicitly_excludes_current() -> None:
     torch.testing.assert_close(state.current, frozen_current)
 
 
-def test_history_can_be_disabled_for_privileged_teacher() -> None:
+def test_history_state_can_track_current_without_allocating_temporal_storage() -> None:
     state = ObservationHistoryState.zeros(2, history_enabled=False)
     observation = torch.randn(2, ACTOR_OBSERVATION_DIM)
 
@@ -143,7 +144,7 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
 
     encoder = ContextEncoder().eval()
     blocks = list(encoder.blocks)
-    assert tuple(block.dilation for block in blocks) == DILATIONS
+    assert tuple(block.conv.dilation[0] for block in blocks) == DILATIONS
     for block in blocks:
         dilated_convolutions = [
             module
@@ -153,7 +154,7 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
         assert len(dilated_convolutions) == 1
         assert dilated_convolutions[0].stride == (1,)
 
-    assert encoder(torch.zeros(2, 61, 96))[0].shape == (2, 16)
+    assert encoder(torch.zeros(2, 61, 96)).shape == (2, 16)
     with pytest.raises(ValueError, match=r"\[N, 61, 96\]"):
         encoder(torch.zeros(2, 60, 96))
     with pytest.raises(ValueError, match=r"\[N, 61, 96\]"):
@@ -170,25 +171,35 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
     assert recurrent_modules == []
 
 
-@pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
-def test_latent_ablation_preserves_exact_16d_teacher_actor_interface(
-    latent_dim: int,
-) -> None:
-    student = G1RickshawStudentActor(latent_dim=latent_dim).eval()
+def test_fixed_teacher_and_student_context_interfaces() -> None:
+    teacher = G1RickshawTeacherActor().eval()
+    student = G1RickshawStudentActor().eval()
     current = torch.zeros(2, 96)
-    history = torch.zeros(2, 61, 96)
+    observation_history = torch.zeros(2, 61, 96)
+    dynamic_history = torch.zeros(2, 61, 21)
+    static_privilege = torch.zeros(2, 40)
     with torch.no_grad():
-        distribution, actor_context, _ = student.forward_with_context(current, history)
-    assert student.context_encoder.latent_dim == latent_dim
-    assert actor_context.shape == (2, 16)
-    assert distribution.mean.shape == (2, 29)
-    assert student.actor.network[0].in_features == 112
-    if latent_dim == 16:
-        assert isinstance(student.context_projection, nn.Identity)
-    else:
-        assert isinstance(student.context_projection, nn.Sequential)
-        assert isinstance(student.context_projection[0], nn.ELU)
-        assert student.context_projection[1].weight.shape == (16, latent_dim)
+        teacher_distribution, teacher_context = teacher.forward_with_context(
+            current,
+            observation_history,
+            dynamic_history,
+            static_privilege,
+        )
+        student_distribution, student_context = student.forward_with_context(
+            current, observation_history
+        )
+    assert teacher.encoder.latent_dim == 16
+    assert student.context_encoder.latent_dim == 16
+    assert teacher_context.shape == (2, 16)
+    assert student_context.shape == (2, 16)
+    assert teacher_distribution.mean.shape == (2, 29)
+    assert student_distribution.mean.shape == (2, 29)
+    assert teacher.actor.network[0].in_features == 96 + 16
+    assert student.actor.network[0].in_features == 96 + 16
+    assert not hasattr(teacher, "context_projection")
+    assert not hasattr(student, "context_projection")
+    assert not any("aux" in name for name, _ in teacher.named_modules())
+    assert not any("aux" in name for name, _ in student.named_modules())
 
 
 def test_tcn_oldest_frame_is_used_but_outside_and_future_frames_are_causal() -> None:

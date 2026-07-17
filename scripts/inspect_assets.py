@@ -24,7 +24,6 @@ from g1_rickshaw_lab.assets.g1_dex1 import (  # noqa: E402
     G1_DEX1_USD_PATH,
     G1_TOTAL_MASS,
     partition_joint_names,
-    sha256_file,
     validate_g1_urdf_inertials,
 )
 from g1_rickshaw_lab.assets.rickshaw import (  # noqa: E402
@@ -43,21 +42,10 @@ MASS_TOLERANCE_KG = 2.0e-5
 GEOMETRY_TOLERANCE_M = 2.0e-5
 INERTIA_ABSOLUTE_TOLERANCE = 2.0e-5
 INERTIA_RELATIVE_TOLERANCE = 2.0e-4
-ASSET_DEPENDENCY_SUFFIXES = frozenset({".urdf", ".usd", ".stl", ".yaml"})
 
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _dependency_hashes() -> dict[str, str]:
-    assets_root = REPOSITORY_ROOT / "assets"
-    dependencies: dict[str, str] = {}
-    for directory_name in ("g1_dex1", "rickshaw"):
-        for path in sorted((assets_root / directory_name).rglob("*")):
-            if path.is_file() and path.suffix.lower() in ASSET_DEPENDENCY_SUFFIXES:
-                dependencies[path.relative_to(assets_root).as_posix()] = sha256_file(path)
-    return dependencies
 
 
 def _urdf_nonfixed_joint_names(path: Path) -> tuple[str, ...]:
@@ -400,18 +388,9 @@ def inspect_assets(*, require_usd_stage: bool = False) -> dict[str, object]:
         "tool": "inspect_assets",
         "status": "passed" if require_usd_stage else "static-only",
         "created_utc": _utc_timestamp(),
-        "inputs": {
-            "asset_dependencies_sha256": _dependency_hashes(),
-            "inspector_sha256": sha256_file(Path(__file__).resolve()),
-            "implementation_guide_sha256": sha256_file(
-                REPOSITORY_ROOT / "G1_Rickshaw_IsaacLab_Implementation_Guide.md"
-            ),
-        },
         "g1_dex1": {
             "urdf": str(G1_DEX1_URDF_PATH),
             "usd": str(G1_DEX1_USD_PATH),
-            "urdf_sha256": sha256_file(G1_DEX1_URDF_PATH),
-            "usd_sha256": sha256_file(G1_DEX1_USD_PATH),
             "nonfixed_joint_count": len(g1_joint_names),
             "policy_joint_count": len(partition.action_names),
             "dex_joint_count": len(partition.dex_names),
@@ -420,8 +399,6 @@ def inspect_assets(*, require_usd_stage: bool = False) -> dict[str, object]:
         "rickshaw": {
             "urdf": str(RICKSHAW_URDF_PATH),
             "usd": str(RICKSHAW_USD_PATH),
-            "urdf_sha256": sha256_file(RICKSHAW_URDF_PATH),
-            "usd_sha256": sha256_file(RICKSHAW_USD_PATH),
         },
         "usd_stage": usd,
     }
@@ -467,7 +444,6 @@ def _launch_and_emit(app_argv: list[str], output: Path | None) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--num_envs", type=int, default=1, help="Accepted for guide command compatibility.")
     parser.add_argument(
         "--static-only",
         action="store_true",
@@ -475,8 +451,6 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path, default=None)
     args, app_argv = parser.parse_known_args()
-    if args.num_envs != 1:
-        raise ValueError("asset inspection requires exactly --num_envs 1")
     if args.static_only:
         _emit_report(inspect_assets(require_usd_stage=False), args.output)
     else:

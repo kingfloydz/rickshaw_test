@@ -14,8 +14,6 @@ import re
 from typing import Iterable, Sequence
 import xml.etree.ElementTree as ET
 
-from .._hashing import sha256_file
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = REPOSITORY_ROOT / "assets"
@@ -332,6 +330,5 @@ __all__ = [
     "partition_articulation_joints",
     "partition_joint_names",
     "require_isaaclab",
-    "sha256_file",
     "validate_g1_urdf_inertials",
 ]

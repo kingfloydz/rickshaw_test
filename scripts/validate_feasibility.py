@@ -30,7 +30,6 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
     FEASIBILITY_MEASUREMENT_SOURCES,
     FEASIBILITY_MINIMUM_PASS_FRACTION,
     VALIDATION_REPORT_SCHEMA_VERSION,
-    asset_hashes,
     assert_safety_thresholds_match,
     build_feasibility_scan_plan,
     build_report,
@@ -38,8 +37,6 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
     evaluate_feasibility_sample,
     load_safety_threshold_authority,
     select_conservative_limit,
-    sha256_file,
-    synchronize_runtime_randomization_events,
     utc_timestamp,
     validate_safety_authority_source_evidence,
     validation_input_assets,
@@ -78,7 +75,7 @@ def _base_parser() -> argparse.ArgumentParser:
         "--safety-authority",
         type=Path,
         default=REPOSITORY_ROOT / "config/safety_authority.yaml",
-        help="Independent, content-addressed hardware safety-threshold authority.",
+        help="Independent hardware safety-threshold authority.",
     )
     parser.add_argument(
         "--reset-poses",
@@ -88,13 +85,13 @@ def _base_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schema-only",
         action="store_true",
-        help="Validate input schemas without launching PhysX or producing a gate report.",
+        help="Validate input schemas without launching PhysX or producing a report.",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=REPOSITORY_ROOT / "outputs/validation/feasibility_report.json",
-        help="Content-addressed validation report.",
+        help="Validation report path.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -116,7 +113,7 @@ def _base_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quick",
         action="store_true",
-        help="Run nominal/cross diagnostics only; never writes an envelope or passes the gate.",
+        help="Run nominal/cross diagnostics only and never write an envelope.",
     )
     return parser
 
@@ -220,10 +217,8 @@ def _preflight_inputs(args: argparse.Namespace) -> tuple[FeasibilityEnvelope, An
     validate_safety_authority_source_evidence(
         authority,
         task=args.task,
-        assets_sha256=asset_hashes(validation_input_assets(REPOSITORY_ROOT)),
         feasibility_path=args.input,
         reset_pose_path=args.reset_poses,
-        reset_pose_sha256=sha256_file(args.reset_poses),
     )
     return envelope, authority
 
@@ -409,6 +404,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     from g1_rickshaw_lab.assets.rickshaw import BASE_LINK_NAME
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import (
         G1RickshawDirectionalSlopePlayEnvCfg, mdp)
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as mdp_events
 
     candidate_path = args.input.resolve()
     reset_pose_path = args.reset_poses.resolve()
@@ -418,15 +414,12 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     configured_acceleration, configured_jerk = _load_candidate_config(
         command_candidate_path
     )
-    command_candidate_sha256 = sha256_file(command_candidate_path)
-    candidate_sha256 = sha256_file(candidate_path)
     envelope = load_feasibility_envelope(candidate_path)
     load_reset_pose_library(reset_pose_path)
     safety_authority = load_safety_threshold_authority(
         safety_authority_path,
         forbidden_source_paths=(candidate_path, envelope_output),
     )
-    safety_authority_sha256 = sha256_file(safety_authority_path)
     assert_safety_thresholds_match(
         envelope.calibration,
         safety_authority.thresholds,
@@ -471,15 +464,12 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     cfg.sim.device = app_args.device
     cfg.curriculum = None
     cfg.scene.terrain.terrain_generator.curriculum = True
-    scan_randomization = replace(
-        cfg.runtime_randomization,
-        sample_ranges=False,
-        curriculum=replace(
-            cfg.runtime_randomization.curriculum,
-            cross_case_fraction=0.0,
-        ),
+    cfg.domain_randomization = replace(
+        cfg.domain_randomization,
+        enabled=False,
+        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
-    synchronize_runtime_randomization_events(cfg, scan_randomization)
+    cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
 
     env = gym.make(args.task, cfg=cfg)
     base = env.unwrapped
@@ -523,30 +513,18 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
         )
 
     def configure_physical_point(point: Any) -> None:
-        singleton_ranges = {
-            name: (
-                float(cfg.runtime_randomization.nominal_values[name]),
-                float(cfg.runtime_randomization.nominal_values[name]),
-            )
-            for name in cfg.runtime_randomization.ranges
-        }
-        for name, value in point.values.items():
-            singleton_ranges[name] = (float(value), float(value))
-        singleton_nominal = {
-            name: singleton_ranges[name][0]
-            for name in cfg.runtime_randomization.nominal_values
-        }
-        point_randomization = replace(
-            cfg.runtime_randomization,
-            ranges=singleton_ranges,
-            nominal_values=singleton_nominal,
-            sample_ranges=True,
-            curriculum=replace(
-                cfg.runtime_randomization.curriculum,
-                cross_case_fraction=0.0,
-            ),
+        point_values = {name: float(value) for name, value in point.values.items()}
+        if set(point_values) != set(mdp.DOMAIN_PARAMETER_NAMES):
+            raise RuntimeError("feasibility point does not cover the current domain schema")
+        point_domain = replace(
+            cfg.domain_randomization,
+            enabled=False,
+            nominal=point_values,
         )
-        mdp.sample_episode_physics(base, all_ids, point_randomization)
+        point_domain.validate()
+        base.cfg.domain_randomization = point_domain
+        base.domain_randomization_cfg = point_domain
+        mdp_events._apply_domain_epoch(base, point_domain, 0)
         mdp.reset_closed_chain(base, all_ids)
         base.episode_length_buf[all_ids] = 0
         base.command_state.v_sample[all_ids] = 0.0
@@ -693,7 +671,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 min=0.0,
             )
             tangent_force = foot_force - normal_force[..., None] * base.path_normal_w[:, None, :]
-            friction = base.teacher_extrinsic_values["terrain.friction"]
+            friction = base.terrain_friction
             friction_margin = torch.amin(
                 friction[:, None] * normal_force
                 - torch.linalg.vector_norm(tangent_force, dim=-1),
@@ -743,12 +721,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             d6_torque = torch.linalg.vector_norm(
                 d6_proxy_wrench[..., 3:], dim=-1
             ).amax(dim=-1)
-            max_force = base.d6_constraint_manager.parameter_values(
-                "max_force", all_ids, device=base.device, dtype=d6_force.dtype
-            )
-            max_torque = base.d6_constraint_manager.parameter_values(
-                "max_torque", all_ids, device=base.device, dtype=d6_force.dtype
-            )
+            handle_cfg = base.d6_constraint_manager.cfg
+            max_force = torch.full_like(d6_force, float(handle_cfg.max_force))
+            max_torque = torch.full_like(d6_torque, float(handle_cfg.max_torque))
             maximum_d6_force_ratio[active] = torch.maximum(
                 maximum_d6_force_ratio[active], (d6_force / max_force)[active]
             )
@@ -986,8 +961,6 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 safety_authority_path,
                 forbidden_source_paths=(candidate_path, envelope_output),
             )
-            if sha256_file(safety_authority_path) != safety_authority_sha256:
-                raise RuntimeError("safety threshold authority changed during the scan")
             assert_safety_thresholds_match(
                 envelope.calibration,
                 current_authority.thresholds,
@@ -996,12 +969,8 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             validate_safety_authority_source_evidence(
                 current_authority,
                 task=args.task,
-                assets_sha256=asset_hashes(
-                    validation_input_assets(REPOSITORY_ROOT)
-                ),
                 feasibility_path=candidate_path,
                 reset_pose_path=reset_pose_path,
-                reset_pose_sha256=sha256_file(reset_pose_path),
             )
             safety_authority = current_authority
             derived_mapping = derive_feasibility_envelope_mapping(
@@ -1029,7 +998,6 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             },
             "command_candidate_config": {
                 "path": str(command_candidate_path),
-                "sha256": command_candidate_sha256,
                 "cli_acceleration_override": args.acceleration_candidates,
                 "cli_jerk_override": args.jerk_candidates,
             },
@@ -1079,7 +1047,6 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             "generated_envelope": (
                 {
                     "path": str(generated_path),
-                    "sha256": sha256_file(generated_path),
                     "physical_ranges_preserved": all(
                         derived_mapping["ranges"][name]
                         == envelope.to_mapping()["ranges"][name]
@@ -1122,11 +1089,8 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 "physics_dt": base.physics_dt,
                 "policy_dt": base.step_dt,
                 "physical_template_path": str(candidate_path),
-                "physical_template_sha256": candidate_sha256,
                 "command_candidate_config_path": str(command_candidate_path),
-                "command_candidate_config_sha256": command_candidate_sha256,
                 "safety_threshold_authority_path": str(safety_authority_path),
-                "safety_threshold_authority_sha256": safety_authority_sha256,
                 "safety_threshold_authority_id": safety_authority.authority_id,
                 "derived_envelope_path": str(envelope_output),
                 "range_order": list(envelope.ranges),
@@ -1146,7 +1110,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
 def _write_preflight_failure(
     args: argparse.Namespace, exc: BaseException, *, traceback_text: str
 ) -> Path:
-    """Invalidate a stale pass even when malformed inputs cannot be hashed."""
+    """Record an outer runtime failure in the diagnostic report."""
 
     failure = f"preflight error: {type(exc).__name__}: {exc}"
     report = {

@@ -194,9 +194,9 @@ def test_asset_inspector_static_mode_cannot_claim_usd_abi_pass() -> None:
     assert report["status"] == "static-only"
     assert report["g1_dex1"]["nonfixed_joint_count"] == 33
     assert report["g1_dex1"]["policy_joint_count"] == 29
-    dependencies = report["inputs"]["asset_dependencies_sha256"]
-    assert "g1_dex1/configuration/g1_29dof_mode_15_with_dex1_1_physics.usd" in dependencies
-    assert "rickshaw/configuration/rickshaw_physics.usd" in dependencies
+    assert report["g1_dex1"]["urdf"] == str(G1_DEX1_URDF_PATH)
+    assert report["rickshaw"]["urdf"] == str(RICKSHAW_URDF_PATH)
+    assert "inputs" not in report
 
 
 def test_all_21_terrain_gradients_have_exact_frames_and_origins() -> None:

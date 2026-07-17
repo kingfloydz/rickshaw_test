@@ -14,15 +14,14 @@ from g1_rickshaw_lab.assets.rickshaw import (
     HITCH_X,
     HITCH_Z,
     WHEEL_RADIUS,
-    WHEEL_TRACK,
 )
-from g1_rickshaw_lab.static_equilibrium import fixed_contact_static_components
 
 from .actions import (
     ACTION_DIM,
     ButterworthActionState,
     action_scale_vector,
     canonicalize_action_scale,
+    gain_compensated_static_target,
 )
 from .actuation import actuator_effort_limits
 from .dynamics import (
@@ -30,7 +29,6 @@ from .dynamics import (
     AnalyticHandleForceState,
     CartInteractionWrenchState,
     FAT2Cfg,
-    GRAVITY,
     RickshawMassProperties,
     RollingResistanceCfg,
     SpeedReferenceCfg,
@@ -55,8 +53,12 @@ from .dynamics import (
     update_support_polygon,
     update_zmp_stability,
 )
-from .curricula import CurriculumRuntimeState, CurriculumScheduleCfg, CurriculumStage
-from .observations import INDEPENDENT_EXTRINSIC_NAMES
+from .curricula import (
+    CurriculumRuntimeState,
+    CurriculumScheduleCfg,
+    CurriculumStage,
+    install_balanced_slope_assignment,
+)
 
 
 @dataclass
@@ -364,12 +366,6 @@ def sample_speed_commands(
     return samples
 
 
-def reset_speed_command(env: Any, env_ids: torch.Tensor) -> None:
-    """Reset all command states to zero."""
-
-    env.command_state.reset(env_ids)
-
-
 def resample_speed_command(
     env: Any,
     env_ids: torch.Tensor,
@@ -389,23 +385,52 @@ def resample_speed_command(
 def advance_speed_command_resampling(
     env: Any,
     cfg: SpeedCommandSamplingCfg = SpeedCommandSamplingCfg(),
+    env_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Advance per-environment timers and resample exactly every 10 seconds."""
 
     cfg.validate()
     elapsed = env.command_state.resampling_elapsed_s
-    elapsed += float(env.step_dt)
-    due = elapsed >= cfg.resampling_time_s - 1.0e-9
-    due_ids = torch.nonzero(due, as_tuple=False).flatten()
+    if env_ids is None:
+        elapsed += float(env.step_dt)
+        due_ids = torch.nonzero(
+            elapsed >= cfg.resampling_time_s - 1.0e-9, as_tuple=False
+        ).flatten()
+    else:
+        env_ids = torch.as_tensor(env_ids, device=elapsed.device, dtype=torch.long)
+        elapsed[env_ids] += float(env.step_dt)
+        due_local = elapsed[env_ids] >= cfg.resampling_time_s - 1.0e-9
+        due_ids = env_ids[due_local]
     if due_ids.numel() > 0:
         resample_speed_command(env, due_ids, cfg)
     return due_ids
 
 
-def advance_speed_reference(env: Any, cfg: SpeedReferenceCfg) -> None:
+def advance_speed_reference(
+    env: Any,
+    cfg: SpeedReferenceCfg,
+    env_ids: torch.Tensor | None = None,
+) -> None:
     """Policy-step event; never expose ``v_sample`` to reward or observation."""
 
-    update_speed_reference(env.command_state, env.command_state.v_sample, env.step_dt, cfg)
+    if env_ids is None:
+        update_speed_reference(env.command_state, env.command_state.v_sample, env.step_dt, cfg)
+        return
+
+    env_ids = torch.as_tensor(
+        env_ids, device=env.command_state.v_ref.device, dtype=torch.long
+    )
+    if env_ids.numel() == 0:
+        return
+    selected = CommandState(
+        v_sample=env.command_state.v_sample[env_ids],
+        v_ref=env.command_state.v_ref[env_ids].clone(),
+        a_ref=env.command_state.a_ref[env_ids].clone(),
+        resampling_elapsed_s=env.command_state.resampling_elapsed_s[env_ids],
+    )
+    update_speed_reference(selected, selected.v_sample, env.step_dt, cfg)
+    env.command_state.v_ref[env_ids] = selected.v_ref
+    env.command_state.a_ref[env_ids] = selected.a_ref
 
 
 def compute_path_tracking_errors(
@@ -434,9 +459,16 @@ def update_path_tracking_state(env: Any) -> None:
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     origin = env.scene.terrain.env_origins
+    cart_position = cart.data.root_pos_w
+    static_load = curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD)
+    if torch.any(static_load):
+        cart_position = cart_position.clone()
+        # compute_path_tracking_errors uses the robot/cart midpoint. Replacing
+        # the absent cart with the robot reduces that midpoint to robot position.
+        cart_position[static_load] = robot.data.root_pos_w[static_load]
     lateral, heading = compute_path_tracking_errors(
         robot.data.root_pos_w,
-        cart.data.root_pos_w,
+        cart_position,
         robot.data.root_quat_w,
         origin,
         env.path_tangent_w,
@@ -478,79 +510,135 @@ def update_rickshaw_geometry_state(
     env.rickshaw_state.pitch[:] = pitch
 
 
-def sample_rolling_resistance(
-    env: Any, env_ids: torch.Tensor, c_rr_range: tuple[float, float]
-) -> None:
-    """Sample the single tensor shared by physics, critic, analytics, and logs."""
-
-    low, high = c_rr_range
-    if low < 0.0 or high < low:
-        raise ValueError("c_rr_range must be non-negative and ordered")
-    samples = torch.empty(
-        env_ids.numel(), device=env.c_rr.device, dtype=env.c_rr.dtype
-    ).uniform_(low, high)
-    env.c_rr[env_ids] = samples
+DOMAIN_RANDOMIZATION_NAMES = (
+    "payload.mass",
+    "payload.com.x",
+    "payload.com.y",
+    "payload.com.z",
+    "rolling_resistance.c_rr",
+    "terrain.friction",
+    "wheel.left_damping",
+    "wheel.right_damping",
+    "motor.strength",
+    "control.delay",
+    "observation.delay",
+)
+DOMAIN_PARAMETER_NAMES = DOMAIN_RANDOMIZATION_NAMES + ("joint.model_error",)
 
 
 @dataclass(kw_only=True)
-class RuntimeRandomizationCfg:
-    """Feasibility-bounded reset-time physical samples.
+class DomainRandomizationCfg:
+    """Single source of truth for fixed-epoch training and nominal evaluation."""
 
-    The same tensors feed simulation parameters, analytics, teacher
-    extrinsics, critic state, and logs.  Ranges are loaded from
-    ``feasibility_envelope.yaml`` by the environment config; this class never
-    supplies fallback calibration values.
-    """
-
+    enabled: bool = True
     ranges: Mapping[str, tuple[float, float]] = MISSING
+    nominal: Mapping[str, float] = MISSING
     calibration: Mapping[str, Any] = MISSING
-    nominal_values: Mapping[str, float] = MISSING
     curriculum: CurriculumScheduleCfg = MISSING
-    sample_ranges: bool = True
-    teacher_extrinsic_names: tuple[str, ...] = INDEPENDENT_EXTRINSIC_NAMES
+    refresh_interval_iterations: int = 200
 
     def validate(self) -> None:
-        if not isinstance(self.ranges, Mapping) or not self.ranges:
-            raise ValueError("runtime randomization requires feasibility ranges")
-        for name, value in self.ranges.items():
-            if len(value) != 2:
-                raise ValueError(f"range {name!r} must be a two-value interval")
-            low, high = float(value[0]), float(value[1])
-            if not math.isfinite(low) or not math.isfinite(high) or high < low:
-                raise ValueError(f"range {name!r} is not finite and ordered")
-        for name in self.teacher_extrinsic_names:
-            if name not in self.ranges:
-                raise ValueError(f"teacher extrinsic {name!r} lacks a feasibility range")
-        required = set(self.teacher_extrinsic_names) | {"joint.model_error"}
-        missing_nominal = sorted(required - set(self.nominal_values))
-        if missing_nominal:
-            raise ValueError(f"nominal values are missing {missing_nominal}")
-        if self.sample_ranges:
-            non_singleton = sorted(
-                name
-                for name in required
-                if float(self.ranges[name][0]) != float(self.ranges[name][1])
-            )
-            if non_singleton:
+        required = set(DOMAIN_PARAMETER_NAMES)
+        for label, values in (("ranges", self.ranges), ("nominal", self.nominal)):
+            if not isinstance(values, Mapping) or set(values) != required:
+                missing = sorted(required - set(values)) if isinstance(values, Mapping) else []
+                extra = sorted(set(values) - required) if isinstance(values, Mapping) else []
                 raise ValueError(
-                    "replicated physics only permits singleton scan ranges; "
-                    f"non-singleton ranges: {non_singleton}"
+                    f"domain randomization {label} must contain exactly the physical schema; "
+                    f"missing={missing}, extra={extra}"
                 )
-        for name in required:
-            value = float(self.nominal_values[name])
-            low, high = self.ranges[name]
-            if not math.isfinite(value) or not float(low) <= value <= float(high):
-                raise ValueError(f"nominal {name!r} lies outside its feasibility range")
+        for name, interval in self.ranges.items():
+            if len(interval) != 2:
+                raise ValueError(f"range {name!r} must contain two values")
+            low, high = map(float, interval)
+            if not math.isfinite(low) or not math.isfinite(high) or high < low:
+                raise ValueError(f"range {name!r} must be finite and ordered")
+            value = float(self.nominal[name])
+            if not math.isfinite(value) or not low <= value <= high:
+                raise ValueError(f"nominal value {name!r} lies outside its range")
+
+        nonnegative = (
+            "payload.mass",
+            "rolling_resistance.c_rr",
+            "wheel.left_damping",
+            "wheel.right_damping",
+            "control.delay",
+            "observation.delay",
+        )
+        if any(float(self.ranges[name][0]) < 0.0 for name in nonnegative):
+            raise ValueError("mass, resistance, damping, and delay ranges cannot be negative")
+        positive = ("terrain.friction", "motor.strength")
+        if any(float(self.ranges[name][0]) <= 0.0 for name in positive):
+            raise ValueError("friction and motor strength ranges must stay positive")
         if float(self.ranges["joint.model_error"][0]) <= -1.0:
             raise ValueError("joint.model_error must keep actuator gains positive")
+        if not isinstance(self.calibration, Mapping):
+            raise ValueError("domain randomization calibration must be a mapping")
+        if (
+            not isinstance(self.refresh_interval_iterations, int)
+            or isinstance(self.refresh_interval_iterations, bool)
+            or self.refresh_interval_iterations <= 0
+        ):
+            raise ValueError("refresh_interval_iterations must be a positive integer")
         self.curriculum.validate()
 
-def _ensure_named_tensor_dict(env: Any, attribute: str) -> dict[str, torch.Tensor]:
-    values = getattr(env, attribute, None)
-    if values is None:
-        values = {}
-        setattr(env, attribute, values)
-    return values
+
+def sample_domain_parameters(
+    cfg: DomainRandomizationCfg,
+    batch_size: int,
+    *,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+    generator: torch.Generator | None = None,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Sample independent scalar parameters and per-joint actuator error."""
+
+    cfg.validate()
+    if batch_size < 0:
+        raise ValueError("batch_size cannot be negative")
+
+    def sample(name: str, shape: tuple[int, ...]) -> torch.Tensor:
+        if not cfg.enabled:
+            return torch.full(shape, float(cfg.nominal[name]), device=device, dtype=dtype)
+        low, high = map(float, cfg.ranges[name])
+        if low == high:
+            return torch.full(shape, low, device=device, dtype=dtype)
+        return torch.empty(shape, device=device, dtype=dtype).uniform_(
+            low, high, generator=generator
+        )
+
+    values = {name: sample(name, (batch_size,)) for name in DOMAIN_RANDOMIZATION_NAMES}
+    joint_error = sample("joint.model_error", (batch_size, ACTION_DIM))
+    return values, joint_error
+
+
+def effective_cart_mass_com_bounds(
+    ranges: Mapping[str, tuple[float, float]],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Return exact endpoint bounds for total cart mass and cart-frame CoM."""
+
+    from g1_rickshaw_lab.assets.rickshaw import (
+        RICKSHAW_CENTER_OF_MASS,
+        RICKSHAW_TOTAL_MASS,
+    )
+
+    mass_low, mass_high = map(float, ranges["payload.mass"])
+    lower = [RICKSHAW_TOTAL_MASS + mass_low]
+    upper = [RICKSHAW_TOTAL_MASS + mass_high]
+    for axis, name in enumerate(("payload.com.x", "payload.com.y", "payload.com.z")):
+        payload_low, payload_high = map(float, ranges[name])
+        candidates = [
+            (
+                RICKSHAW_TOTAL_MASS * RICKSHAW_CENTER_OF_MASS[axis]
+                + payload_mass * payload_com
+            )
+            / (RICKSHAW_TOTAL_MASS + payload_mass)
+            for payload_mass in (mass_low, mass_high)
+            for payload_com in (payload_low, payload_high)
+        ]
+        lower.append(min(candidates))
+        upper.append(max(candidates))
+    return tuple(lower), tuple(upper)
 
 
 def _ensure_wheel_joint_ids(env: Any) -> list[int]:
@@ -563,34 +651,6 @@ def _ensure_wheel_joint_ids(env: Any) -> list[int]:
         tuple(cart.joint_names), WHEEL_JOINT_NAMES, "wheel joint"
     )
     return env.wheel_joint_ids
-
-
-def _update_teacher_extrinsics(
-    env: Any,
-    env_ids: torch.Tensor,
-    cfg: RuntimeRandomizationCfg,
-    sampled: Mapping[str, torch.Tensor],
-) -> None:
-    from .observations import assemble_teacher_extrinsics
-
-    values = _ensure_named_tensor_dict(env, "teacher_extrinsic_values")
-    bounds = getattr(env, "teacher_extrinsic_bounds", None)
-    if bounds is None:
-        bounds = {
-            name: (
-                float(cfg.ranges[name][0]),
-                float(cfg.ranges[name][1]),
-            )
-            for name in cfg.teacher_extrinsic_names
-        }
-        env.teacher_extrinsic_bounds = bounds
-    for name in cfg.teacher_extrinsic_names:
-        if name not in values:
-            values[name] = torch.zeros(env.num_envs, device=env.device)
-        values[name][env_ids] = sampled[name]
-    env.normalized_teacher_extrinsics = assemble_teacher_extrinsics(
-        values, bounds, cfg.teacher_extrinsic_names
-    )
 
 
 def _write_payload_to_physx(
@@ -778,8 +838,7 @@ def _update_rickshaw_mass_properties(
     )
 
     base_mass = torch.full((env.num_envs,), RICKSHAW_TOTAL_MASS, device=device, dtype=dtype)
-    base_com = torch.tensor(RICKSHAW_CENTER_OF_MASS, device=device, dtype=dtype)
-    base_com[2] -= WHEEL_RADIUS
+    base_com_cart = torch.tensor(RICKSHAW_CENTER_OF_MASS, device=device, dtype=dtype)
     base_pitch_inertia = torch.full(
         (env.num_envs,),
         float(calibration["rickshaw.pitch_inertia_about_axle"]),
@@ -787,6 +846,15 @@ def _update_rickshaw_mass_properties(
         dtype=dtype,
     )
     total_mass = base_mass + env._payload_mass
+    total_com_cart = (
+        base_mass[:, None] * base_com_cart[None, :]
+        + env._payload_mass[:, None] * env._payload_com
+    ) / torch.clamp(total_mass[:, None], min=1.0e-6)
+    env.effective_cart_mass_com = torch.cat(
+        (total_mass[:, None], total_com_cart), dim=-1
+    )
+    base_com = base_com_cart.clone()
+    base_com[2] -= WHEEL_RADIUS
     payload_com_from_axle = env._payload_com.clone()
     payload_com_from_axle[:, 2] -= WHEEL_RADIUS
     total_com = (
@@ -830,17 +898,18 @@ def _publish_curriculum_state(env: Any) -> None:
         }
 
 
-def initialize_curriculum_runtime(
+def initialize_domain_randomization(
     env: Any,
     env_ids: Any,
-    cfg: RuntimeRandomizationCfg,
+    cfg: DomainRandomizationCfg,
 ) -> None:
-    """Startup EventTerm installing explicit schedule and delay state."""
+    """Sample and write one fixed physical domain for every environment."""
 
     del env_ids  # Startup state is allocated for every environment at once.
     cfg.validate()
     if hasattr(env, "curriculum_runtime_state"):
-        return
+        raise RuntimeError("domain randomization is already initialized")
+    install_balanced_slope_assignment(env)
     terrain = env.scene.terrain
     terrain_types = terrain.terrain_types.to(device=env.device, dtype=torch.long)
     terrain_direction = torch.sign(env.slope).to(dtype=torch.long)
@@ -849,20 +918,20 @@ def initialize_curriculum_runtime(
     )
     env.curriculum_runtime_state = state
     env.curriculum_stage_per_env = state.stage_per_environment()
-    env._curriculum_iteration_explicit = False
 
     step_dt = float(env.step_dt)
-    max_control_delay = 0
-    max_observation_delay = 0
-    if cfg.sample_ranges:
-        max_control_delay = int(
-            math.ceil(float(cfg.ranges["control.delay"][1]) / step_dt - 1.0e-9)
-        )
-        max_observation_delay = int(
-            math.ceil(float(cfg.ranges["observation.delay"][1]) / step_dt - 1.0e-9)
-        )
+    if step_dt <= 0.0:
+        raise ValueError("environment policy step must be positive")
+    max_control_delay = int(
+        math.ceil(float(cfg.ranges["control.delay"][1]) / step_dt - 1.0e-9)
+    )
+    max_observation_delay = int(
+        math.ceil(float(cfg.ranges["observation.delay"][1]) / step_dt - 1.0e-9)
+    )
     env.max_control_delay_steps = max_control_delay
-    env.control_delay_steps = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    env.control_delay_steps = torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.long
+    )
     env.observation_delay_steps = torch.zeros(
         env.num_envs, device=env.device, dtype=torch.long
     )
@@ -870,39 +939,43 @@ def initialize_curriculum_runtime(
     env.joint_model_error = torch.zeros(
         (env.num_envs, ACTION_DIM), device=env.device
     )
-    env.observation_noise_scale = torch.zeros(env.num_envs, device=env.device)
-    from .observations import ObservationDelayState, ObservationNoiseCfg
+    from .observations import ObservationDelayState
 
     env.observation_delay_state = ObservationDelayState.zeros(
         env.num_envs, max_observation_delay, device=env.device
     )
-    env.actor_observation_noise_cfg = ObservationNoiseCfg()
-
-    def set_iteration(self: Any, iteration: int) -> CurriculumStage:
-        self._curriculum_iteration_explicit = True
+    def update_curriculum(self: Any, iteration: int) -> CurriculumStage:
         result = self.curriculum_runtime_state.set_iteration(iteration)
         _publish_curriculum_state(self)
         return result
+
+    def set_iteration(self: Any, iteration: int) -> CurriculumStage:
+        return update_curriculum(self, iteration)
+
+    def set_domain_iteration(self: Any, iteration: int) -> bool:
+        if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
+            raise ValueError("domain randomization iteration must be a non-negative integer")
+        epoch = iteration // cfg.refresh_interval_iterations
+        current_epoch = int(self.domain_randomization_epoch)
+        if cfg.enabled and epoch < current_epoch:
+            raise ValueError("domain randomization iteration cannot move backwards")
+        update_curriculum(self, iteration)
+        if not cfg.enabled:
+            return False
+        if epoch == current_epoch:
+            return False
+        _apply_domain_epoch(self, cfg, epoch)
+        return True
 
     def get_distribution(self: Any) -> dict[str, int]:
         return self.curriculum_runtime_state.distribution()
 
     env.set_curriculum_iteration = MethodType(set_iteration, env)
+    env.set_domain_randomization_iteration = MethodType(set_domain_iteration, env)
     env.get_curriculum_distribution = MethodType(get_distribution, env)
     _publish_curriculum_state(env)
-
-
-def update_curriculum_iteration_from_steps(env: Any) -> CurriculumStage:
-    """Fallback synchronization for launchers without the RSL runner hook."""
-
-    state = getattr(env, "curriculum_runtime_state", None)
-    if state is None:
-        raise RuntimeError("curriculum runtime was not initialized at startup")
-    if not env._curriculum_iteration_explicit:
-        iteration = int(env.common_step_counter) // state.cfg.rollout_steps_per_iteration
-        state.set_iteration(iteration)
-        _publish_curriculum_state(env)
-    return state.stage
+    env.domain_randomization_cfg = cfg
+    _apply_domain_epoch(env, cfg, 0)
 
 
 def _quantize_delay_samples(
@@ -910,8 +983,7 @@ def _quantize_delay_samples(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     steps = torch.round(sampled_seconds / step_dt).to(dtype=torch.long)
     steps = torch.clamp(steps, min=0, max=max_steps)
-    actual_seconds = steps.to(dtype=sampled_seconds.dtype) * step_dt
-    return steps, actual_seconds
+    return steps, steps.to(dtype=sampled_seconds.dtype) * step_dt
 
 
 def _write_actuator_parameters(
@@ -920,6 +992,8 @@ def _write_actuator_parameters(
     motor_strength: torch.Tensor,
     joint_model_error: torch.Tensor,
 ) -> None:
+    """Write the same effective gains to PhysX and explicit actuator models."""
+
     if env_ids.numel() == 0:
         return
     robot = env.scene["robot"]
@@ -941,10 +1015,7 @@ def _write_actuator_parameters(
         dtype=env._joint_model_error_written.dtype,
     )
     unchanged = torch.isclose(
-        env._motor_strength_written[env_ids],
-        desired_motor,
-        rtol=0.0,
-        atol=1.0e-6,
+        env._motor_strength_written[env_ids], desired_motor, rtol=0.0, atol=1.0e-6
     ) & torch.all(
         torch.isclose(
             env._joint_model_error_written[env_ids],
@@ -965,14 +1036,9 @@ def _write_actuator_parameters(
 
     joint_ids = env.policy_joint_ids
     if not hasattr(env, "_nominal_robot_joint_stiffness"):
-        # Cache solver-side values, which remain zero for explicit actuators;
-        # their PD gains are randomized separately in the actuator model below.
         env._nominal_robot_joint_stiffness = robot.data.joint_stiffness.clone()
         env._nominal_robot_joint_damping = robot.data.joint_damping.clone()
         env._nominal_robot_joint_effort_limit = robot.data.joint_effort_limits.clone()
-        # PhysX limits are intentionally permissive for explicit DCMotor groups.
-        # Bind policy joints to their actuator-model limits so simulation,
-        # randomization, and all torque-ratio safety gates share one denominator.
         env._nominal_robot_joint_effort_limit[:, joint_ids] = actuator_effort_limits(
             robot, joint_ids
         )
@@ -1040,7 +1106,7 @@ def _write_actuator_parameters(
         env.policy_joint_stiffness = torch.zeros(
             (robot.data.joint_stiffness.shape[0], len(joint_ids)),
             device=env.device,
-            dtype=stiffness.dtype,
+            dtype=policy_stiffness.dtype,
         )
     env.policy_joint_stiffness[env_ids] = policy_stiffness
 
@@ -1051,39 +1117,127 @@ def _write_actuator_parameters(
     env._joint_model_error_written[env_ids] = desired_joint_error
 
 
-def sample_episode_physics(
-    env: Any,
-    env_ids: torch.Tensor,
-    cfg: RuntimeRandomizationCfg,
+def _write_wheel_damping(
+    env: Any, env_ids: torch.Tensor, sampled: Mapping[str, torch.Tensor]
 ) -> None:
-    """Reset-time EventTerm for the single training distribution."""
-
-    stage_per_env = env.curriculum_runtime_state.stage_per_environment()
-    env.curriculum_stage_per_env[env_ids] = stage_per_env[env_ids]
-    configured_values = (
-        {name: float(cfg.ranges[name][0]) for name in cfg.teacher_extrinsic_names}
-        if cfg.sample_ranges
-        else {name: float(cfg.nominal_values[name]) for name in cfg.teacher_extrinsic_names}
+    wheel_joint_ids = _ensure_wheel_joint_ids(env)
+    wheel_damping = torch.stack(
+        (sampled["wheel.left_damping"], sampled["wheel.right_damping"]), dim=-1
     )
-    sampled = {
-        name: torch.full(
-            (env_ids.numel(),), value, device=env.device, dtype=torch.float32
+    if not hasattr(env, "_wheel_damping_written"):
+        env._wheel_damping_written = torch.full(
+            (env.num_envs, 2), float("nan"), device=env.device
         )
-        for name, value in configured_values.items()
-    }
-
-    joint_error_value = float(
-        cfg.ranges["joint.model_error"][0]
-        if cfg.sample_ranges
-        else cfg.nominal_values["joint.model_error"]
+    desired = wheel_damping.to(
+        device=env._wheel_damping_written.device,
+        dtype=env._wheel_damping_written.dtype,
     )
-    joint_error = torch.full(
-        (env_ids.numel(), ACTION_DIM),
-        joint_error_value,
+    changed = torch.any(
+        ~torch.isclose(
+            env._wheel_damping_written[env_ids], desired, rtol=0.0, atol=1.0e-6
+        ),
+        dim=-1,
+    )
+    if not torch.any(changed):
+        return
+    changed_ids = env_ids[changed]
+    env.scene["rickshaw"].write_joint_damping_to_sim(
+        wheel_damping[changed], joint_ids=wheel_joint_ids, env_ids=changed_ids
+    )
+    env._wheel_damping_written[changed_ids] = desired[changed]
+
+
+def _update_teacher_static_domain(
+    env: Any,
+    cfg: DomainRandomizationCfg,
+    sampled: Mapping[str, torch.Tensor],
+    joint_error: torch.Tensor,
+) -> None:
+    """Publish normalized effective physics, excluding reset-scoped slope."""
+
+    effective_gain = sampled["motor.strength"][:, None] * (1.0 + joint_error)
+    raw = torch.cat(
+        (
+            env.effective_cart_mass_com,
+            sampled["rolling_resistance.c_rr"][:, None],
+            sampled["terrain.friction"][:, None],
+            torch.stack(
+                (sampled["wheel.left_damping"], sampled["wheel.right_damping"]),
+                dim=-1,
+            ),
+            effective_gain,
+            sampled["control.delay"][:, None],
+            sampled["observation.delay"][:, None],
+        ),
+        dim=-1,
+    )
+    cart_lower, cart_upper = effective_cart_mass_com_bounds(cfg.ranges)
+    motor_low, motor_high = map(float, cfg.ranges["motor.strength"])
+    error_low, error_high = map(float, cfg.ranges["joint.model_error"])
+    gain_low = motor_low * (1.0 + error_low)
+    gain_high = motor_high * (1.0 + error_high)
+    lower = torch.tensor(
+        (
+            *cart_lower,
+            cfg.ranges["rolling_resistance.c_rr"][0],
+            cfg.ranges["terrain.friction"][0],
+            cfg.ranges["wheel.left_damping"][0],
+            cfg.ranges["wheel.right_damping"][0],
+            *(gain_low for _ in range(ACTION_DIM)),
+            cfg.ranges["control.delay"][0],
+            cfg.ranges["observation.delay"][0],
+        ),
         device=env.device,
-        dtype=torch.float32,
+        dtype=raw.dtype,
     )
+    upper = torch.tensor(
+        (
+            *cart_upper,
+            cfg.ranges["rolling_resistance.c_rr"][1],
+            cfg.ranges["terrain.friction"][1],
+            cfg.ranges["wheel.left_damping"][1],
+            cfg.ranges["wheel.right_damping"][1],
+            *(gain_high for _ in range(ACTION_DIM)),
+            cfg.ranges["control.delay"][1],
+            cfg.ranges["observation.delay"][1],
+        ),
+        device=env.device,
+        dtype=raw.dtype,
+    )
+    from .observations import TEACHER_STATIC_DOMAIN_DIM, normalize_features
 
+    if raw.shape != (env.num_envs, TEACHER_STATIC_DOMAIN_DIM):
+        raise RuntimeError("effective teacher static domain must have shape [N,39]")
+    env.teacher_static_domain_raw = raw
+    env.teacher_static_domain_bounds = (lower, upper)
+    env.normalized_teacher_static_domain = normalize_features(raw, lower, upper)
+
+
+def domain_epoch_seed(base_seed: int, epoch: int) -> int:
+    """Derive an order-independent seed for one domain epoch."""
+
+    if isinstance(base_seed, bool) or not isinstance(base_seed, int):
+        raise ValueError("domain randomization requires an integer environment seed")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        raise ValueError("domain epoch must be a non-negative integer")
+    mask = (1 << 63) - 1
+    return (base_seed ^ (epoch * 0x4F1BBCDCBFA54001)) & mask
+
+
+def _apply_domain_epoch(
+    env: Any, cfg: DomainRandomizationCfg, epoch: int
+) -> None:
+    """Sample and apply one full-environment domain at a PPO boundary."""
+
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    generator = None
+    if cfg.enabled:
+        base_seed = getattr(env.cfg, "seed", None)
+        generator = torch.Generator(device=env.device)
+        generator.manual_seed(domain_epoch_seed(base_seed, epoch))
+    sampled, joint_error = sample_domain_parameters(
+        cfg, env.num_envs, device=env.device, generator=generator
+    )
     control_steps, sampled["control.delay"] = _quantize_delay_samples(
         sampled["control.delay"], float(env.step_dt), env.max_control_delay_steps
     )
@@ -1094,8 +1248,6 @@ def sample_episode_physics(
     )
     env.control_delay_steps[env_ids] = control_steps
     env.observation_delay_steps[env_ids] = observation_steps
-    env.observation_noise_scale[env_ids] = 0.0
-    env.observation_delay_state.reset(env_ids)
 
     env.c_rr[env_ids] = sampled["rolling_resistance.c_rr"]
     _update_rickshaw_mass_properties(env, env_ids, sampled, cfg.calibration)
@@ -1105,40 +1257,13 @@ def sample_episode_physics(
     _write_effective_terrain_friction_to_physx(
         env, env_ids, sampled["terrain.friction"]
     )
-    _update_teacher_extrinsics(env, env_ids, cfg, sampled)
     _write_actuator_parameters(
         env, env_ids, sampled["motor.strength"], joint_error
     )
-
-    wheel_joint_ids = _ensure_wheel_joint_ids(env)
-    wheel_damping = torch.stack(
-        (sampled["wheel.left_damping"], sampled["wheel.right_damping"]), dim=-1
-    )
-    if not hasattr(env, "_wheel_damping_written"):
-        env._wheel_damping_written = torch.full(
-            (env.num_envs, 2), float("nan"), device=env.device
-        )
-    desired_wheel_damping = wheel_damping.to(
-        device=env._wheel_damping_written.device,
-        dtype=env._wheel_damping_written.dtype,
-    )
-    wheel_changed = torch.any(
-        ~torch.isclose(
-            env._wheel_damping_written[env_ids],
-            desired_wheel_damping,
-            rtol=0.0,
-            atol=1.0e-6,
-        ),
-        dim=-1,
-    )
-    if torch.any(wheel_changed):
-        wheel_env_ids = env_ids[wheel_changed]
-        env.scene["rickshaw"].write_joint_damping_to_sim(
-            wheel_damping[wheel_changed],
-            joint_ids=wheel_joint_ids,
-            env_ids=wheel_env_ids,
-        )
-        env._wheel_damping_written[wheel_env_ids] = desired_wheel_damping[wheel_changed]
+    _write_wheel_damping(env, env_ids, sampled)
+    _update_teacher_static_domain(env, cfg, sampled, joint_error)
+    env.domain_randomization_epoch = int(epoch)
+    env.domain_randomization_initialized = True
 
 
 @dataclass(kw_only=True)
@@ -1255,13 +1380,33 @@ class D6ConstraintManager:
         ]
         self.created = True
 
+    def set_enabled(self, env_ids: torch.Tensor, enabled: bool) -> None:
+        """Enable or disable both grasp joints for selected environments."""
+
+        if not self.created:
+            raise RuntimeError("D6 constraints must be bound before changing curriculum stage")
+        from pxr import UsdPhysics
+
+        stage = self._stage_from_env(self.env)
+        for env_id in env_ids.detach().cpu().tolist():
+            for joint_path in self.joint_paths[int(env_id)]:
+                joint = UsdPhysics.Joint.Get(stage, joint_path)
+                if not joint.GetPrim().IsValid():
+                    raise RuntimeError(f"D6 joint is unavailable: {joint_path}")
+                attribute = joint.GetJointEnabledAttr()
+                if not attribute:
+                    attribute = joint.CreateJointEnabledAttr()
+                attribute.Set(bool(enabled))
+
+
 class D6ReactionResidualAdapter:
     """Version-independent adapter around a local D6 constraint proxy reader.
 
     The provider returns a world-frame proxy wrench ``[N,2,6]``, position
     residual ``[N,2,3]``, rotation residual ``[N,2,3]``, and spatial impulse
-    ``[N,2,6]``. The proxy is retained for conservative D6 load/residual safety;
-    whole-cart momentum balance independently measures the physical hand force.
+    ``[N,2,6]``. The complete per-side proxy is exposed to privileged
+    observations and diagnostics; whole-cart momentum balance independently
+    measures the physical hand force used by FAT2 and force-balance checks.
     """
 
     def __init__(self, env: Any, manager: D6ConstraintManager):
@@ -1297,9 +1442,9 @@ class D6ReactionResidualAdapter:
         impulse_magnitude = d6_spatial_impulse_magnitudes(impulse)
         state = self.env.rickshaw_state
         # Excluded external D6 joints are not part of either articulation's
-        # tensor joint view. The retained-link incoming wrench is kept only as
-        # a conservative per-side constraint proxy; whole-cart momentum balance
-        # owns the physical hand force used by FAT2, ZMP, and observations.
+        # tensor joint view. The retained-link incoming wrench is a complete
+        # per-side constraint proxy for privilege and diagnostics; whole-cart
+        # momentum balance owns the physical hand force used by FAT2 and ZMP.
         self.env.d6_incoming_joint_proxy_w[:] = wrench
         state.d6_residual[:] = residual
         state.d6_impulse[:] = impulse_magnitude
@@ -1603,66 +1748,25 @@ def _body_name_from_prim_path(path: str) -> str:
     return name
 
 
-def static_reset_contact_allocation(
-    env: Any, env_ids: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return left/right hand wrenches and wheel forces in the SLN frame."""
-
-    properties = env.rickshaw_mass_properties
-    mass = properties.m_cart[env_ids]
-    alpha = target_pitch_from_hitch_height(env.rickshaw_pose_cfg)
-    cosine = math.cos(alpha)
-    sine = math.sin(alpha)
-    handle_s = (
-        cosine * properties.handle_x_from_axle[env_ids]
-        - sine * properties.handle_z_from_axle[env_ids]
-    )
-    handle_n = (
-        sine * properties.handle_x_from_axle[env_ids]
-        + cosine * properties.handle_z_from_axle[env_ids]
-    )
-    if torch.any(handle_s <= 0.5):
-        bad = env_ids[handle_s <= 0.5].detach().cpu().tolist()
-        raise RuntimeError(f"static handle-force geometry is invalid for env_ids={bad[:16]}")
-    com_s = (
-        cosine * properties.com_x_from_axle[env_ids]
-        - sine * properties.com_z_from_axle[env_ids]
-    )
-    com_n = (
-        sine * properties.com_x_from_axle[env_ids]
-        + cosine * properties.com_z_from_axle[env_ids]
-    )
-    com_l = env._payload_mass[env_ids] * env._payload_com[env_ids, 1] / mass
-    hand_rows, wheel_rows = fixed_contact_static_components(
-        gravity_tangent=mass * GRAVITY * torch.sin(env.gamma[env_ids]),
-        gravity_normal=mass * GRAVITY * torch.cos(env.gamma[env_ids]),
-        com_s=com_s,
-        com_l=com_l,
-        com_n=com_n,
-        handle_s=handle_s,
-        handle_n=handle_n,
-        hitch_half_width=env.rickshaw_pose_cfg.hitch_half_width,
-        wheel_track=WHEEL_TRACK,
-    )
-    hand_wrenches_sln = torch.stack(
-        tuple(torch.stack(row, dim=-1) for row in hand_rows), dim=1
-    )
-    wheel_forces_sln = torch.stack(
-        tuple(torch.stack(row, dim=-1) for row in wheel_rows), dim=1
-    )
-    return hand_wrenches_sln, wheel_forces_sln
-
-
 def install_q_ref_from_reset_library(env: Any, env_ids: torch.Tensor) -> None:
-    """Install the nominal MuJoCo static state and controller reference directly."""
+    """Install a reference that preserves nominal reset torque under gain error."""
 
-    pose_indices = torch.argmin(
-        torch.abs(env.slope[env_ids, None] - env.reset_pose_gradients[None, :]),
-        dim=1,
-    )
+    candidate_indices = getattr(env, "reset_candidate_pose_index", None)
+    if candidate_indices is None:
+        pose_indices = torch.argmin(
+            torch.abs(env.slope[env_ids, None] - env.reset_pose_gradients[None, :]),
+            dim=1,
+        )
+    else:
+        pose_indices = candidate_indices[env_ids]
     env.reset_pose_index[env_ids] = pose_indices
     q_reset = env.reset_q_reset_table[pose_indices]
-    q_ref = env.reset_q_ref_table[pose_indices]
+    q_ref = gain_compensated_static_target(
+        q_reset,
+        env.reset_q_ref_table[pose_indices],
+        env.motor_strength[env_ids],
+        env.joint_model_error[env_ids],
+    )
     env.action_state.q_ref[env_ids] = q_ref
     env.reset_policy_joint_pos[env_ids] = q_reset
 
@@ -1701,6 +1805,43 @@ def _compile_reset_pose_tables(env: Any) -> None:
     )
     env.reset_grasp_positions_b_table = torch.zeros(
         (len(poses), 2, 3), device=device, dtype=dtype
+    )
+    env._reset_grasp_cached_indices = set()
+
+
+def install_reset_pose_batch(env: Any, poses: list[Any]) -> None:
+    """Install one immutable reset pose per environment for Stage B batching."""
+
+    if len(poses) != env.num_envs:
+        raise ValueError(
+            f"reset pose batch must contain {env.num_envs} poses, got {len(poses)}"
+        )
+    device = env.device
+    dtype = env.action_state.q_ref.dtype
+    env.reset_pose_gradients = torch.tensor(
+        [pose.gradient for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_q_reset_table = torch.tensor(
+        [pose.q_reset for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_q_ref_table = torch.tensor(
+        [pose.q_ref for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_root_pitch_table = torch.tensor(
+        [pose.root_pitch for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_root_height_table = torch.tensor(
+        [pose.root_height for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_handle_wrenches_sln_table = torch.tensor(
+        [pose.handle_wrenches_sln for pose in poses], device=device, dtype=dtype
+    )
+    env.reset_candidate_pose_index = torch.arange(
+        env.num_envs, device=device, dtype=torch.long
+    )
+    env.reset_pose_index = env.reset_candidate_pose_index.clone()
+    env.reset_grasp_positions_b_table = torch.zeros(
+        (env.num_envs, 2, 3), device=device, dtype=dtype
     )
     env._reset_grasp_cached_indices = set()
 
@@ -1798,6 +1939,16 @@ def initialize_mdp_state(
     env.reset_policy_joint_pos = torch.zeros(
         (num_envs, ACTION_DIM), device=device
     )
+    env.curriculum_hand_wrenches_w = torch.zeros(
+        (num_envs, 2, 6), device=device
+    )
+    env.curriculum_handle_wrenches_sln = torch.zeros(
+        (num_envs, 2, 6), device=device
+    )
+    env.d6_enabled = torch.ones(num_envs, device=device, dtype=torch.bool)
+    env.cart_gravity_disabled = torch.zeros(
+        num_envs, device=device, dtype=torch.bool
+    )
     env.c_rr = torch.zeros(num_envs, device=device)
     env.static_d6_preload_offset_w = torch.zeros((num_envs, 3), device=device)
     env.policy_robot_speed_s = torch.zeros(num_envs, device=device)
@@ -1825,14 +1976,21 @@ def initialize_mdp_state(
         num_envs, device=device, dtype=torch.bool
     )
     from .curricula import TerrainCurriculumState
-    from .observations import ObservationHistoryState
+    from .observations import ObservationHistoryState, TEACHER_DYNAMIC_DIM
     from .terminations import PersistentTerminationState, TerminationCauseState
 
-    history_enabled = getattr(env.cfg.observations, "history", None) is not None
     env.observation_history_state = ObservationHistoryState.zeros(
         num_envs,
         device=device,
-        history_enabled=history_enabled,
+    )
+    dynamic_history_enabled = (
+        getattr(env.cfg.observations, "teacher_dynamic_history", None) is not None
+    )
+    env.teacher_dynamic_history_state = ObservationHistoryState.zeros(
+        num_envs,
+        observation_dim=TEACHER_DYNAMIC_DIM,
+        device=device,
+        history_enabled=dynamic_history_enabled,
     )
     env.curriculum_state = TerrainCurriculumState.zeros(num_envs, device=device)
     env.termination_state = PersistentTerminationState.zeros(num_envs, device=device)
@@ -1841,7 +1999,10 @@ def initialize_mdp_state(
     env._rolling_resistance_cfg = rolling_resistance_cfg
 
     def pre_physics_step(self: Any) -> None:
+        apply_curriculum_hand_load(self)
         rolling_force_w = apply_rolling_resistance(self, self._rolling_resistance_cfg)
+        static_load = curriculum_stage_mask(self, CurriculumStage.STATIC_HAND_LOAD)
+        rolling_force_w[static_load] = 0.0
         accumulate_cart_interaction_wrench(self, rolling_force_w)
 
     env._g1_rickshaw_pre_physics_step = MethodType(pre_physics_step, env)
@@ -1871,6 +2032,98 @@ def spatial_wrenches_sln_to_world(
     force_w = torch.einsum("nsc,ncw->nsw", wrenches_sln[..., :3], basis)
     torque_w = torch.einsum("nsc,ncw->nsw", wrenches_sln[..., 3:], basis)
     return torch.cat((force_w, torque_w), dim=-1)
+
+
+def curriculum_stage_mask(env: Any, stage: CurriculumStage) -> torch.Tensor:
+    """Return the environments currently running one physical curriculum stage."""
+
+    stages = env.curriculum_stage_per_env
+    if stages.shape != (env.num_envs,):
+        raise RuntimeError("curriculum stage tensor must have shape [num_envs]")
+    return stages == int(stage)
+
+
+def _set_cart_gravity_disabled(
+    env: Any,
+    env_ids: torch.Tensor,
+    disabled: bool,
+) -> None:
+    """Freeze or restore the parked cart without changing its mass contract."""
+
+    if env_ids.numel() == 0:
+        return
+    view = env.scene["rickshaw"].root_physx_view
+    flags = view.get_disable_gravities().clone()
+    indices = env_ids.detach().to(device="cpu", dtype=torch.long)
+    flags[indices] = bool(disabled)
+    view.set_disable_gravities(flags, indices)
+
+
+def activate_curriculum_stage_on_reset(env: Any, env_ids: torch.Tensor) -> None:
+    """Adopt the desired stage and configure reset-scoped load ownership."""
+
+    ids = env_ids.to(device=env.device, dtype=torch.long)
+    env.curriculum_runtime_state.activate(ids)
+    env.curriculum_stage_per_env.copy_(
+        env.curriculum_runtime_state.stage_per_environment()
+    )
+    static_mask = curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD)
+    desired_d6 = ~static_mask[ids]
+    changed_mask = env.d6_enabled[ids] != desired_d6
+    changed = ids[changed_mask]
+    if changed.numel() > 0:
+        enable_ids = changed[~static_mask[changed]]
+        disable_ids = changed[static_mask[changed]]
+        if enable_ids.numel() > 0:
+            env.d6_constraint_manager.set_enabled(enable_ids, True)
+        if disable_ids.numel() > 0:
+            env.d6_constraint_manager.set_enabled(disable_ids, False)
+        env.d6_enabled[changed] = desired_d6[changed_mask]
+
+    desired_gravity_disabled = static_mask[ids]
+    gravity_changed_mask = (
+        env.cart_gravity_disabled[ids] != desired_gravity_disabled
+    )
+    gravity_changed = ids[gravity_changed_mask]
+    if gravity_changed.numel() > 0:
+        disable_ids = gravity_changed[static_mask[gravity_changed]]
+        enable_ids = gravity_changed[~static_mask[gravity_changed]]
+        _set_cart_gravity_disabled(env, disable_ids, True)
+        _set_cart_gravity_disabled(env, enable_ids, False)
+        env.cart_gravity_disabled[gravity_changed] = desired_gravity_disabled[
+            gravity_changed_mask
+        ]
+
+    pose_indices = env.reset_pose_index[ids]
+    robot_on_cart_sln = env.reset_handle_wrenches_sln_table[pose_indices]
+    env.curriculum_handle_wrenches_sln[ids] = robot_on_cart_sln
+    robot_on_cart_w = spatial_wrenches_sln_to_world(
+        robot_on_cart_sln,
+        env.path_tangent_w[ids],
+        env.path_lateral_w[ids],
+        env.path_normal_w[ids],
+    )
+    env.curriculum_hand_wrenches_w[ids] = -robot_on_cart_w
+
+
+def apply_curriculum_hand_load(env: Any) -> None:
+    """Apply the reset-static cart-on-robot wrench at both moving grasp points."""
+
+    static_ids = torch.nonzero(
+        curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD),
+        as_tuple=False,
+    ).flatten()
+    if static_ids.numel() == 0:
+        return
+    robot = env.scene["robot"]
+    robot.instantaneous_wrench_composer.set_forces_and_torques(
+        forces=env.curriculum_hand_wrenches_w[static_ids, :, :3],
+        torques=env.curriculum_hand_wrenches_w[static_ids, :, 3:],
+        positions=grasp_positions_w(env, static_ids),
+        body_ids=env.grasp_body_ids,
+        env_ids=static_ids,
+        is_global=True,
+    )
 
 
 def grasp_positions_w(env: Any, env_ids: torch.Tensor) -> torch.Tensor:
@@ -1970,6 +2223,7 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
         env, env_ids, root_pos, root_quat
     )
     alpha_target = target_pitch_from_hitch_height(env.rickshaw_pose_cfg)
+    env.rickshaw_state.pitch[env_ids] = float(alpha_target)
     cart_quat = target_cart_orientation(env.slope_quat_w[env_ids], alpha_target)
     hand_wrenches_sln = env.reset_handle_wrenches_sln_table[pose_indices]
     handle_wrenches_w = spatial_wrenches_sln_to_world(
@@ -1978,8 +2232,12 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
         env.path_lateral_w[env_ids],
         env.path_normal_w[env_ids],
     )
+    static_local = curriculum_stage_mask(
+        env, CurriculumStage.STATIC_HAND_LOAD
+    )[env_ids]
     linear_stiffness = float(env.d6_constraint_manager.cfg.linear_stiffness)
     preload_offset_per_hand_w = -handle_wrenches_w[..., :3] / linear_stiffness
+    preload_offset_per_hand_w[static_local] = 0.0
     # Keep the mean for scalar hitch-height diagnostics.  Cart placement below
     # fits the two per-hand offsets as a rigid two-point pose, so the differential
     # preload is present before the first physics step.
@@ -1992,10 +2250,18 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
         env.path_normal_w[env_ids],
         env.rickshaw_pose_cfg,
     )
+    if torch.any(static_local):
+        # The asset remains in the replicated scene but is physically absent
+        # from the walking task while its D6 joints are disabled.
+        cart_root[static_local] = (
+            origin[static_local] - 10.0 * env.path_normal_w[env_ids][static_local]
+        )
+        cart_quat[static_local] = env.slope_quat_w[env_ids][static_local]
     path_position = torch.sum((cart_root - origin) * env.path_tangent_w[env_ids], dim=-1)
     wheel_phase = wheel_phase_from_path_position(
         path_position, env.rickshaw_pose_cfg.wheel_radius
     )
+    wheel_phase[static_local] = 0.0
     cart.write_root_pose_to_sim(torch.cat((cart_root, cart_quat), dim=-1), env_ids=env_ids)
     cart.write_root_velocity_to_sim(torch.zeros_like(root_velocity), env_ids=env_ids)
     wheel_joint_ids = _ensure_wheel_joint_ids(env)
@@ -2021,6 +2287,13 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.rickshaw_state.hand_force_w[env_ids] = 0.0
     env.rickshaw_state.hand_torque_w[env_ids] = 0.0
     env.d6_incoming_joint_proxy_w[env_ids] = 0.0
+    static_ids = env_ids[
+        curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD)[env_ids]
+    ]
+    if static_ids.numel() > 0:
+        env.rickshaw_state.d6_wrench_w[static_ids] = env.curriculum_hand_wrenches_w[
+            static_ids
+        ]
     env.cart_interaction_wrench_state.reset(
         torch.zeros((env_ids.numel(), 3), device=env.device), env_ids
     )
@@ -2038,7 +2311,11 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.stability_state.support_points_sy[env_ids] = 0.0
     env.stability_state.support_point_mask[env_ids] = False
     env.action_state.reset(env.action_state.q_ref[env_ids], env_ids)
+    env.observation_delay_state.reset(env_ids)
     env.observation_history_state.reset(env_ids)
+    env.teacher_dynamic_history_state.reset(env_ids)
+    if hasattr(env, "_actor_observation_cache"):
+        del env._actor_observation_cache
     env.termination_state.reset(env_ids)
     env.curriculum_state.reset(env_ids)
     cart = env.scene["rickshaw"]
@@ -2073,6 +2350,7 @@ def prepare_closed_chain_reset(env: Any, env_ids: torch.Tensor) -> None:
 
     update_slope_frame(env, env_ids)
     install_q_ref_from_reset_library(env, env_ids)
+    activate_curriculum_stage_on_reset(env, env_ids)
 
 
 def _reset_action_terms_to_current_reference(env: Any, env_ids: torch.Tensor) -> None:
@@ -2121,6 +2399,7 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
 
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
+    static_load = curriculum_stage_mask(env, CurriculumStage.STATIC_HAND_LOAD)
     hitch_position_w = torch.mean(
         cart.data.body_pos_w[:, env.hitch_body_ids], dim=1
     )
@@ -2130,6 +2409,22 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
     cart_pitch = rickshaw_pitch_from_quaternion(
         cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
     )
+    if torch.any(static_load):
+        all_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        grasp_position_w = torch.mean(grasp_positions_w(env, all_ids), dim=1)
+        grasp_velocity_w = torch.mean(
+            robot.data.body_lin_vel_w[:, env.grasp_body_ids], dim=1
+        )
+        hitch_position_w = torch.where(
+            static_load[:, None], grasp_position_w, hitch_position_w
+        )
+        hitch_velocity_w = torch.where(
+            static_load[:, None], grasp_velocity_w, hitch_velocity_w
+        )
+        static_pitch = torch.full_like(
+            cart_pitch, target_pitch_from_hitch_height(env.rickshaw_pose_cfg)
+        )
+        cart_pitch = torch.where(static_load, static_pitch, cart_pitch)
     cart_speed_s = torch.sum(
         cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1
     )
@@ -2157,7 +2452,8 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
         pitch=cart_pitch,
     )
     update_support_polygon(env, cfg.support_polygon)
-    update_cart_interaction_wrench(env, cart_kinematics)
+    if torch.any(~static_load):
+        update_cart_interaction_wrench(env, cart_kinematics)
     update_analytic_rickshaw_force(
         env,
         cfg.analytic_force,
@@ -2165,11 +2461,35 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
         pitch=cart_pitch,
         geometry_sn=rickshaw_geometry_sn,
     )
+    if torch.any(static_load):
+        external_wrenches = env.curriculum_hand_wrenches_w[static_load]
+        robot_on_cart_sln = env.curriculum_handle_wrenches_sln[static_load]
+        env.rickshaw_state.hand_force_w[static_load] = torch.sum(
+            external_wrenches[..., :3], dim=1
+        )
+        env.rickshaw_state.hand_torque_w[static_load] = torch.sum(
+            external_wrenches[..., 3:], dim=1
+        )
+        env.rickshaw_state.d6_wrench_w[static_load] = external_wrenches
+        env.rickshaw_state.d6_residual[static_load] = 0.0
+        env.rickshaw_state.d6_impulse[static_load] = 0.0
+        env.d6_incoming_joint_proxy_w[static_load] = 0.0
+        env.cart_interaction_wrench_valid[static_load] = True
+        env.analytic_force_state.a_s[static_load] = 0.0
+        env.analytic_force_state.alpha_ddot[static_load] = 0.0
+        env.analytic_force_state.t_s[static_load] = torch.sum(
+            robot_on_cart_sln[..., 0], dim=1
+        )
+        env.analytic_force_state.t_n[static_load] = torch.sum(
+            robot_on_cart_sln[..., 2], dim=1
+        )
+        env.analytic_force_state.valid[static_load] = True
     env.rickshaw_state.two_wheel_contact[:] = torch.all(
         env.rickshaw_state.wheel_normal_force
         >= cfg.analytic_force.minimum_wheel_normal_force,
         dim=-1,
     )
+    env.rickshaw_state.two_wheel_contact[static_load] = True
     update_fat2_reference(
         env,
         cfg.fat2,
@@ -2202,15 +2522,57 @@ def advance_policy_interval(
 
     if env_ids is not None and env_ids.numel() != env.num_envs:
         raise RuntimeError("advance_policy_interval must be a global-time interval event")
-    update_curriculum_iteration_from_steps(env)
-    advance_speed_command_resampling(env, cfg.command_sampling)
-    advance_speed_reference(env, cfg.speed_reference)
-    from .observations import actor_observation
+    _advance_policy_command_and_observation(env, cfg)
 
-    observation = actor_observation(env, use_cache=False)
-    env._actor_observation_cache = observation
-    valid = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
-    env.observation_history_state.advance(observation, valid)
+
+def _advance_policy_command_and_observation(
+    env: Any,
+    cfg: PolicyStateUpdateCfg,
+    env_ids: torch.Tensor | None = None,
+    *,
+    initialize_reset: bool = False,
+) -> None:
+    """Advance one policy tick for all or a selected set of environments."""
+
+    if env_ids is None:
+        selected_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        selected_ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+    if selected_ids.numel() == 0:
+        return
+
+    command_ids = None if env_ids is None else selected_ids
+    advance_speed_command_resampling(env, cfg.command_sampling, command_ids)
+    advance_speed_reference(env, cfg.speed_reference, command_ids)
+    from .observations import actor_observation, dynamic_privileged_observation
+
+    active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    active[selected_ids] = True
+    observation = actor_observation(env, use_cache=False, active_mask=active)
+    dynamic = dynamic_privileged_observation(env)
+    if initialize_reset:
+        if torch.any(env.observation_history_state.initialized[selected_ids]) or torch.any(
+            env.teacher_dynamic_history_state.initialized[selected_ids]
+        ):
+            raise RuntimeError("reset bootstrap requires both history states to be reset")
+        env.observation_history_state.initialize(observation, selected_ids)
+        env.teacher_dynamic_history_state.initialize(dynamic, selected_ids)
+    else:
+        env.observation_history_state.advance(observation, active)
+        env.teacher_dynamic_history_state.advance(dynamic, active)
+    env._actor_observation_cache = env.observation_history_state.current.clone()
+
+
+def bootstrap_reset_observation(
+    env: Any,
+    env_ids: torch.Tensor,
+    cfg: PolicyStateUpdateCfg,
+) -> None:
+    """Create the policy-rate reset frame after reset kinematics are current."""
+
+    _advance_policy_command_and_observation(
+        env, cfg, env_ids, initialize_reset=True
+    )
 
 
 __all__ = [
@@ -2223,7 +2585,9 @@ __all__ = [
     "PolicyStateUpdateCfg",
     "RickshawPoseTargetCfg",
     "RickshawRuntimeState",
-    "RuntimeRandomizationCfg",
+    "DOMAIN_PARAMETER_NAMES",
+    "DOMAIN_RANDOMIZATION_NAMES",
+    "DomainRandomizationCfg",
     "ResetValidationCfg",
     "SpeedCommandSamplingCfg",
     "StabilityState",
@@ -2231,32 +2595,32 @@ __all__ = [
     "advance_policy_interval",
     "advance_speed_command_resampling",
     "advance_speed_reference",
+    "bootstrap_reset_observation",
     "bind_d6_runtime_adapters",
     "compute_path_tracking_errors",
     "d6_spatial_impulse_magnitudes",
+    "domain_epoch_seed",
+    "effective_cart_mass_com_bounds",
     "fit_cart_pose_to_hitch_targets",
     "finish_closed_chain_reset",
     "initialize_mdp_state",
-    "initialize_curriculum_runtime",
+    "initialize_domain_randomization",
     "install_q_ref_from_reset_library",
+    "install_reset_pose_batch",
     "prepare_closed_chain_reset",
     "quat_multiply_wxyz",
     "resample_speed_command",
     "refresh_policy_state",
-    "reset_speed_command",
     "reset_closed_chain",
     "recover_d6_wrench_on_robot",
     "reset_task_state",
     "resolve_task_entities",
-    "sample_episode_physics",
-    "sample_rolling_resistance",
     "sample_speed_commands",
+    "sample_domain_parameters",
     "spatial_wrenches_sln_to_world",
-    "static_reset_contact_allocation",
     "target_cart_orientation",
     "target_pitch_from_hitch_height",
     "update_path_tracking_state",
-    "update_curriculum_iteration_from_steps",
     "update_rickshaw_geometry_state",
     "wheel_phase_from_path_position",
     "write_closed_chain_reset_state",

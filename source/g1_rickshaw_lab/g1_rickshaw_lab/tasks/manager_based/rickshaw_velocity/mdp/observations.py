@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
+
+from g1_rickshaw_lab.policy_schema import (
+    ACTOR_OBSERVATION_DIM,
+    CRITIC_PRIVILEGED_DIM,
+    HISTORY_LENGTH,
+    TEACHER_DYNAMIC_DIM,
+    TEACHER_STATIC_DIM,
+)
+from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
 
 from .actions import ACTION_DIM
 
 
-ACTOR_OBSERVATION_DIM = 96
-HISTORY_LENGTH = 61
+TEACHER_STATIC_DOMAIN_DIM = TEACHER_STATIC_DIM - 1
+SLOPE_LOWER = min(SLOPE_GRADIENTS)
+SLOPE_UPPER = max(SLOPE_GRADIENTS)
 
 BASE_ANGULAR_VELOCITY_SLICE = slice(0, 3)
 PROJECTED_GRAVITY_SLICE = slice(3, 6)
 TASK_SIGNAL_SLICE = slice(6, 9)
 JOINT_POSITION_SLICE = slice(9, 38)
 JOINT_VELOCITY_SLICE = slice(38, 67)
-PREVIOUS_ACTION_SLICE = slice(67, 96)
+PREVIOUS_ACTION_SLICE = slice(67, ACTOR_OBSERVATION_DIM)
 
 BASE_ANGULAR_VELOCITY_SCALE = 0.25
 PROJECTED_GRAVITY_SCALE = 1.0
@@ -27,85 +37,45 @@ JOINT_POSITION_SCALE = 1.0
 JOINT_VELOCITY_SCALE = 0.05
 PREVIOUS_ACTION_SCALE = 1.0
 
-INDEPENDENT_EXTRINSIC_NAMES = (
-    "payload.mass",
-    "payload.com.x",
-    "payload.com.y",
-    "payload.com.z",
+TEACHER_STATIC_FEATURE_NAMES = (
+    "cart.total_mass",
+    "cart.com.x",
+    "cart.com.y",
+    "cart.com.z",
     "rolling_resistance.c_rr",
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
-    "motor.strength",
+    *(f"actuator.effective_gain.{index}" for index in range(ACTION_DIM)),
     "control.delay",
     "observation.delay",
+    "terrain.slope",
 )
-
-DERIVED_OR_PRIVILEGED_ONLY_NAMES = frozenset(
-    {
-        "slope",
-        "base_velocity",
-        "cart_velocity",
-        "rickshaw_pitch",
-        "wheel_normal_force",
-        "d6_wrench",
-        "d6_residual",
-        "filtered_acceleration",
-        "t_s",
-        "t_n",
-        "zmp_margin",
-    }
+TEACHER_DYNAMIC_FEATURE_NAMES = (
+    "robot.velocity.s",
+    "robot.velocity.l",
+    "robot.velocity.n",
+    "cart.velocity.s",
+    "cart.velocity.l",
+    "cart.velocity.n",
+    "cart.pitch",
+    "wheel.left_normal_force",
+    "wheel.right_normal_force",
+    *(
+        f"d6.{side}.{kind}.{axis}"
+        for side in ("left", "right")
+        for kind in ("force", "torque")
+        for axis in ("s", "l", "n")
+    ),
 )
-
-
-@dataclass(frozen=True)
-class ObservationNoiseCfg:
-    base_angular_velocity: float | torch.Tensor = 0.2
-    projected_gravity: float | torch.Tensor = 0.05
-    joint_position: float | torch.Tensor = 0.01
-    joint_velocity: float | torch.Tensor = 1.5
-
-    def scaled(self, scale: torch.Tensor | float) -> "ObservationNoiseCfg":
-        return ObservationNoiseCfg(
-            base_angular_velocity=self.base_angular_velocity * scale,
-            projected_gravity=self.projected_gravity * scale,
-            joint_position=self.joint_position * scale,
-            joint_velocity=self.joint_velocity * scale,
-        )
+if len(TEACHER_STATIC_FEATURE_NAMES) != TEACHER_STATIC_DIM:
+    raise RuntimeError("teacher static feature schema is not 40-D")
+if len(TEACHER_DYNAMIC_FEATURE_NAMES) != TEACHER_DYNAMIC_DIM:
+    raise RuntimeError("teacher dynamic feature schema is not 21-D")
 
 
 def wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
     return torch.atan2(torch.sin(angle), torch.cos(angle))
-
-
-def _uniform_noise_like(
-    value: torch.Tensor,
-    magnitude: float | torch.Tensor,
-    generator: torch.Generator | None,
-) -> torch.Tensor:
-    magnitude_value = torch.as_tensor(
-        magnitude, device=value.device, dtype=value.dtype
-    )
-    if magnitude_value.ndim == 1 and magnitude_value.shape[0] == value.shape[0]:
-        magnitude_value = magnitude_value.reshape(
-            magnitude_value.shape[0], *((1,) * (value.ndim - 1))
-        )
-    if torch.any(~torch.isfinite(magnitude_value)) or torch.any(magnitude_value < 0.0):
-        raise ValueError("observation noise magnitude must be finite and non-negative")
-    return (2.0 * torch.rand(
-        value.shape,
-        device=value.device,
-        dtype=value.dtype,
-        generator=generator,
-    ) - 1.0) * magnitude_value
 
 
 def assemble_actor_observation(
@@ -118,9 +88,6 @@ def assemble_actor_observation(
     q_ref: torch.Tensor,
     joint_velocity_value: torch.Tensor,
     previous_processed_action: torch.Tensor,
-    *,
-    noise_cfg: ObservationNoiseCfg | None = None,
-    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Assemble the only deployment observation, in the fixed 96-D order."""
 
@@ -145,24 +112,7 @@ def assemble_actor_observation(
         if value.shape != batch_shape:
             raise ValueError(f"{name} must have batch shape {batch_shape}")
 
-    angular_velocity = base_angular_velocity_b
-    gravity = projected_gravity_b
     position_error = joint_position - q_ref
-    velocity = joint_velocity_value
-    if noise_cfg is not None:
-        angular_velocity = angular_velocity + _uniform_noise_like(
-            angular_velocity, noise_cfg.base_angular_velocity, generator
-        )
-        gravity = gravity + _uniform_noise_like(
-            gravity, noise_cfg.projected_gravity, generator
-        )
-        position_error = position_error + _uniform_noise_like(
-            position_error, noise_cfg.joint_position, generator
-        )
-        velocity = velocity + _uniform_noise_like(
-            velocity, noise_cfg.joint_velocity, generator
-        )
-
     task_scale = torch.tensor(
         TASK_SIGNAL_SCALE,
         device=base_angular_velocity_b.device,
@@ -171,17 +121,20 @@ def assemble_actor_observation(
     task = torch.stack((v_ref, lateral_error, wrap_to_pi(heading_error)), dim=-1) * task_scale
     observation = torch.cat(
         (
-            angular_velocity * BASE_ANGULAR_VELOCITY_SCALE,
-            gravity * PROJECTED_GRAVITY_SCALE,
+            base_angular_velocity_b * BASE_ANGULAR_VELOCITY_SCALE,
+            projected_gravity_b * PROJECTED_GRAVITY_SCALE,
             task,
             position_error * JOINT_POSITION_SCALE,
-            velocity * JOINT_VELOCITY_SCALE,
+            joint_velocity_value * JOINT_VELOCITY_SCALE,
             previous_processed_action * PREVIOUS_ACTION_SCALE,
         ),
         dim=-1,
     )
     if observation.shape[-1] != ACTOR_OBSERVATION_DIM:
-        raise RuntimeError(f"actor observation is {observation.shape[-1]}-D, expected 96-D")
+        raise RuntimeError(
+            f"actor observation is {observation.shape[-1]}-D, "
+            f"expected {ACTOR_OBSERVATION_DIM}-D"
+        )
     return observation
 
 
@@ -204,8 +157,10 @@ class ObservationHistoryState:
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> "ObservationHistoryState":
-        if history_length != HISTORY_LENGTH or observation_dim != ACTOR_OBSERVATION_DIM:
-            raise ValueError("the task schema is fixed at history [N,61,96]")
+        if history_length != HISTORY_LENGTH or observation_dim <= 0:
+            raise ValueError(
+                f"history length is fixed at {HISTORY_LENGTH} and feature dimension must be positive"
+            )
         return cls(
             history=(
                 torch.zeros(
@@ -236,7 +191,7 @@ class ObservationHistoryState:
             ids = env_ids.to(device=self.current.device, dtype=torch.long)
         if observation.shape == self.current.shape:
             observation = observation[ids]
-        if observation.shape != (ids.numel(), ACTOR_OBSERVATION_DIM):
+        if observation.shape != (ids.numel(), self.current.shape[-1]):
             raise ValueError("initial history observation has the wrong shape")
         if self.history is not None:
             self.history[ids] = observation[:, None, :].expand(
@@ -251,7 +206,7 @@ class ObservationHistoryState:
         """Append old current, then replace current with the new observation."""
 
         if new_observation.shape != self.current.shape:
-            raise ValueError("new_observation must have shape [N,96]")
+            raise ValueError("new_observation shape differs from history state")
         if valid_mask is None:
             valid_mask = torch.ones_like(self.initialized)
         if valid_mask.shape != self.initialized.shape:
@@ -266,24 +221,15 @@ class ObservationHistoryState:
         initialize_mask = valid_mask & ~was_initialized
         advance_mask = valid_mask & was_initialized
 
-        # A policy step advances almost every environment. Building the next
-        # contiguous history once avoids multiple ~96 MB gather/clone/scatter
-        # passes at 4096 environments while preserving oldest-to-newest order.
-        if torch.any(advance_mask):
-            next_history = torch.cat(
-                (self.history[:, 1:], self.current[:, None, :]), dim=1
-            )
-            preserve_mask = ~advance_mask & ~initialize_mask
-            if torch.any(preserve_mask):
-                next_history[preserve_mask] = self.history[preserve_mask]
-            self.history = next_history
-
-        initialize_ids = torch.nonzero(initialize_mask, as_tuple=False).flatten()
-        if initialize_ids.numel() > 0:
-            initial = new_observation[initialize_ids]
-            self.history[initialize_ids] = initial[:, None, :].expand(
-                -1, HISTORY_LENGTH, -1
-            )
+        next_history = torch.cat(
+            (self.history[:, 1:], self.current[:, None, :]), dim=1
+        )
+        next_history[~advance_mask] = self.history[~advance_mask]
+        initial = new_observation[initialize_mask]
+        next_history[initialize_mask] = initial[:, None, :].expand(
+            -1, HISTORY_LENGTH, -1
+        )
+        self.history = next_history
 
         self.current[valid_mask] = new_observation[valid_mask]
         self.initialized[valid_mask] = True
@@ -291,7 +237,7 @@ class ObservationHistoryState:
 
 @dataclass
 class ObservationDelayState:
-    """Per-environment integer policy-step observation latency."""
+    """Integer policy-step latency with independent partial-reset state."""
 
     buffer: torch.Tensor
     initialized: torch.Tensor
@@ -329,78 +275,59 @@ class ObservationDelayState:
         self,
         observation: torch.Tensor,
         delay_steps: torch.Tensor,
-        active_mask: torch.Tensor | None = None,
+        active_mask: torch.Tensor,
     ) -> torch.Tensor:
         if observation.shape != (self.buffer.shape[0], ACTOR_OBSERVATION_DIM):
-            raise ValueError("observation must have shape [N,96]")
+            raise ValueError(
+                f"observation must have shape [N,{ACTOR_OBSERVATION_DIM}]"
+            )
         if delay_steps.shape != self.initialized.shape or delay_steps.dtype not in (
             torch.int32,
             torch.int64,
         ):
             raise ValueError("delay_steps must be an integer tensor with shape [N]")
-        if torch.any((delay_steps < 0) | (delay_steps > self.max_delay_steps)):
-            raise ValueError("observation delay exceeds the allocated buffer")
-        if active_mask is None:
-            active_mask = torch.ones_like(self.initialized)
         if active_mask.shape != self.initialized.shape or active_mask.dtype != torch.bool:
             raise ValueError("active_mask must be boolean with shape [N]")
-
         initialize = active_mask & ~self.initialized
-        initialize_ids = torch.nonzero(initialize, as_tuple=False).flatten()
-        if initialize_ids.numel() > 0:
-            self.buffer[initialize_ids] = observation[initialize_ids, None, :]
-            self.initialized[initialize_ids] = True
-
-        advance = active_mask & self.initialized & ~initialize
-        advance_ids = torch.nonzero(advance, as_tuple=False).flatten()
-        if advance_ids.numel() > 0:
-            selected = self.buffer[advance_ids].clone()
-            selected[:, :-1] = selected[:, 1:].clone()
-            selected[:, -1] = observation[advance_ids]
-            self.buffer[advance_ids] = selected
+        advance = active_mask & self.initialized
+        initial = observation[initialize, None, :]
+        self.buffer[initialize] = initial.expand(-1, self.buffer.shape[1], -1)
+        advanced = torch.cat(
+            (self.buffer[advance, 1:], observation[advance, None, :]), dim=1
+        )
+        self.buffer[advance] = advanced
+        self.initialized[active_mask] = True
 
         result = observation.clone()
-        ready_ids = torch.nonzero(active_mask & self.initialized, as_tuple=False).flatten()
-        if ready_ids.numel() > 0:
-            read_index = self.max_delay_steps - delay_steps[ready_ids]
-            result[ready_ids] = self.buffer[ready_ids, read_index]
+        ready_ids = torch.nonzero(active_mask, as_tuple=False).flatten()
+        read_index = self.max_delay_steps - delay_steps[ready_ids]
+        result[ready_ids] = self.buffer[ready_ids, read_index]
         return result
 
 
-def normalize_to_minus_one_one(
-    value: torch.Tensor, lower: torch.Tensor | float, upper: torch.Tensor | float
+def normalize_features(
+    values: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
 ) -> torch.Tensor:
-    """Map a configured training range to [-1,1], with no runtime normalizer."""
+    """Normalize explicit feature bounds to [-1, 1]; singleton bounds map to zero."""
 
-    low = torch.as_tensor(lower, device=value.device, dtype=value.dtype)
-    high = torch.as_tensor(upper, device=value.device, dtype=value.dtype)
-    if torch.any(high <= low):
-        raise ValueError("normalization upper bound must exceed lower bound")
-    return torch.clamp(2.0 * (value - low) / (high - low) - 1.0, -1.0, 1.0)
-
-
-def assemble_teacher_extrinsics(
-    values: Mapping[str, torch.Tensor],
-    bounds: Mapping[str, tuple[torch.Tensor | float, torch.Tensor | float]],
-    ordered_names: Sequence[str],
-) -> torch.Tensor:
-    """Normalize and concatenate only independent randomized extrinsics."""
-
-    if not ordered_names:
-        raise ValueError("teacher extrinsics cannot be empty")
-    normalized: list[torch.Tensor] = []
-    for name in ordered_names:
-        if name in DERIVED_OR_PRIVILEGED_ONLY_NAMES:
-            raise ValueError(f"derived quantity {name!r} cannot enter the teacher encoder")
-        if name not in values or name not in bounds:
-            raise KeyError(f"missing value or bounds for extrinsic {name!r}")
-        value = values[name]
-        low, high = bounds[name]
-        item = normalize_to_minus_one_one(value, low, high)
-        if item.ndim == 1:
-            item = item.unsqueeze(-1)
-        normalized.append(item)
-    return torch.cat(normalized, dim=-1)
+    expected = (values.shape[-1],)
+    if lower.shape != expected or upper.shape != expected:
+        raise ValueError(f"normalization bounds must both have shape {expected}")
+    if not values.is_floating_point() or torch.any(~torch.isfinite(values)):
+        raise ValueError("features to normalize must be finite floating-point values")
+    lower = lower.to(device=values.device, dtype=values.dtype)
+    upper = upper.to(device=values.device, dtype=values.dtype)
+    if torch.any(~torch.isfinite(lower)) or torch.any(~torch.isfinite(upper)):
+        raise ValueError("normalization bounds must be finite")
+    width = upper - lower
+    if torch.any(width < 0.0):
+        raise ValueError("normalization bounds must be ordered")
+    safe_width = torch.where(width > 0.0, width, torch.ones_like(width))
+    normalized = 2.0 * (values - lower) / safe_width - 1.0
+    normalized = torch.where(width > 0.0, normalized, torch.zeros_like(normalized))
+    return torch.clamp(normalized, -1.0, 1.0)
 
 
 def _resolve_asset(env: Any, asset_cfg: Any | None) -> Any:
@@ -448,9 +375,9 @@ def previous_processed_action(env: Any) -> torch.Tensor:
 def actor_observation(
     env: Any,
     asset_cfg: Any | None = None,
-    noise_cfg: ObservationNoiseCfg | None = None,
     *,
     use_cache: bool = True,
+    active_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Isaac Lab observation-manager adapter for the complete 96-D vector."""
 
@@ -458,10 +385,6 @@ def actor_observation(
         return env._actor_observation_cache
     asset = _resolve_asset(env, asset_cfg)
     ids = _policy_joint_ids(env, asset_cfg)
-    if noise_cfg is None:
-        noise_cfg = env.actor_observation_noise_cfg
-    if noise_cfg is not None:
-        noise_cfg = noise_cfg.scaled(env.observation_noise_scale)
     # Component manager functions above are scaled; this call uses the pure
     # assembler so there is a single schema assertion and no double scaling.
     observation = assemble_actor_observation(
@@ -474,116 +397,203 @@ def actor_observation(
         _reference(env),
         asset.data.joint_vel[:, ids],
         previous_processed_action(env),
-        noise_cfg=noise_cfg,
     )
-    delay_state = env.observation_delay_state
-    if delay_state.max_delay_steps > 0:
-        active = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
-        observation = delay_state.apply(observation, env.observation_delay_steps, active)
-    return observation
+    if active_mask is None:
+        active_mask = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
+    return env.observation_delay_state.apply(
+        observation, env.observation_delay_steps, active_mask
+    )
+
+
+def _is_observation_shape_probe(env: Any) -> bool:
+    """Isaac Lab calls terms once while constructing, before binding, its manager."""
+
+    return not hasattr(env, "observation_manager")
+
+
+def _shape_placeholder(env: Any, *feature_shape: int) -> torch.Tensor:
+    return torch.empty((), device=env.device).expand(env.num_envs, *feature_shape)
 
 
 def current_actor_observation(env: Any) -> torch.Tensor:
     if not hasattr(env, "observation_history_state"):
-        return torch.zeros((env.num_envs, ACTOR_OBSERVATION_DIM), device=env.device)
+        if _is_observation_shape_probe(env):
+            return _shape_placeholder(env, ACTOR_OBSERVATION_DIM)
+        raise RuntimeError("actor observation requested before MDP startup")
     return env.observation_history_state.current
 
 
 def actor_observation_history(env: Any) -> torch.Tensor:
     if not hasattr(env, "observation_history_state"):
-        return torch.zeros(
-            (env.num_envs, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM), device=env.device
-        )
+        if _is_observation_shape_probe(env):
+            return _shape_placeholder(env, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM)
+        raise RuntimeError("actor history requested before MDP startup")
     result = env.observation_history_state.history
     if result is None:
         raise RuntimeError("actor history observation is disabled for this environment")
     if result.shape[1:] != (HISTORY_LENGTH, ACTOR_OBSERVATION_DIM):
-        raise RuntimeError("actor history schema must be [N,61,96]")
+        raise RuntimeError(
+            f"actor history schema must be [N,{HISTORY_LENGTH},{ACTOR_OBSERVATION_DIM}]"
+        )
     return result
 
 
-def teacher_extrinsics(env: Any, expected_dim: int | None = None) -> torch.Tensor:
-    """Manager adapter for independently randomized, pre-normalized extrinsics."""
+def teacher_static(env: Any, expected_dim: int | None = None) -> torch.Tensor:
+    """Return 39 normalized domain features plus normalized terrain slope."""
 
-    value = getattr(env, "normalized_teacher_extrinsics", None)
-    if value is None:
-        if expected_dim is not None:
-            return torch.zeros((env.num_envs, expected_dim), device=env.device)
+    if expected_dim is not None and expected_dim != TEACHER_STATIC_DIM:
+        raise ValueError("teacher static dimension differs from observation config")
+    domain = getattr(env, "normalized_teacher_static_domain", None)
+    if domain is None:
+        if _is_observation_shape_probe(env):
+            return _shape_placeholder(env, TEACHER_STATIC_DIM)
+        raise RuntimeError("teacher static privilege requested before domain initialization")
+    if domain.shape != (env.num_envs, TEACHER_STATIC_DOMAIN_DIM):
+        raise ValueError("normalized teacher static domain must have shape [N,39]")
+    slope = torch.clamp(
+        2.0 * (env.slope[:, None] - SLOPE_LOWER) / (SLOPE_UPPER - SLOPE_LOWER)
+        - 1.0,
+        -1.0,
+        1.0,
+    )
+    result = torch.cat((domain, slope), dim=-1)
+    if result.shape != (env.num_envs, TEACHER_STATIC_DIM):
         raise RuntimeError(
-            "reset randomization must install normalized_teacher_extrinsics from independent variables"
+            f"teacher static privilege must have shape [N,{TEACHER_STATIC_DIM}]"
         )
-    if value.ndim != 2 or value.shape[0] != env.num_envs:
-        raise ValueError("normalized_teacher_extrinsics must have shape [N,E]")
-    return value
+    return result
 
 
-def critic_privileged_state(env: Any, expected_dim: int | None = None) -> torch.Tensor:
-    """Manager adapter for teacher extrinsics plus simulator-only diagnostics."""
-
-    if not all(
-        hasattr(env, name)
-        for name in (
-            "analytic_force_state",
-            "path_tangent_w",
-            "path_lateral_w",
-            "path_normal_w",
-            "rickshaw_state",
-            "stability_state",
-        )
-    ):
-        if expected_dim is not None:
-            return torch.zeros((env.num_envs, expected_dim), device=env.device)
-        raise RuntimeError("critic privileged state was requested before MDP startup")
-    robot = env.scene["robot"]
-    cart = env.scene["rickshaw"]
-
-    def slope_components(velocity_w: torch.Tensor) -> torch.Tensor:
-        return torch.stack(
-            (
-                torch.sum(velocity_w * env.path_tangent_w, dim=-1),
-                torch.sum(velocity_w * env.path_lateral_w, dim=-1),
-                torch.sum(velocity_w * env.path_normal_w, dim=-1),
-            ),
-            dim=-1,
-        )
-
-    analytic = env.analytic_force_state
-    return torch.cat(
+def _slope_components(env: Any, vector_w: torch.Tensor) -> torch.Tensor:
+    return torch.stack(
         (
-            teacher_extrinsics(env),
-            env.slope[:, None],
-            slope_components(robot.data.root_lin_vel_w),
-            slope_components(cart.data.root_lin_vel_w),
-            env.rickshaw_state.pitch[:, None],
-            env.rickshaw_state.wheel_normal_force,
-            env.rickshaw_state.d6_wrench_w.reshape(env.num_envs, -1),
-            env.rickshaw_state.d6_residual[:, None],
-            analytic.a_s[:, None],
-            torch.stack((analytic.t_s, analytic.t_n), dim=-1),
-            env.stability_state.zmp_margin[:, None],
+            torch.sum(vector_w * env.path_tangent_w, dim=-1),
+            torch.sum(vector_w * env.path_lateral_w, dim=-1),
+            torch.sum(vector_w * env.path_normal_w, dim=-1),
         ),
         dim=-1,
     )
 
 
+def dynamic_privileged_observation(env: Any) -> torch.Tensor:
+    """Assemble the raw 21-D dynamic teacher/critic state in the slope frame."""
+
+    required = (
+        "path_tangent_w",
+        "path_lateral_w",
+        "path_normal_w",
+        "rickshaw_state",
+        "curriculum_stage_per_env",
+    )
+    if not all(hasattr(env, name) for name in required):
+        raise RuntimeError("dynamic privilege requested before MDP startup")
+    robot = env.scene["robot"]
+    cart = env.scene["rickshaw"]
+    cart_velocity_w = cart.data.root_lin_vel_w
+    from .curricula import CurriculumStage
+
+    static_load = env.curriculum_stage_per_env == int(CurriculumStage.STATIC_HAND_LOAD)
+    cart_velocity_w = torch.where(
+        static_load[:, None], torch.zeros_like(cart_velocity_w), cart_velocity_w
+    )
+    basis = torch.stack(
+        (env.path_tangent_w, env.path_lateral_w, env.path_normal_w), dim=1
+    )
+    wrench_w = env.rickshaw_state.d6_wrench_w
+    force_sln = torch.einsum("nsw,ncw->nsc", wrench_w[..., :3], basis)
+    torque_sln = torch.einsum("nsw,ncw->nsc", wrench_w[..., 3:], basis)
+    d6_wrench_sln = torch.cat((force_sln, torque_sln), dim=-1).reshape(
+        env.num_envs, -1
+    )
+    result = torch.cat(
+        (
+            _slope_components(env, robot.data.root_lin_vel_w),
+            _slope_components(env, cart_velocity_w),
+            env.rickshaw_state.pitch[:, None],
+            env.rickshaw_state.wheel_normal_force,
+            d6_wrench_sln,
+        ),
+        dim=-1,
+    )
+    if result.shape != (env.num_envs, TEACHER_DYNAMIC_DIM):
+        raise RuntimeError(
+            f"dynamic privilege must have shape [N,{TEACHER_DYNAMIC_DIM}]"
+        )
+    return result
+
+
+def teacher_dynamic_history(env: Any, expected_dim: int | None = None) -> torch.Tensor:
+    """Return the causal 61-frame history of raw dynamic privilege."""
+
+    if expected_dim is not None and expected_dim != TEACHER_DYNAMIC_DIM:
+        raise ValueError("teacher dynamic dimension differs from observation config")
+    state = getattr(env, "teacher_dynamic_history_state", None)
+    if state is None:
+        if _is_observation_shape_probe(env):
+            return _shape_placeholder(env, HISTORY_LENGTH, TEACHER_DYNAMIC_DIM)
+        raise RuntimeError("teacher dynamic history requested before MDP startup")
+    if state.history is None or state.history.shape != (
+        env.num_envs,
+        HISTORY_LENGTH,
+        TEACHER_DYNAMIC_DIM,
+    ):
+        raise RuntimeError(
+            "teacher dynamic history must have shape "
+            f"[N,{HISTORY_LENGTH},{TEACHER_DYNAMIC_DIM}]"
+        )
+    return state.history
+
+
+def critic_privileged_state(env: Any, expected_dim: int | None = None) -> torch.Tensor:
+    """Return static40 + current dynamic21 + residual/ZMP/acceleration3."""
+
+    if expected_dim is not None and expected_dim != CRITIC_PRIVILEGED_DIM:
+        raise ValueError("critic privilege dimension differs from observation config")
+    state = getattr(env, "teacher_dynamic_history_state", None)
+    if state is None:
+        if _is_observation_shape_probe(env):
+            return _shape_placeholder(env, CRITIC_PRIVILEGED_DIM)
+        raise RuntimeError("critic privilege requested before MDP startup")
+    result = torch.cat(
+        (
+            teacher_static(env),
+            state.current,
+            env.rickshaw_state.d6_residual[:, None],
+            env.stability_state.zmp_margin[:, None],
+            env.analytic_force_state.a_s[:, None],
+        ),
+        dim=-1,
+    )
+    if result.shape != (env.num_envs, CRITIC_PRIVILEGED_DIM):
+        raise RuntimeError(
+            f"critic privilege must have shape [N,{CRITIC_PRIVILEGED_DIM}]"
+        )
+    return result
+
+
 __all__ = [
     "ACTOR_OBSERVATION_DIM",
+    "CRITIC_PRIVILEGED_DIM",
     "HISTORY_LENGTH",
-    "INDEPENDENT_EXTRINSIC_NAMES",
-    "ObservationHistoryState",
+    "TEACHER_DYNAMIC_DIM",
+    "TEACHER_DYNAMIC_FEATURE_NAMES",
+    "TEACHER_STATIC_DIM",
+    "TEACHER_STATIC_DOMAIN_DIM",
+    "TEACHER_STATIC_FEATURE_NAMES",
     "ObservationDelayState",
-    "ObservationNoiseCfg",
+    "ObservationHistoryState",
     "actor_observation",
     "actor_observation_history",
     "assemble_actor_observation",
-    "assemble_teacher_extrinsics",
     "base_angular_velocity",
     "critic_privileged_state",
     "current_actor_observation",
+    "dynamic_privileged_observation",
     "joint_velocity",
-    "normalize_to_minus_one_one",
     "previous_processed_action",
     "projected_gravity",
-    "teacher_extrinsics",
+    "normalize_features",
+    "teacher_dynamic_history",
+    "teacher_static",
     "wrap_to_pi",
 ]

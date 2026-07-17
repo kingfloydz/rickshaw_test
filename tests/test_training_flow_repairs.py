@@ -13,13 +13,12 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from _rollout_audit import (  # noqa: E402
     ACTION_DIM,
-    FORMAL_NUM_ENVS,
-    PHYSICS_VALUE_NAMES,
+    DEFAULT_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
     SIGNED_SLOPES,
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
-    formal_slope_environment_assignment,
+    slope_environment_assignment,
 )
 from train_context import _normalize_shard  # noqa: E402
 
@@ -31,13 +30,6 @@ def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
         "teacher_action_mean": torch.zeros(batch_size, ACTION_DIM),
         "teacher_action_std": torch.ones(batch_size, ACTION_DIM),
         "z_star": torch.zeros(batch_size, 16),
-        "phase_target": torch.zeros(batch_size, 2),
-        "frequency_target": torch.zeros(batch_size, 1),
-        "contact_target": torch.zeros(batch_size, 2),
-        "cart_lag_target": torch.zeros(batch_size, 1),
-        "gait_mask": torch.zeros(batch_size, 1, dtype=torch.bool),
-        "lag_mask": torch.zeros(batch_size, 1, dtype=torch.bool),
-        "teacher_extrinsics": torch.zeros(batch_size, len(PHYSICS_VALUE_NAMES)),
         "curriculum_stage": torch.ones(batch_size, 1, dtype=torch.long),
         "collection_segment": torch.zeros(batch_size, 1, dtype=torch.long),
         "environment_id": torch.arange(batch_size).unsqueeze(-1),
@@ -45,9 +37,6 @@ def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
         "slope": torch.zeros(batch_size, 1),
         "terrain_level": torch.zeros(batch_size, 1, dtype=torch.long),
         "terrain_type": torch.zeros(batch_size, 1, dtype=torch.long),
-        "physics_values": torch.zeros(batch_size, len(PHYSICS_VALUE_NAMES)),
-        "joint_model_error": torch.zeros(batch_size, ACTION_DIM),
-        "observation_noise_scale": torch.zeros(batch_size, 1),
     }
 
 
@@ -62,7 +51,7 @@ def _write_rollout_shard(path: Path, tensors: dict[str, torch.Tensor], *, root: 
 
 
 def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
-    assignment = formal_slope_environment_assignment(FORMAL_NUM_ENVS)
+    assignment = slope_environment_assignment(DEFAULT_NUM_ENVS)
     counts = torch.bincount(
         assignment["slope_index"], minlength=len(SIGNED_SLOPES)
     )
@@ -104,8 +93,8 @@ def test_formal_rollout_shard_rejects_aliases_and_legacy_shapes(tmp_path: Path) 
 
     shape_shard = tmp_path / "shape.pt"
     shape_tensors = _canonical_rollout_tensors()
-    shape_tensors["phase_target"] = torch.zeros(2)
+    shape_tensors["z_star"] = torch.zeros(2)
     _write_rollout_shard(shape_shard, shape_tensors)
 
-    with pytest.raises(ValueError, match="phase_target must have shape"):
+    with pytest.raises(ValueError, match="z_star must have shape"):
         _normalize_shard(shape_shard)

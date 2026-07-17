@@ -18,9 +18,7 @@ class G1RickshawPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 
 @configclass
-class G1RickshawModelCfg(RslRlMLPModelCfg):
-    """Custom actor/critic model configuration for the required latent sweep."""
-
+class G1RickshawActorModelCfg(RslRlMLPModelCfg):
     latent_dim: int = 16
 
 
@@ -38,19 +36,24 @@ class G1RickshawTeacherPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     empirical_normalization = False
     clip_actions = 1.0
     obs_groups = {
-        "actor": ["policy", "teacher_extrinsics"],
-        "critic": ["policy", "teacher_extrinsics", "critic"],
+        "actor": [
+            "policy",
+            "history",
+            "teacher_dynamic_history",
+            "teacher_static",
+        ],
+        "critic": ["policy", "critic"],
     }
-    actor = G1RickshawModelCfg(
+    actor = G1RickshawActorModelCfg(
         class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawActorModel",
         hidden_dims=[512, 256, 128],
         activation="elu",
         obs_normalization=False,
         distribution_cfg=_gaussian_cfg(),
     )
-    critic = G1RickshawModelCfg(
+    critic = RslRlMLPModelCfg(
         class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawCriticModel",
-        hidden_dims=[512, 256, 128],
+        hidden_dims=[256, 128],
         activation="elu",
         obs_normalization=False,
         distribution_cfg=None,
@@ -80,9 +83,9 @@ class G1RickshawStudentPPORunnerCfg(G1RickshawTeacherPPORunnerCfg):
     run_name = "s2"
     obs_groups = {
         "actor": ["policy", "history"],
-        "critic": ["policy", "history", "critic"],
+        "critic": ["policy", "critic"],
     }
-    actor = G1RickshawModelCfg(
+    actor = G1RickshawActorModelCfg(
         class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawActorModel",
         hidden_dims=[512, 256, 128],
         activation="elu",

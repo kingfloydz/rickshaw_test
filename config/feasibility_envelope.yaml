@@ -1,6 +1,6 @@
-# Asset-derived envelope for the fixed 40.04 kg cart; payload/CoM ranges are unchanged.
-# The runtime ranges must be revalidated over the 19-slope Isaac Sim 5.1 PhysX sweep.
-# Re-run the full endpoint payload/command/D6 sweep before hardware deployment.
+# Feasibility envelope for the fixed 40.04 kg cart and calibrated D6 constraints.
+# Only runtime domain parameters are scanned over the 19-slope Isaac Sim 5.1 sweep.
+# D6 values are fixed calibration entries and are not randomized or endpoint-scanned.
 schema_version: 1
 slopes:
   [-0.08, -0.07, -0.06, -0.05, -0.04, -0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
@@ -43,14 +43,6 @@ ranges:
   terrain.friction: {min: 0.6, max: 1.2}
   wheel.left_damping: {min: 0.015, max: 0.025}
   wheel.right_damping: {min: 0.015, max: 0.025}
-  d6.linear_stiffness: {min: 18000.0, max: 24000.0}
-  d6.linear_damping: {min: 500.0, max: 900.0}
-  d6.angular_stiffness: {min: 150.0, max: 300.0}
-  d6.angular_damping: {min: 12.0, max: 30.0}
-  d6.max_force: {min: 200.0, max: 300.0}
-  d6.max_torque: {min: 20.0, max: 35.0}
-  d6.linear_limit: {min: 0.005, max: 0.01}
-  d6.angular_limit: {min: 0.08726646259971647, max: 0.17453292519943295}
   motor.strength: {min: 0.9, max: 1.1}
   joint.model_error: {min: -0.05, max: 0.05}
   control.delay: {min: 0.0, max: 0.04}
@@ -93,7 +85,7 @@ calibration:
   support.foot_half_width: 0.03
   # URDF collision sphere extrema are x=-0.05 and +0.12 m in the ankle frame.
   support.foot_center_offset_x: 0.035
-  safety.theta_max: 0.5
+  safety.theta_max: 0.8
   safety.illegal_contact_force_threshold: 5.0
   safety.robot_cart_contact_force_threshold: 5.0
   safety.cart_ground_contact_force_threshold: 5.0

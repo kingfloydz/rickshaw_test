@@ -13,13 +13,16 @@ REWARD_WEIGHTS = {
     "heading_error_l2": -0.5,
     "zmp_margin_barrier": -2.0,
     "hitch_height_exp": 0.5,
+    "hitch_height_recovery_l2": -0.25,
     "fat2_prior_exp": 0.1,
-    "feet_air_time": 0.10,
+    "feet_single_stance": 0.10,
     "feet_slide": -0.10,
     "terrain_normal_velocity_l2": -0.5,
     "joint_power_l1": -1.0e-4,
     "processed_action_rate_l2": -0.01,
     "processed_action_jerk_l2": -0.005,
+    "hip_yaw_roll_reference_l2": -0.05,
+    "pelvis_height_limits_l2": -1.0,
     "joint_position_limits": -1.0,
     "termination": -200.0,
 }
@@ -27,19 +30,25 @@ REWARD_WEIGHTS = {
 # Every reward callable returns a dimensionless value.  Unit-valued SI
 # normalizers make the formerly implicit units explicit without changing the
 # numerical reward signal or any persisted policy training scale.
-SPEED_ERROR_SCALE_MPS = 0.25
+SPEED_ERROR_SCALE_MPS = 0.35
 LATERAL_ERROR_SCALE_M = 0.30
 HEADING_ERROR_SCALE_RAD = 0.30
 ZMP_MARGIN_SCALE_M = 0.02
 HITCH_HEIGHT_ERROR_SCALE_M = 0.02
+HITCH_HEIGHT_RECOVERY_DEADBAND_M = 0.05
+HITCH_HEIGHT_RECOVERY_SCALE_M = 0.05
 FAT2_ERROR_SCALE_RAD = 0.12
-FEET_AIR_TIME_NORMALIZER_S = 1.0
-FEET_AIR_TIME_THRESHOLD_S = 0.4
+FEET_SINGLE_STANCE_NORMALIZER_S = 1.0
+FEET_SINGLE_STANCE_CAP_S = 0.4
 FEET_SLIDE_NORMALIZER_MPS = 1.0
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
 PROCESSED_ACTION_RATE_SCALE_RAD = 0.05
 PROCESSED_ACTION_JERK_SCALE_RAD = 0.03
+HIP_YAW_ROLL_REFERENCE_SCALE_RAD = 0.20
+HIP_YAW_ROLL_POLICY_INDICES = (1, 2, 7, 8)
+PELVIS_HEIGHT_BOUNDS_M = (0.65, 0.80)
+PELVIS_HEIGHT_ERROR_SCALE_M = 0.05
 JOINT_LIMIT_NORMALIZER_RAD = 1.0
 
 REWARD_NORMALIZATION_SCALES = {
@@ -48,8 +57,15 @@ REWARD_NORMALIZATION_SCALES = {
     "heading_error_l2": {"scale": HEADING_ERROR_SCALE_RAD, "unit": "rad"},
     "zmp_margin_barrier": {"scale": ZMP_MARGIN_SCALE_M, "unit": "m"},
     "hitch_height_exp": {"scale": HITCH_HEIGHT_ERROR_SCALE_M, "unit": "m"},
+    "hitch_height_recovery_l2": {
+        "scale": HITCH_HEIGHT_RECOVERY_SCALE_M,
+        "unit": "m",
+    },
     "fat2_prior_exp": {"scale": FAT2_ERROR_SCALE_RAD, "unit": "rad"},
-    "feet_air_time": {"scale": FEET_AIR_TIME_NORMALIZER_S, "unit": "s"},
+    "feet_single_stance": {
+        "scale": FEET_SINGLE_STANCE_NORMALIZER_S,
+        "unit": "s",
+    },
     "feet_slide": {"scale": FEET_SLIDE_NORMALIZER_MPS, "unit": "m/s"},
     "terrain_normal_velocity_l2": {
         "scale": TERRAIN_NORMAL_VELOCITY_SCALE_MPS,
@@ -63,6 +79,14 @@ REWARD_NORMALIZATION_SCALES = {
     "processed_action_jerk_l2": {
         "scale": PROCESSED_ACTION_JERK_SCALE_RAD,
         "unit": "rad",
+    },
+    "hip_yaw_roll_reference_l2": {
+        "scale": HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
+        "unit": "rad",
+    },
+    "pelvis_height_limits_l2": {
+        "scale": PELVIS_HEIGHT_ERROR_SCALE_M,
+        "unit": "m",
     },
     "joint_position_limits": {"scale": JOINT_LIMIT_NORMALIZER_RAD, "unit": "rad"},
     "termination": {"scale": 1.0, "unit": "binary"},
@@ -96,6 +120,24 @@ def hitch_height_exp_value(
     return torch.exp(
         -torch.square((hitch_height - target_height) / HITCH_HEIGHT_ERROR_SCALE_M)
     ) * two_wheel_contact.to(hitch_height.dtype)
+
+
+def hitch_height_recovery_l2_value(
+    hitch_height: torch.Tensor,
+    target_height: float,
+    two_wheel_contact: torch.Tensor,
+    *,
+    deadband: float = HITCH_HEIGHT_RECOVERY_DEADBAND_M,
+    scale: float = HITCH_HEIGHT_RECOVERY_SCALE_M,
+) -> torch.Tensor:
+    """Provide a restoring gradient after hitch error leaves the local tracking region."""
+
+    if deadband < 0.0:
+        raise ValueError("hitch height recovery deadband must be non-negative")
+    if scale <= 0.0:
+        raise ValueError("hitch height recovery scale must be positive")
+    violation = torch.relu(torch.abs(hitch_height - target_height) - deadband)
+    return torch.square(violation / scale) * two_wheel_contact.to(hitch_height.dtype)
 
 
 def fat2_prior_exp_value(
@@ -144,6 +186,61 @@ def processed_action_jerk_l2_value(
     return torch.mean(torch.square(jerk / PROCESSED_ACTION_JERK_SCALE_RAD), dim=-1)
 
 
+def hip_yaw_roll_reference_l2_value(
+    joint_position: torch.Tensor,
+    reference_position: torch.Tensor,
+    scale: float = HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
+) -> torch.Tensor:
+    if joint_position.shape != reference_position.shape:
+        raise ValueError("hip joint positions and references must have identical shapes")
+    if scale <= 0.0:
+        raise ValueError("hip reference error scale must be positive")
+    return torch.mean(torch.square((joint_position - reference_position) / scale), dim=-1)
+
+
+def feet_single_stance_value(
+    current_air_time: torch.Tensor,
+    current_contact_time: torch.Tensor,
+    moving: torch.Tensor,
+    *,
+    cap: float = FEET_SINGLE_STANCE_CAP_S,
+) -> torch.Tensor:
+    """Return capped biped single-stance duration without a hidden gait phase."""
+
+    if current_air_time.shape != current_contact_time.shape:
+        raise ValueError("foot air/contact-time tensors must have identical shapes")
+    if current_air_time.ndim != 2 or current_air_time.shape[1] != 2:
+        raise ValueError("single-stance reward requires exactly two feet")
+    if moving.shape != current_air_time.shape[:1]:
+        raise ValueError("moving gate must contain one value per environment")
+    if cap <= 0.0:
+        raise ValueError("single-stance cap must be positive")
+    in_contact = current_contact_time > 0.0
+    in_mode_time = torch.where(in_contact, current_contact_time, current_air_time)
+    single_stance = torch.sum(in_contact.to(dtype=torch.int32), dim=-1) == 1
+    reward = torch.min(
+        torch.where(single_stance[:, None], in_mode_time, 0.0), dim=-1
+    ).values
+    reward = torch.clamp(reward, max=cap) / FEET_SINGLE_STANCE_NORMALIZER_S
+    return reward * moving.to(dtype=reward.dtype)
+
+
+def pelvis_height_limits_l2_value(
+    pelvis_height: torch.Tensor,
+    bounds: tuple[float, float] = PELVIS_HEIGHT_BOUNDS_M,
+    scale: float = PELVIS_HEIGHT_ERROR_SCALE_M,
+) -> torch.Tensor:
+    """Penalize pelvis height only after it leaves the allowed interval."""
+
+    lower, upper = bounds
+    if upper <= lower:
+        raise ValueError("pelvis height upper bound must exceed its lower bound")
+    if scale <= 0.0:
+        raise ValueError("pelvis height error scale must be positive")
+    violation = torch.relu(lower - pelvis_height) + torch.relu(pelvis_height - upper)
+    return torch.square(violation / scale)
+
+
 def track_speed_exp(env: Any) -> torch.Tensor:
     return track_speed_exp_value(env.command_state.v_ref, env.policy_robot_speed_s)
 
@@ -168,6 +265,20 @@ def hitch_height_exp(env: Any) -> torch.Tensor:
     )
 
 
+def hitch_height_recovery_l2(
+    env: Any,
+    deadband: float = HITCH_HEIGHT_RECOVERY_DEADBAND_M,
+    scale: float = HITCH_HEIGHT_RECOVERY_SCALE_M,
+) -> torch.Tensor:
+    return hitch_height_recovery_l2_value(
+        env.rickshaw_state.hitch_height,
+        env.rickshaw_pose_cfg.hitch_height_target,
+        env.rickshaw_state.two_wheel_contact,
+        deadband=deadband,
+        scale=scale,
+    )
+
+
 def fat2_prior_exp(env: Any, sigma: float = FAT2_ERROR_SCALE_RAD) -> torch.Tensor:
     return fat2_prior_exp_value(
         env.stability_state.torso_pitch,
@@ -185,24 +296,22 @@ def _resolve_body_ids(entity_cfg: Any | None, fallback: Any) -> Any:
     return fallback
 
 
-def feet_air_time(
+def feet_single_stance(
     env: Any,
     sensor_cfg: Any | None = None,
-    threshold: float = FEET_AIR_TIME_THRESHOLD_S,
+    cap: float = FEET_SINGLE_STANCE_CAP_S,
 ) -> torch.Tensor:
-    """Reward first contact after 0.4 s of air time, gated for moving commands."""
+    """Reward sustained single stance, capped at 0.4 s and gated while moving."""
 
-    if threshold != FEET_AIR_TIME_THRESHOLD_S:
-        raise ValueError("the specified feet-air-time threshold is 0.4 s")
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
     body_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    first_contact = sensor.compute_first_contact(env.step_dt)[:, body_ids]
-    last_air_time = sensor.data.last_air_time[:, body_ids]
-    reward = torch.sum((last_air_time - threshold) * first_contact, dim=-1)
-    reward = reward / FEET_AIR_TIME_NORMALIZER_S
-    reward = reward * (env.command_state.v_ref > 0.1).to(reward.dtype)
-    return reward
+    return feet_single_stance_value(
+        sensor.data.current_air_time[:, body_ids],
+        sensor.data.current_contact_time[:, body_ids],
+        env.command_state.v_ref > 0.1,
+        cap=cap,
+    )
 
 
 def feet_slide(
@@ -266,6 +375,49 @@ def processed_action_jerk_l2(env: Any) -> torch.Tensor:
     )
 
 
+def hip_yaw_roll_reference_l2(
+    env: Any,
+    policy_indices: tuple[int, ...] = HIP_YAW_ROLL_POLICY_INDICES,
+    scale: float = HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
+) -> torch.Tensor:
+    robot = env.scene["robot"]
+    policy_position = robot.data.joint_pos[:, env.policy_joint_ids]
+    index = torch.as_tensor(policy_indices, device=policy_position.device, dtype=torch.long)
+    return hip_yaw_roll_reference_l2_value(
+        torch.index_select(policy_position, dim=1, index=index),
+        torch.index_select(env.action_state.q_ref, dim=1, index=index),
+        scale=scale,
+    )
+
+
+def pelvis_height_limits_l2(
+    env: Any,
+    asset_cfg: Any | None = None,
+    bounds: tuple[float, float] = PELVIS_HEIGHT_BOUNDS_M,
+    scale: float = PELVIS_HEIGHT_ERROR_SCALE_M,
+) -> torch.Tensor:
+    """Measure pelvis clearance along the local terrain normal."""
+
+    asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
+    robot = env.scene[asset_name]
+    if asset_cfg is None:
+        pelvis_position_w = robot.data.root_pos_w
+    else:
+        body_ids = _resolve_body_ids(asset_cfg, None)
+        if body_ids is None:
+            raise ValueError("pelvis height reward asset_cfg has no resolved body IDs")
+        configured_position_w = robot.data.body_pos_w[:, body_ids]
+        if configured_position_w.shape[1] != 1:
+            raise ValueError("pelvis height reward requires exactly one configured body")
+        pelvis_position_w = configured_position_w[:, 0]
+    terrain_origin_w = env.scene.terrain.env_origins
+    pelvis_height = torch.sum(
+        (pelvis_position_w - terrain_origin_w) * env.path_normal_w,
+        dim=-1,
+    )
+    return pelvis_height_limits_l2_value(pelvis_height, bounds=bounds, scale=scale)
+
+
 def joint_position_limits(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
     """Isaac Lab soft-limit penalty restricted to the persisted 29 joints."""
 
@@ -295,14 +447,20 @@ def termination(env: Any) -> torch.Tensor:
 
 __all__ = [
     "FAT2_ERROR_SCALE_RAD",
-    "FEET_AIR_TIME_NORMALIZER_S",
-    "FEET_AIR_TIME_THRESHOLD_S",
+    "FEET_SINGLE_STANCE_CAP_S",
+    "FEET_SINGLE_STANCE_NORMALIZER_S",
     "FEET_SLIDE_NORMALIZER_MPS",
     "HEADING_ERROR_SCALE_RAD",
+    "HIP_YAW_ROLL_POLICY_INDICES",
+    "HIP_YAW_ROLL_REFERENCE_SCALE_RAD",
     "HITCH_HEIGHT_ERROR_SCALE_M",
+    "HITCH_HEIGHT_RECOVERY_DEADBAND_M",
+    "HITCH_HEIGHT_RECOVERY_SCALE_M",
     "JOINT_LIMIT_NORMALIZER_RAD",
     "JOINT_POWER_NORMALIZER_W",
     "LATERAL_ERROR_SCALE_M",
+    "PELVIS_HEIGHT_BOUNDS_M",
+    "PELVIS_HEIGHT_ERROR_SCALE_M",
     "PROCESSED_ACTION_JERK_SCALE_RAD",
     "PROCESSED_ACTION_RATE_SCALE_RAD",
     "REWARD_NORMALIZATION_SCALES",
@@ -312,12 +470,17 @@ __all__ = [
     "ZMP_MARGIN_SCALE_M",
     "fat2_prior_exp",
     "fat2_prior_exp_value",
-    "feet_air_time",
+    "feet_single_stance",
+    "feet_single_stance_value",
     "feet_slide",
     "heading_error_l2",
     "heading_error_l2_value",
+    "hip_yaw_roll_reference_l2",
+    "hip_yaw_roll_reference_l2_value",
     "hitch_height_exp",
     "hitch_height_exp_value",
+    "hitch_height_recovery_l2",
+    "hitch_height_recovery_l2_value",
     "joint_position_limits",
     "joint_power_l1",
     "joint_power_l1_value",
@@ -325,6 +488,8 @@ __all__ = [
     "lateral_error_l2_value",
     "processed_action_jerk_l2",
     "processed_action_jerk_l2_value",
+    "pelvis_height_limits_l2",
+    "pelvis_height_limits_l2_value",
     "processed_action_rate_l2",
     "processed_action_rate_l2_value",
     "termination",

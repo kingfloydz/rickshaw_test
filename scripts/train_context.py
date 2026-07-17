@@ -23,27 +23,15 @@ from torch.distributions import Independent, Normal  # noqa: E402
 from g1_rickshaw_lab.provenance import (  # noqa: E402
     extract_checkpoint_metadata,
     save_checkpoint_atomic,
-    sha256_file,
-)
-from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
-    validate_s1_candidate_selection_report,
 )
 from g1_rickshaw_lab.rl import G1RickshawStudentActor, StudentDistillationLoss  # noqa: E402
-from g1_rickshaw_lab.slope_contract import (  # noqa: E402
-    FORMAL_EVALUATION_NUM_ENVS,
-    SLOPE_COUNT,
-)
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
-    ABLATION_VALUE_OPTIONS,
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
-    CHECKPOINT_HASH_HISTORY_KEY,
     CHECKPOINT_LINEAGE_KEY,
     CHECKPOINT_STAGE_KEY,
     GUIDE_MAX_ITERATIONS,
     GUIDE_TRAINING_PARAMETERS,
-    checkpoint_hash_history,
     extract_gaussian_actor_state,
-    load_reward_calibration_report,
     load_stage_checkpoint,
     validate_guide_training_configuration,
     validate_rollout_stage_coverage,
@@ -51,7 +39,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
 
 from _rollout_audit import (  # noqa: E402
     AUDIT_TENSOR_NAMES,
-    FORMAL_NUM_ENVS,
+    DEFAULT_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
     normalize_audit_tensors,
     validate_rollout_sample_audit,
@@ -59,7 +47,6 @@ from _rollout_audit import (  # noqa: E402
 from _training_configuration import (  # noqa: E402
     TRAINING_CONFIGURATION_CHECKPOINT_KEY,
     build_training_configuration,
-    finalize_training_configuration,
 )
 
 
@@ -71,71 +58,37 @@ REQUIRED_TENSORS = (
     "teacher_action_mean",
     "teacher_action_std",
     "z_star",
-    "phase_target",
-    "frequency_target",
-    "contact_target",
-    "cart_lag_target",
-    "gait_mask",
-    "lag_mask",
 )
-def validate_formal_s1_arguments(args: argparse.Namespace) -> None:
-    """Reject every debug switch or guide-critical hyperparameter deviation."""
 
-    deviations: list[str] = []
-    exact = {
-        "max_iterations": GUIDE_MAX_ITERATIONS["s1_context_distillation"],
-        "batch_size": S1_GUIDE_PARAMETERS["batch_size"],
-        "mini_batch_size": S1_GUIDE_PARAMETERS["mini_batch_size"],
-        "context_lr": S1_GUIDE_PARAMETERS["context_learning_rate"],
-        "actor_lr": S1_GUIDE_PARAMETERS["actor_learning_rate"],
-        "max_grad_norm": S1_GUIDE_PARAMETERS["gradient_clip"],
-        "validation_interval": S1_GUIDE_PARAMETERS["validation_interval"],
-        "validation_patience": S1_GUIDE_PARAMETERS["validation_patience"],
-        "max_validation_candidates": S1_GUIDE_PARAMETERS["validation_candidate_count"],
-    }
-    for name, expected in exact.items():
-        actual = getattr(args, name)
-        if isinstance(expected, float):
-            matches = float(actual) == expected
-        else:
-            matches = actual == expected
-        if not matches:
-            deviations.append(f"{name}={actual!r} (required {expected!r})")
-    for name in (
-        "skip_task_return_evaluation",
-        "allow_random_actor_init",
-    ):
-        if bool(getattr(args, name)):
-            deviations.append(f"{name}=true")
-    if (
-        isinstance(args.training_seed, bool)
-        or args.training_seed < 0
-        or args.training_seed > 2**32 - 1
-    ):
-        deviations.append("training_seed must lie in [0, 2**32-1]")
+
+def validate_s1_arguments(args: argparse.Namespace) -> None:
+    """Validate only the value-domain requirements used by S1 training."""
+
+    positive_integers = (
+        "max_iterations",
+        "batch_size",
+        "mini_batch_size",
+        "log_interval",
+        "validation_interval",
+        "collect_num_envs",
+        "collect_num_steps",
+    )
+    for name in positive_integers:
+        value = getattr(args, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if args.mini_batch_size > args.batch_size:
+        raise ValueError("mini_batch_size cannot exceed batch_size")
+    for name in ("context_lr", "max_grad_norm"):
+        value = getattr(args, name)
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be positive and finite")
     if not 0.0 < args.validation_fraction < 1.0:
-        deviations.append("validation_fraction must lie strictly between 0 and 1")
-    if args.eval_episodes_per_slope < 100:
-        deviations.append("eval_episodes_per_slope must be at least 100")
-    if not args.eval_seeds or len(set(args.eval_seeds)) != len(args.eval_seeds):
-        deviations.append("eval_seeds must be non-empty and unique")
-    if args.eval_num_envs <= 0 or args.eval_num_envs % SLOPE_COUNT != 0:
-        deviations.append(
-            f"eval_num_envs must be a positive multiple of {SLOPE_COUNT}"
-        )
-    if (
-        args.collect_num_envs <= 0
-        or args.collect_num_envs != FORMAL_NUM_ENVS
-    ):
-        deviations.append(
-            f"collect_num_envs must equal the Guide-fixed {FORMAL_NUM_ENVS}"
-        )
-    if args.collect_num_steps <= 0:
-        deviations.append("collect_num_steps must be positive")
-    if deviations:
-        raise ValueError(
-            "non-guide S1 settings cannot produce a formal checkpoint: " + "; ".join(deviations)
-        )
+        raise ValueError("validation_fraction must lie strictly between 0 and 1")
+    for name in ("training_seed", "validation_seed"):
+        value = getattr(args, name)
+        if isinstance(value, bool) or value < 0 or value > 2**32 - 1:
+            raise ValueError(f"{name} must lie in [0, 2**32-1]")
 
 
 def seed_s1_training(seed: int) -> torch.Generator:
@@ -177,7 +130,7 @@ def _as_tensor(value: Any, name: str, path: Path) -> torch.Tensor:
     if value is None:
         raise KeyError(f"{path} is missing rollout tensor {name!r}")
     tensor = torch.as_tensor(value)
-    if not tensor.is_floating_point() and name not in {"gait_mask", "lag_mask", "contact_target"}:
+    if not tensor.is_floating_point():
         tensor = tensor.float()
     return tensor
 
@@ -200,32 +153,12 @@ def _normalize_shard(path: Path) -> dict[str, torch.Tensor]:
             raw.get("teacher_action_std"), "teacher_action_std", path
         ).float(),
         "z_star": _as_tensor(raw.get("z_star"), "z_star", path).float(),
-        "phase_target": _as_tensor(
-            raw.get("phase_target"), "phase_target", path
-        ).float(),
-        "frequency_target": _as_tensor(
-            raw.get("frequency_target"), "frequency_target", path
-        ).float(),
-        "contact_target": _as_tensor(
-            raw.get("contact_target"), "contact_target", path
-        ).float(),
-        "cart_lag_target": _as_tensor(
-            raw.get("cart_lag_target"), "cart_lag_target", path
-        ).float(),
-        "gait_mask": _as_tensor(raw.get("gait_mask"), "gait_mask", path).bool(),
-        "lag_mask": _as_tensor(raw.get("lag_mask"), "lag_mask", path).bool(),
     }
     expected_shapes = {
         "history": (batch_size, 61, 96),
         "teacher_action_mean": (batch_size, 29),
         "teacher_action_std": (batch_size, 29),
         "z_star": (batch_size, 16),
-        "phase_target": (batch_size, 2),
-        "frequency_target": (batch_size, 1),
-        "contact_target": (batch_size, 2),
-        "cart_lag_target": (batch_size, 1),
-        "gait_mask": (batch_size, 1),
-        "lag_mask": (batch_size, 1),
     }
     for name, shape in expected_shapes.items():
         if tuple(normalized[name].shape) != shape:
@@ -280,32 +213,24 @@ def validate_rollout_manifest(
         or collection_seed > 2**32 - 1
     ):
         raise ValueError("rollout manifest is missing its valid collection seed")
-    if manifest.get("teacher_checkpoint_sha256") != sha256_file(teacher_path):
+    if Path(str(manifest.get("teacher_checkpoint"))).resolve() != teacher_path.resolve():
         raise ValueError("rollout manifest was generated by a different teacher checkpoint")
     if manifest.get("teacher_provenance") != teacher_metadata.to_mapping():
         raise ValueError("rollout manifest teacher provenance differs from the S0 checkpoint")
-    hashes = manifest.get("shards_sha256")
-    if not isinstance(hashes, Mapping) or not hashes:
-        raise ValueError("rollout manifest has no content-addressed shards")
+    shard_names = manifest.get("shards")
+    if not isinstance(shard_names, list) or not shard_names:
+        raise ValueError("rollout manifest has no shard paths")
     actual_names = {path.name for pattern in ("*.pt", "*.pth") for path in rollout_dir.glob(pattern)}
-    if actual_names != set(hashes):
+    if actual_names != set(shard_names):
         raise ValueError("rollout directory files differ from the manifest shard set")
-    for name, digest in hashes.items():
-        if not isinstance(name, str) or not isinstance(digest, str) or sha256_file(rollout_dir / name) != digest:
-            raise ValueError(f"rollout shard hash mismatch: {name}")
     validate_rollout_stage_coverage(manifest)
     return manifest
 
 
-def initialize_actor_from_checkpoint(student: G1RickshawStudentActor, checkpoint: Mapping[str, Any]) -> bool:
-    try:
-        candidate = extract_gaussian_actor_state(checkpoint)
-    except ValueError:
-        return False
-    if set(candidate) != set(student.actor.state_dict()):
-        return False
-    student.actor.load_state_dict(candidate, strict=True)
-    return True
+def initialize_actor_from_checkpoint(
+    student: G1RickshawStudentActor, checkpoint: Mapping[str, Any]
+) -> None:
+    student.actor.load_state_dict(extract_gaussian_actor_state(checkpoint), strict=True)
 
 
 def _batch(dataset: Mapping[str, torch.Tensor], indices: torch.Tensor, device: torch.device) -> dict[str, torch.Tensor]:
@@ -334,7 +259,8 @@ def _validation_action_kl(
             total += float(divergence.sum().cpu())
             count += divergence.numel()
     student.train()
-    return total / max(count, 1)
+    student.actor.eval()
+    return total / count
 
 
 def train(args: argparse.Namespace) -> Path:
@@ -350,26 +276,10 @@ def train(args: argparse.Namespace) -> Path:
     )
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("S1 task differs from the S0 teacher training task")
-    teacher_ablation_values = teacher_training_configuration["ablation_values"]
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
-    reward_calibration_path = require_existing_file(
-        args.reward_calibration_report,
-        "passed reward calibration report",
-    ).resolve()
-    reward_calibration_binding = load_reward_calibration_report(
-        reward_calibration_path,
-        teacher_checkpoint_path=teacher_path,
-    )
     teacher_curriculum_iteration = teacher_checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
     if isinstance(teacher_curriculum_iteration, bool) or not isinstance(teacher_curriculum_iteration, int):
         raise RuntimeError("S0 teacher checkpoint is missing its audited curriculum iteration")
-    teacher_lineage = teacher_checkpoint.get(CHECKPOINT_LINEAGE_KEY)
-    if not isinstance(teacher_lineage, Mapping):
-        raise RuntimeError("S1 teacher checkpoint lineage must be a mapping")
-    teacher_checkpoint_hashes = checkpoint_hash_history(
-        teacher_checkpoint,
-        checkpoint_path=teacher_path,
-    )
     rollout_dir = Path(args.rollout_dir)
     if not rollout_dir.is_dir():
         raise FileNotFoundError(f"rollout directory does not exist: {rollout_dir}")
@@ -388,26 +298,13 @@ def train(args: argparse.Namespace) -> Path:
     else:
         device_name = args.device
     device = torch.device(device_name)
-    student = G1RickshawStudentActor(latent_dim=args.latent_dim).to(device)
-    actor_initialized = initialize_actor_from_checkpoint(student, teacher_checkpoint)
-    if not actor_initialized:
-        raise RuntimeError(
-            "teacher checkpoint does not expose an exact Gaussian actor state_dict. "
-            "Formal S1 requires exact actor initialization from the S0 teacher."
-        )
+    student = G1RickshawStudentActor().to(device)
+    initialize_actor_from_checkpoint(student, teacher_checkpoint)
 
-    optimizer = torch.optim.Adam(
-        (
-            {
-                "params": [
-                    *student.context_encoder.parameters(),
-                    *student.context_projection.parameters(),
-                ],
-                "lr": args.context_lr,
-            },
-            {"params": student.actor.parameters(), "lr": args.actor_lr},
-        )
-    )
+    student.actor.eval()
+    for parameter in student.actor.parameters():
+        parameter.requires_grad_(False)
+    optimizer = torch.optim.Adam(student.context_encoder.parameters(), lr=args.context_lr)
     criterion = StudentDistillationLoss()
     num_samples = dataset["current"].shape[0]
     if num_samples < 2:
@@ -422,29 +319,20 @@ def train(args: argparse.Namespace) -> Path:
     mini_batch_size = args.mini_batch_size
     training_configuration = build_training_configuration(
         stage="s1_context_distillation",
-        formal=True,
         task=args.task,
         num_envs=None,
         seed=args.training_seed,
         max_iterations=args.max_iterations,
-        argv=args.argv,
-        hydra_overrides=(),
-        guide_parameters={**S1_GUIDE_PARAMETERS, "latent_dim": args.latent_dim},
+        guide_parameters=S1_GUIDE_PARAMETERS,
         resolved_parameters={
             "optimizer": "adam",
             "context_learning_rate": args.context_lr,
-            "actor_learning_rate": args.actor_lr,
             "batch_size": args.batch_size,
             "mini_batch_size": args.mini_batch_size,
             "gradient_clip": args.max_grad_norm,
             "validation_fraction": args.validation_fraction,
             "validation_seed": args.validation_seed,
             "validation_interval": args.validation_interval,
-            "validation_patience": args.validation_patience,
-            "max_validation_candidates": args.max_validation_candidates,
-            "evaluation_num_envs": args.eval_num_envs,
-            "evaluation_episodes_per_slope": args.eval_episodes_per_slope,
-            "evaluation_seeds": list(args.eval_seeds),
             "teacher_rollout_num_envs": int(rollout_manifest["num_envs"]),
             "teacher_rollout_steps_per_stage": int(
                 rollout_manifest["num_steps_per_stage"]
@@ -453,47 +341,20 @@ def train(args: argparse.Namespace) -> Path:
         },
         actor_initialized_from_teacher=True,
         stage_coverage=stage_coverage,
-        latent_dim=args.latent_dim,
-        rollout_steps=int(teacher_ablation_values["rollout_steps"]),
-        fat2_weight=float(teacher_ablation_values["fat2_weight"]),
-        inputs_sha256={
-            "teacher_checkpoint": sha256_file(teacher_path),
-            "reward_calibration_report": sha256_file(reward_calibration_path),
-            "rollout_manifest": sha256_file(rollout_dir / "manifest.json"),
-            **{
-                f"rollout_shard:{name}": str(digest)
-                for name, digest in rollout_manifest["shards_sha256"].items()
-            },
-        },
     )
     validate_guide_training_configuration(
         training_configuration,
         expected_stage="s1_context_distillation",
     )
     output = Path(args.output)
-    candidate_dir = output.resolve().parent / "s1_candidates"
-    candidate_training_configuration = finalize_training_configuration(
-        {
-            **training_configuration,
-            "stage": "s1_context_candidate",
-        }
-    )
-    base_lineage = {
-        "teacher_checkpoint_sha256": sha256_file(teacher_path),
-        "rollout_manifest_sha256": sha256_file(rollout_dir / "manifest.json"),
-        "rollout_shards_sha256": dict(rollout_manifest["shards_sha256"]),
-        **reward_calibration_binding,
-    }
-    candidate_paths_by_iteration: dict[int, Path] = {}
-    candidate_hashes: dict[int, str] = {}
     last_metrics: dict[str, float] = {}
-    candidates: list[tuple[float, int, dict[str, torch.Tensor]]] = []
     validation_history: list[dict[str, float | int | bool]] = []
     best_validation_kl = float("inf")
-    no_improvement_count = 0
+    best_iteration = 0
+    best_state: dict[str, torch.Tensor] | None = None
     completed_iterations = 0
-    early_stopped = False
     student.train()
+    student.actor.eval()
     for iteration in range(1, args.max_iterations + 1):
         completed_iterations = iteration
         if args.batch_size <= training_indices.numel():
@@ -515,7 +376,7 @@ def train(args: argparse.Namespace) -> Path:
             teacher_distribution = Independent(
                 Normal(sample["teacher_action_mean"], sample["teacher_action_std"]), 1
             )
-            student_distribution, z_hat, auxiliary = student.forward_with_context(
+            student_distribution, z_hat = student.forward_with_context(
                 sample["current"], sample["history"]
             )
             loss, metrics = criterion(
@@ -523,17 +384,12 @@ def train(args: argparse.Namespace) -> Path:
                 student_distribution,
                 z_hat,
                 sample["z_star"],
-                auxiliary,
-                sample["phase_target"],
-                sample["frequency_target"],
-                sample["contact_target"],
-                sample["cart_lag_target"],
-                sample["gait_mask"],
-                sample["lag_mask"],
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(student.parameters(), args.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                student.context_encoder.parameters(), args.max_grad_norm
+            )
             optimizer.step()
             last_metrics = {
                 name: float(value.detach().cpu()) for name, value in metrics.items()
@@ -551,134 +407,31 @@ def train(args: argparse.Namespace) -> Path:
                 device,
                 args.mini_batch_size,
             )
-            state = {name: value.detach().cpu().clone() for name, value in student.state_dict().items()}
-            candidates.append((validation_kl, iteration, state))
-            candidates.sort(key=lambda item: item[0])
-            del candidates[args.max_validation_candidates :]
-            candidate_path = candidate_dir / f"candidate_{iteration:05d}.pt"
-            save_checkpoint_atomic(
-                {
-                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                    CHECKPOINT_STAGE_KEY: "s1_context_candidate",
-                    CHECKPOINT_CURRICULUM_ITERATION_KEY: teacher_curriculum_iteration,
-                    CHECKPOINT_HASH_HISTORY_KEY: {
-                        str(checkpoint_iteration): digest
-                        for checkpoint_iteration, digest in teacher_checkpoint_hashes.items()
-                    },
-                    "candidate_iteration": iteration,
-                    "validation_action_kl": validation_kl,
-                    "model_state_dict": state,
-                    TRAINING_CONFIGURATION_CHECKPOINT_KEY: candidate_training_configuration,
-                    CHECKPOINT_LINEAGE_KEY: base_lineage,
-                },
-                candidate_path,
-                metadata=metadata,
-            )
-            candidate_paths_by_iteration[iteration] = candidate_path
-            candidate_hashes[iteration] = sha256_file(candidate_path)
             improved = validation_kl < best_validation_kl
             if improved:
                 best_validation_kl = validation_kl
-                no_improvement_count = 0
-            else:
-                no_improvement_count += 1
+                best_iteration = iteration
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in student.state_dict().items()
+                }
             validation_history.append(
                 {
                     "iteration": iteration,
                     "validation_action_kl": validation_kl,
                     "improved": improved,
-                    "no_improvement_count": no_improvement_count,
                 }
             )
-            if no_improvement_count >= args.validation_patience:
-                early_stopped = iteration < args.max_iterations
-                if early_stopped:
-                    print(
-                        f"early stop at iteration {iteration}: validation action KL "
-                        f"did not improve for {args.validation_patience} evaluations"
-                    )
-                    break
 
-    selection_report: Mapping[str, Any] | None = None
-    selection_report_digest: str | None = None
-    selected_candidate_digest: str | None = None
-    if not args.skip_task_return_evaluation:
-        retained_iterations = {iteration for _, iteration, _ in candidates}
-        candidate_paths = [
-            candidate_paths_by_iteration[iteration]
-            for iteration in sorted(retained_iterations)
-        ]
-        candidate_hashes = {
-            iteration: digest
-            for iteration, digest in candidate_hashes.items()
-            if iteration in retained_iterations
-        }
-        report_path = output.resolve().parent / "s1_selection_report.json"
-        evaluator = Path(__file__).resolve().with_name("evaluate_context_candidates.py")
-        command = [
-            sys.executable,
-            os.fspath(evaluator),
-            "--task",
-            args.task,
-            "--candidates",
-            *(os.fspath(path) for path in candidate_paths),
-            "--output",
-            os.fspath(report_path),
-            "--num-envs",
-            str(args.eval_num_envs),
-            "--episodes-per-slope",
-            str(args.eval_episodes_per_slope),
-            "--seeds",
-            *(str(seed) for seed in args.eval_seeds),
-            "--headless",
-        ]
-        if args.device != "auto":
-            command.extend(("--device", args.device))
-        subprocess.run(command, check=True)
-        selection_report = json.loads(report_path.read_text(encoding="utf-8"))
-        results = validate_s1_candidate_selection_report(
-            selection_report,
-            expected_candidate_sha256=candidate_hashes,
-            fixed_seeds=args.eval_seeds,
-            episodes_per_slope=args.eval_episodes_per_slope,
-        )
-        selection_report_digest = sha256_file(report_path)
-        kl_order = {
-            int(item["iteration"]): rank
-            for rank, item in enumerate(sorted(results, key=lambda item: item["validation_action_kl"]))
-        }
-        return_order = {
-            int(item["iteration"]): rank
-            for rank, item in enumerate(sorted(results, key=lambda item: item["task_return_mean"], reverse=True))
-        }
-        selected_result = min(
-            results,
-            key=lambda item: (
-                kl_order[int(item["iteration"])] + return_order[int(item["iteration"])],
-                -float(item["task_return_mean"]),
-                float(item["validation_action_kl"]),
-            ),
-        )
-        selected_iteration = int(selected_result["iteration"])
-        selected_candidate_digest = candidate_hashes[selected_iteration]
-        best_kl, best_iteration, best_state = next(
-            candidate for candidate in candidates if candidate[1] == selected_iteration
-        )
-        selected_task_return = float(selected_result["task_return_mean"])
-    else:
-        best_kl, best_iteration, best_state = candidates[0]
-        selected_task_return = None
+    if best_state is None:
+        raise RuntimeError("S1 validation did not produce a best state")
     student.load_state_dict(best_state, strict=True)
 
     checkpoint = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         CHECKPOINT_STAGE_KEY: "s1_context_distillation",
         CHECKPOINT_CURRICULUM_ITERATION_KEY: teacher_curriculum_iteration,
-        CHECKPOINT_HASH_HISTORY_KEY: {
-            str(iteration): digest for iteration, digest in teacher_checkpoint_hashes.items()
-        },
-        "model_state_dict": student.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
+        "model_state_dict": best_state,
         TRAINING_CONFIGURATION_CHECKPOINT_KEY: training_configuration,
         "rollout_schema": {
             "required_tensors": list(REQUIRED_TENSORS),
@@ -689,52 +442,26 @@ def train(args: argparse.Namespace) -> Path:
         "training": {
             "max_iterations": args.max_iterations,
             "completed_iterations": completed_iterations,
-            "early_stopped": early_stopped,
             "validation_interval": args.validation_interval,
-            "validation_patience": args.validation_patience,
             "validation_history": validation_history,
             "batch_size": int(batch_indices.numel()),
             "mini_batch_size": mini_batch_size,
             "context_lr": args.context_lr,
-            "actor_lr": args.actor_lr,
             "max_grad_norm": args.max_grad_norm,
             "training_seed": args.training_seed,
-            "actor_initialized_from_teacher": actor_initialized,
-            "selected_iteration": best_iteration,
+            "actor_initialized_from_teacher": True,
+            "best_iteration": best_iteration,
         },
         "metrics": {
-            **last_metrics,
-            "validation_action_kl": best_kl,
-            "validation_task_return": selected_task_return,
-        },
-        "model_selection": {
-            "criteria": ["fixed_validation_action_kl", "fixed_seed_task_return"],
-            "rank_rule": "minimum equal-weight rank sum; task return then action KL tie-break",
-            "task_return_evaluation_skipped": args.skip_task_return_evaluation,
-            "report": None if selection_report is None else selection_report,
-            "report_path": (
-                None if selection_report is None else os.fspath(report_path.resolve())
-            ),
-            "report_sha256": selection_report_digest,
-            "selected_candidate_checkpoint_sha256": selected_candidate_digest,
-        },
-        "reward_calibration": {
-            "path": os.fspath(reward_calibration_path),
-            **reward_calibration_binding,
+            "best_validation_action_kl": best_validation_kl,
         },
         CHECKPOINT_LINEAGE_KEY: {
-            "teacher_checkpoint_sha256": sha256_file(teacher_path),
-            "rollout_manifest_sha256": sha256_file(rollout_dir / "manifest.json"),
-            "rollout_shards_sha256": dict(rollout_manifest["shards_sha256"]),
-            **reward_calibration_binding,
-            **(
-                {}
-                if selection_report_digest is None or selected_candidate_digest is None
-                else {
-                    "s1_selection_report_sha256": selection_report_digest,
-                    "selected_candidate_checkpoint_sha256": selected_candidate_digest,
-                }
-            ),
+            "teacher_checkpoint": os.fspath(teacher_path.resolve()),
+            "rollout_manifest": os.fspath((rollout_dir / "manifest.json").resolve()),
+            "rollout_shards": [
+                os.fspath((rollout_dir / name).resolve())
+                for name in rollout_manifest["shards"]
+            ],
         },
     }
     save_checkpoint_atomic(checkpoint, output, metadata=metadata)
@@ -744,26 +471,15 @@ def train(args: argparse.Namespace) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--teacher", required=True, help="S0 teacher checkpoint with provenance metadata.")
-    parser.add_argument(
-        "--reward-calibration-report",
-        required=True,
-        help="Passed content-addressed guide section 11.2 reward calibration report.",
-    )
     parser.add_argument("--task", default="Isaac-G1-Rickshaw-Directional-Slope-v0")
     parser.add_argument(
         "--rollout-dir",
         required=False,
-        help="Directory of on-policy teacher rollouts containing policy/history/extrinsics/auxiliary labels.",
+        help="Directory of on-policy teacher rollouts containing policy/history/teacher outputs.",
     )
     parser.add_argument("--output", default="logs/rsl_rl/g1_rickshaw_context/s1_context.pt")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--training-seed", type=int, default=42)
-    parser.add_argument(
-        "--latent-dim",
-        type=int,
-        choices=ABLATION_VALUE_OPTIONS["latent_dim"],
-        default=16,
-    )
     parser.add_argument(
         "--max-iterations",
         type=int,
@@ -772,7 +488,6 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=65536)
     parser.add_argument("--mini-batch-size", type=int, default=8192)
     parser.add_argument("--context-lr", type=float, default=3.0e-4)
-    parser.add_argument("--actor-lr", type=float, default=1.0e-4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--log-interval", type=int, default=50)
     parser.add_argument("--validation-fraction", type=float, default=0.10)
@@ -782,56 +497,18 @@ def main() -> int:
         type=int,
         default=S1_GUIDE_PARAMETERS["validation_interval"],
     )
-    parser.add_argument(
-        "--validation-patience",
-        type=int,
-        default=S1_GUIDE_PARAMETERS["validation_patience"],
-    )
-    parser.add_argument(
-        "--max-validation-candidates",
-        type=int,
-        default=S1_GUIDE_PARAMETERS["validation_candidate_count"],
-    )
-    parser.add_argument(
-        "--eval-num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS
-    )
-    parser.add_argument("--eval-episodes-per-slope", type=int, default=100)
-    parser.add_argument(
-        "--eval-seeds",
-        type=int,
-        nargs="+",
-        default=(42, 43, 44, 45, 46),
-    )
-    parser.add_argument(
-        "--skip-task-return-evaluation",
-        action="store_true",
-        help="Debug only: select on action KL without the guide-required fixed-seed task return.",
-    )
-    parser.add_argument("--collect-num-envs", type=int, default=FORMAL_NUM_ENVS)
+    parser.add_argument("--collect-num-envs", type=int, default=DEFAULT_NUM_ENVS)
     parser.add_argument("--collect-num-steps", type=int, default=64)
     parser.add_argument("--recollect-rollouts", action="store_true")
-    parser.add_argument(
-        "--allow-random-actor-init",
-        action="store_true",
-        help="Debug only: skip strict S0 teacher actor initialization.",
-    )
     args = parser.parse_args()
-    args.argv = list(sys.argv[1:])
-    validate_formal_s1_arguments(args)
+    validate_s1_arguments(args)
 
     teacher_path = require_existing_file(args.teacher, "teacher checkpoint").resolve()
-    reward_calibration_path = require_existing_file(
-        args.reward_calibration_report,
-        "passed reward calibration report",
-    ).resolve()
-    load_reward_calibration_report(
-        reward_calibration_path,
-        teacher_checkpoint_path=teacher_path,
-    )
-
     if args.rollout_dir is None:
         output_parent = Path(args.output).resolve().parent
-        args.rollout_dir = os.fspath(output_parent / f"teacher_rollouts_{sha256_file(teacher_path)[:12]}")
+        args.rollout_dir = os.fspath(
+            output_parent / f"teacher_rollouts_{teacher_path.stem}"
+        )
         manifest = Path(args.rollout_dir) / "manifest.json"
         if args.recollect_rollouts or not manifest.is_file():
             collector = Path(__file__).resolve().with_name("collect_teacher_rollouts.py")

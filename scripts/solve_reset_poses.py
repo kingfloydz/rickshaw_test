@@ -15,13 +15,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import faulthandler
-import hmac
 import json
 import math
 import multiprocessing
 import os
 from pathlib import Path
-import secrets
 import shutil
 import subprocess
 import sys
@@ -43,6 +41,7 @@ add_project_source_to_path()
 
 from g1_rickshaw_lab.configuration import (  # noqa: E402
     G1_JOINT_ORDER,
+    RESET_TORQUE_LIMIT_FRACTION,
     ResetPose,
     ResetPoseLibrary,
     SLOPE_GRADIENTS,
@@ -58,6 +57,7 @@ from g1_rickshaw_lab.rickshaw_spec import (  # noqa: E402
     WHEEL_TRACK,
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
+    TERRAIN_COLUMNS_PER_TYPE,
     terrain_index_for_gradient,
 )
 from g1_rickshaw_lab.static_equilibrium import (  # noqa: E402
@@ -79,8 +79,6 @@ DEX_FORWARD_MAX_PITCH_RAD = math.radians(DEX_FORWARD_MAX_PITCH_DEGREES)
 DEX_FORWARD_MIN_DOT = math.cos(DEX_FORWARD_MAX_PITCH_RAD)
 DEX_FORWARD_MAX_LATERAL = 0.01
 RESET_STATIC_MULTISTARTS = 50
-DEFAULT_HARDWARE_TORQUE_LIMIT = 0.85
-MAXIMUM_HARDWARE_TORQUE_LIMIT = 0.98
 DEFAULT_TORQUE_TARGET = 0.80
 BALANCED_ARM_TORQUE_WEIGHT = 20.0
 BALANCED_ARM_TORQUE_HINGE_WEIGHT = 500.0
@@ -115,10 +113,11 @@ DEFAULT_Q_REF_JOINT_MARGIN = 0.04
 DEFAULT_SOLVER_TOLERANCE = 1.0e-9
 DEFAULT_SOLVER_WORKERS = 20
 DEFAULT_ZMP_OPTIMIZATION_RESERVE_FRACTION = 0.025
-PIPELINE_WORKER_TOKEN_ENV = "G1_RICKSHAW_RESET_WORKER_TOKEN"
-PIPELINE_WORKER_STAGING_ENV = "G1_RICKSHAW_RESET_WORKER_STAGING"
 PIPELINE_WORKER_PROGRESS_ENV = "G1_RICKSHAW_RESET_WORKER_PROGRESS"
-PIPELINE_WORKER_TOKEN_FILE = ".pipeline-worker-token"
+CANDIDATE_BATCH_ENV = "G1_RICKSHAW_RESET_CANDIDATE_BATCH"
+CANDIDATE_BATCH_SCHEMA_VERSION = 1
+CANDIDATE_PROGRESS_SCHEMA_VERSION = 3
+DEFAULT_STAGE_B_CANDIDATES_PER_SLOPE = TERRAIN_COLUMNS_PER_TYPE
 
 # The solver parallelizes independent starts with processes. Keep each child on
 # one BLAS/OpenMP thread so --workers maps predictably to occupied CPU cores.
@@ -304,11 +303,8 @@ def _candidate_constraint_violation(
     hard_residual: float,
     hard_tolerance: float,
     lower_torque_ratio: float,
-    lower_torque_limit: float,
     waist_torque_ratio: float,
-    waist_torque_limit: float,
     arm_torque_ratio: float,
-    arm_torque_limit: float,
     q_ref_joint_margin: float,
     joint_margin: float,
     minimum_dex_forward_dot: float,
@@ -337,9 +333,9 @@ def _candidate_constraint_violation(
 
     return max(
         hard_residual / hard_tolerance - 1.0,
-        lower_torque_ratio / lower_torque_limit - 1.0,
-        waist_torque_ratio / waist_torque_limit - 1.0,
-        arm_torque_ratio / arm_torque_limit - 1.0,
+        lower_torque_ratio / RESET_TORQUE_LIMIT_FRACTION - 1.0,
+        waist_torque_ratio / RESET_TORQUE_LIMIT_FRACTION - 1.0,
+        arm_torque_ratio / RESET_TORQUE_LIMIT_FRACTION - 1.0,
         (minimum_q_ref_joint_margin - q_ref_joint_margin)
         / max(minimum_q_ref_joint_margin, joint_margin, 1.0e-6),
         (DEX_FORWARD_MIN_DOT - minimum_dex_forward_dot)
@@ -1893,11 +1889,8 @@ def _solve_library(
                 hard_residual=candidate_hard_error,
                 hard_tolerance=args.hard_tolerance,
                 lower_torque_ratio=candidate_lower_ratio,
-                lower_torque_limit=args.lower_torque_limit_fraction,
                 waist_torque_ratio=candidate_waist_ratio,
-                waist_torque_limit=args.waist_torque_limit_fraction,
                 arm_torque_ratio=candidate_arm_ratio,
-                arm_torque_limit=args.arm_torque_limit_fraction,
                 q_ref_joint_margin=candidate_q_ref_margin,
                 joint_margin=args.joint_margin,
                 minimum_q_ref_joint_margin=args.q_ref_joint_margin,
@@ -2288,17 +2281,17 @@ def _solve_library(
                 f"gradient {gradient:+.2f} changes an arm joint by "
                 f"{continuation_arm_delta:.3f} rad from its continuation seed"
             )
-        if maximum_arm_torque_ratio > args.arm_torque_limit_fraction:
+        if maximum_arm_torque_ratio > RESET_TORQUE_LIMIT_FRACTION:
             raise RuntimeError(
                 f"gradient {gradient:+.2f} arm torque reaches "
                 f"{maximum_arm_torque_ratio:.3f} of its hardware limit"
             )
-        if maximum_lower_torque_ratio > args.lower_torque_limit_fraction:
+        if maximum_lower_torque_ratio > RESET_TORQUE_LIMIT_FRACTION:
             raise RuntimeError(
                 f"gradient {gradient:+.2f} lower-body torque reaches "
                 f"{maximum_lower_torque_ratio:.3f} of its hardware limit"
             )
-        if maximum_waist_torque_ratio > args.waist_torque_limit_fraction:
+        if maximum_waist_torque_ratio > RESET_TORQUE_LIMIT_FRACTION:
             raise RuntimeError(
                 f"gradient {gradient:+.2f} waist torque reaches "
                 f"{maximum_waist_torque_ratio:.3f} of its hardware limit"
@@ -2888,25 +2881,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ik-lower-torque-target-fraction", type=float, default=DEFAULT_TORQUE_TARGET
     )
-    parser.add_argument(
-        "--lower-torque-limit-fraction",
-        type=float,
-        default=DEFAULT_HARDWARE_TORQUE_LIMIT,
-    )
-    parser.add_argument(
-        "--waist-torque-limit-fraction",
-        type=float,
-        default=DEFAULT_HARDWARE_TORQUE_LIMIT,
-    )
     parser.add_argument("--arm-torque-weight", type=float, default=5.0)
     parser.add_argument("--arm-torque-hinge-weight", type=float, default=100.0)
     parser.add_argument(
         "--ik-arm-torque-target-fraction", type=float, default=DEFAULT_TORQUE_TARGET
-    )
-    parser.add_argument(
-        "--arm-torque-limit-fraction",
-        type=float,
-        default=DEFAULT_HARDWARE_TORQUE_LIMIT,
     )
     parser.add_argument("--minimum-elbow-flexion", type=float, default=0.0)
     parser.add_argument("--maximum-shoulder-pitch", type=float, default=1.0)
@@ -2962,6 +2940,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--stage-b-candidates-per-slope",
+        type=int,
+        default=DEFAULT_STAGE_B_CANDIDATES_PER_SLOPE,
+        help=(
+            "Candidates for each slope packed into one replicated-physics Stage B "
+            f"process; maximum {TERRAIN_COLUMNS_PER_TYPE} matches the available "
+            "non-overlapping terrain columns."
+        ),
+    )
+    parser.add_argument(
         "--static-only",
         action="store_true",
         help=(
@@ -2996,59 +2984,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--_pipeline-worker",
-        metavar="TOKEN",
+        action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--timeseries-stride", type=int, default=0)
     parser.add_argument("--foot-damping", type=float)
     parser.add_argument("--leg-damping", type=float)
     parser.add_argument("--stable-displacement-limit", type=float, default=0.05)
-    parser.add_argument("--static-lower-preload-limit", type=float, default=0.85)
-    parser.add_argument("--static-waist-preload-limit", type=float, default=0.85)
-    parser.add_argument("--static-arm-preload-limit", type=float, default=0.85)
     return parser
-
-def _validate_pipeline_worker_invocation(args: argparse.Namespace) -> None:
-    """Reject direct worker use and constrain an authorized worker to staging."""
-
-    if args._pipeline_worker is None:
-        return
-    environment_token = os.environ.get(PIPELINE_WORKER_TOKEN_ENV, "")
-    staging_value = os.environ.get(PIPELINE_WORKER_STAGING_ENV, "")
-    if not environment_token or not staging_value:
-        raise ValueError("internal reset worker requires parent authorization")
-    staging_dir = Path(staging_value).resolve()
-    token_file = staging_dir / PIPELINE_WORKER_TOKEN_FILE
-    try:
-        file_token = token_file.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise ValueError("internal reset worker authorization is missing") from exc
-    if not (
-        hmac.compare_digest(args._pipeline_worker, environment_token)
-        and hmac.compare_digest(args._pipeline_worker, file_token)
-    ):
-        raise ValueError("internal reset worker authorization is invalid")
-
-    worker_paths = {
-        "output": Path(args.output),
-        "candidate-output": args.candidate_output,
-        "report-output": args.report_output,
-        "alignment-output": args.alignment_output,
-        "summary-output": args.summary_output,
-    }
-    for role, path in worker_paths.items():
-        try:
-            path.resolve().relative_to(staging_dir)
-        except ValueError as exc:
-            raise ValueError(
-                f"internal reset worker {role} must stay inside {staging_dir}"
-            ) from exc
-    token_file.unlink()
 
 
 def _validate_arguments(args: argparse.Namespace) -> None:
-    _validate_pipeline_worker_invocation(args)
-
     path_roles = {
         "output": Path(args.output).resolve(),
         "candidate-output": args.candidate_output.resolve(),
@@ -3107,20 +3053,6 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--solver-tolerance must lie in (0, 1)")
     if args.arm_seed_noise_scale < 0.0 or not math.isfinite(args.arm_seed_noise_scale):
         raise ValueError("--arm-seed-noise-scale must be finite and non-negative")
-    for name in (
-        "lower_torque_limit_fraction",
-        "waist_torque_limit_fraction",
-        "arm_torque_limit_fraction",
-    ):
-        value = getattr(args, name)
-        if (
-            not math.isfinite(value)
-            or not 0.0 < value <= MAXIMUM_HARDWARE_TORQUE_LIMIT
-        ):
-            raise ValueError(
-                f"--{name.replace('_', '-')} must lie in "
-                f"(0, {MAXIMUM_HARDWARE_TORQUE_LIMIT}]"
-            )
     for name in (
         "lower_torque_weight",
         "lower_torque_hinge_weight",
@@ -3197,13 +3129,17 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--foot-min-x must be smaller than --foot-max-x")
     if not args.foot_min_x <= args.foot_center_offset_x <= args.foot_max_x:
         raise ValueError("--foot-center-offset-x must lie inside the support interval")
-    if not 0.0 <= args.ik_lower_torque_target_fraction <= min(
-        args.lower_torque_limit_fraction, args.waist_torque_limit_fraction
+    if not (
+        0.0
+        <= args.ik_lower_torque_target_fraction
+        <= RESET_TORQUE_LIMIT_FRACTION
     ):
         raise ValueError(
             "--ik-lower-torque-target-fraction must not exceed the lower or waist hard limit"
         )
-    if not 0.0 <= args.ik_arm_torque_target_fraction <= args.arm_torque_limit_fraction:
+    if not (
+        0.0 <= args.ik_arm_torque_target_fraction <= RESET_TORQUE_LIMIT_FRACTION
+    ):
         raise ValueError(
             "--ik-arm-torque-target-fraction must not exceed the arm hard limit"
         )
@@ -3235,6 +3171,11 @@ def _validate_arguments(args: argparse.Namespace) -> None:
             raise ValueError("formal existing-library validation requires --steps >= 1000")
         return
 
+    if not 1 <= args.stage_b_candidates_per_slope <= TERRAIN_COLUMNS_PER_TYPE:
+        raise ValueError(
+            "--stage-b-candidates-per-slope must lie in "
+            f"[1, {TERRAIN_COLUMNS_PER_TYPE}]"
+        )
     if args.full_pose_multistarts != RESET_STATIC_MULTISTARTS:
         raise ValueError(
             "the complete search requires exactly "
@@ -3246,15 +3187,6 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--timeseries-stride must be non-negative")
     if args.stable_displacement_limit <= 0.0:
         raise ValueError("--stable-displacement-limit must be positive")
-    for name in (
-        "static_lower_preload_limit",
-        "static_waist_preload_limit",
-        "static_arm_preload_limit",
-    ):
-        value = getattr(args, name)
-        if not 0.0 < value <= 1.0:
-            raise ValueError(f"--{name.replace('_', '-')} must lie in (0, 1]")
-
 DEX_FORWARD_INITIAL_MAX_LATERAL = 0.01
 DEX_FORWARD_ROLLOUT_MAX_LATERAL = 0.03
 
@@ -3265,6 +3197,14 @@ def _terrain_indices(slopes: tuple[float, ...]) -> tuple[list[int], list[int]]:
 
 def _set_signed_slope_origins(env, slopes: tuple[float, ...]) -> None:
     levels, columns = _terrain_indices(slopes)
+    _set_terrain_origins(env, levels, columns)
+
+
+def _set_terrain_origins(
+    env: Any, levels: list[int], columns: list[int]
+) -> None:
+    if len(levels) != env.num_envs or len(columns) != env.num_envs:
+        raise ValueError("terrain index rows must match the environment count")
     terrain = env.scene.terrain
     level_tensor = torch.tensor(levels, device=env.device, dtype=torch.long)
     column_tensor = torch.tensor(columns, device=env.device, dtype=torch.long)
@@ -3376,10 +3316,11 @@ def _per_environment_max(value: torch.Tensor) -> torch.Tensor:
     return value.reshape(value.shape[0], -1).amax(dim=-1)
 
 
-def _static_preload_joint_evidence(reset_library) -> list[dict[str, object]]:
+def _static_preload_joint_evidence_for_poses(
+    rows: list[tuple[float, int | None, ResetPose]],
+) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    for slope in SLOPE_GRADIENTS:
-        pose = reset_library.pose_for_gradient(slope)
+    for slope, candidate_id, pose in rows:
         offsets = [
             abs(reference - reset)
             for reference, reset in zip(pose.q_ref, pose.q_reset, strict=True)
@@ -3405,6 +3346,8 @@ def _static_preload_joint_evidence(reset_library) -> list[dict[str, object]]:
             ),
         )
         row: dict[str, object] = {"slope": float(slope)}
+        if candidate_id is not None:
+            row["candidate_id"] = int(candidate_id)
         for label, begin, stiffness, limits in groups:
             entries = []
             for local_index, (gain, limit) in enumerate(
@@ -3429,13 +3372,27 @@ def _static_preload_joint_evidence(reset_library) -> list[dict[str, object]]:
     return result
 
 
-def _input_binding(cfg) -> dict[str, object]:
+def _static_preload_joint_evidence(reset_library) -> list[dict[str, object]]:
+    return _static_preload_joint_evidence_for_poses(
+        [
+            (float(slope), None, reset_library.pose_for_gradient(slope))
+            for slope in SLOPE_GRADIENTS
+        ]
+    )
+
+
+def _input_binding(
+    cfg: Any, candidate_batch_path: Path | None = None
+) -> dict[str, object]:
     feasibility_path = Path(cfg.feasibility_path).resolve()
     reset_pose_path = Path(cfg.reset_pose_path).resolve()
-    return {
+    result: dict[str, object] = {
         "feasibility_path": str(feasibility_path),
         "reset_pose_path": str(reset_pose_path),
     }
+    if candidate_batch_path is not None:
+        result["candidate_batch_path"] = str(candidate_batch_path.resolve())
+    return result
 
 
 def _bind_reset_pose_library(cfg: Any, reset_pose_path: Path) -> ResetPoseLibrary:
@@ -3447,6 +3404,18 @@ def _bind_reset_pose_library(cfg: Any, reset_pose_path: Path) -> ResetPoseLibrar
     cfg.reset_pose_library = library
     return library
 
+
+def _configure_validation_horizon(cfg: Any, steps: int) -> None:
+    """Keep the audit horizon inside one episode so its final state is observable."""
+
+    if steps <= 0:
+        raise ValueError("validation steps must be positive")
+    step_dt = float(cfg.sim.dt) * int(cfg.decimation)
+    if step_dt <= 0.0:
+        raise ValueError("validation environment step_dt must be positive")
+    cfg.episode_length_s = (steps + 1) * step_dt
+
+
 def _load_simulation_dependencies() -> None:
     global gym, torch
     global ARM_HARDWARE_EFFORT_LIMITS, LOWER_HARDWARE_EFFORT_LIMITS
@@ -3454,7 +3423,7 @@ def _load_simulation_dependencies() -> None:
     global WAIST_HARDWARE_EFFORT_LIMITS, static_preload_hardware_ratios
     global static_waist_preload_hardware_ratios
     global G1RickshawDirectionalSlopePlayEnvCfg, PLAY_TASK_ID
-    global quat_apply_wxyz, actuator_effort_limits
+    global quat_apply_wxyz, actuator_effort_limits, install_reset_pose_batch
     global RESET_ALIGNMENT_TORQUE_MEASUREMENT_CONTRACT
 
     try:
@@ -3485,6 +3454,7 @@ def _load_simulation_dependencies() -> None:
         PLAY_TASK_ID as task_id,
     )
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
+        install_reset_pose_batch as install_pose_batch,
         quat_apply_wxyz as apply_quaternion,
     )
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actuation import (
@@ -3507,6 +3477,7 @@ def _load_simulation_dependencies() -> None:
     G1RickshawDirectionalSlopePlayEnvCfg = env_cfg
     PLAY_TASK_ID = task_id
     quat_apply_wxyz = apply_quaternion
+    install_reset_pose_batch = install_pose_batch
     actuator_effort_limits = effort_limits
     RESET_ALIGNMENT_TORQUE_MEASUREMENT_CONTRACT = torque_contract
 
@@ -3519,27 +3490,64 @@ def _validate_round(
         raise ValueError("--timeseries-stride must be non-negative")
     if args_cli.stable_displacement_limit <= 0.0:
         raise ValueError("--stable-displacement-limit must be positive")
-    slopes = tuple(float(value) for value in SLOPE_GRADIENTS)
+    candidate_batch_value = os.environ.get(CANDIDATE_BATCH_ENV)
+    candidate_batch_path = (
+        Path(candidate_batch_value).resolve()
+        if candidate_batch_value is not None
+        else None
+    )
+    candidate_batch = (
+        _load_candidate_batch(candidate_batch_path)
+        if candidate_batch_path is not None
+        else None
+    )
+    slopes = (
+        tuple(float(row["slope"]) for row in candidate_batch)
+        if candidate_batch is not None
+        else tuple(float(value) for value in SLOPE_GRADIENTS)
+    )
     os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(reset_pose_path.resolve())
     cfg = G1RickshawDirectionalSlopePlayEnvCfg()
+    # Reset validation always exercises the real closed chain, never the
+    # synthetic hand-load pretraining stage.
+    cfg.domain_randomization = replace(
+        cfg.domain_randomization,
+        enabled=False,
+        curriculum=replace(
+            cfg.domain_randomization.curriculum,
+            static_hand_load_iterations=0,
+        ),
+    )
+    cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
     reset_library = _bind_reset_pose_library(cfg, reset_pose_path)
     cfg.scene.num_envs = len(slopes)
     cfg.sim.device = args_cli.device
-    cfg.sample_physics_ranges = False
-    cfg.runtime_randomization = replace(cfg.runtime_randomization, sample_ranges=False)
-    cfg.events.sample_physics.params = {"cfg": cfg.runtime_randomization}
-    cfg.events.initialize_curriculum.params = {"cfg": cfg.runtime_randomization}
-    if not 0.0 < args_cli.static_lower_preload_limit <= 1.0:
-        raise ValueError("--static-lower-preload-limit must lie in (0, 1]")
-    if not 0.0 < args_cli.static_waist_preload_limit <= 1.0:
-        raise ValueError("--static-waist-preload-limit must lie in (0, 1]")
-    if not 0.0 < args_cli.static_arm_preload_limit <= 1.0:
-        raise ValueError("--static-arm-preload-limit must lie in (0, 1]")
-    static_lower_preload_ratio, static_arm_preload_ratio = (
-        static_preload_hardware_ratios(reset_library)
-    )
-    static_waist_preload_ratio = static_waist_preload_hardware_ratios(reset_library)
-    static_preload_joint_evidence = _static_preload_joint_evidence(reset_library)
+    _configure_validation_horizon(cfg, args_cli.steps)
+    if candidate_batch is None:
+        static_lower_preload_ratio, static_arm_preload_ratio = (
+            static_preload_hardware_ratios(reset_library)
+        )
+        static_waist_preload_ratio = static_waist_preload_hardware_ratios(reset_library)
+        static_preload_joint_evidence = _static_preload_joint_evidence(reset_library)
+    else:
+        static_preload_joint_evidence = _static_preload_joint_evidence_for_poses(
+            [
+                (row["slope"], row["candidate_id"], row["pose"])
+                for row in candidate_batch
+            ]
+        )
+        static_lower_preload_ratio = tuple(
+            float(row["lower_peak"]["ratio"])
+            for row in static_preload_joint_evidence
+        )
+        static_waist_preload_ratio = tuple(
+            float(row["waist_peak"]["ratio"])
+            for row in static_preload_joint_evidence
+        )
+        static_arm_preload_ratio = tuple(
+            float(row["arm_peak"]["ratio"])
+            for row in static_preload_joint_evidence
+        )
     if args_cli.foot_stiffness is not None:
         if args_cli.foot_stiffness <= 0.0:
             raise ValueError("--foot-stiffness must be positive")
@@ -3564,9 +3572,18 @@ def _validate_round(
         ),
     )
     cfg.events.policy_interval.params["cfg"] = cfg.policy_update
-    report_inputs = _input_binding(cfg)
+    report_inputs = _input_binding(cfg, candidate_batch_path)
     env = gym.make(PLAY_TASK_ID, cfg=cfg)
     base = env.unwrapped
+    if candidate_batch is not None:
+        install_reset_pose_batch(
+            base, [row["pose"] for row in candidate_batch]
+        )
+    if base.max_episode_length <= args_cli.steps:
+        raise RuntimeError(
+            "reset validation episode must be longer than the requested horizon: "
+            f"max_episode_length={base.max_episode_length}, steps={args_cli.steps}"
+        )
     immediate_safety_cfg = base.termination_manager.get_term_cfg(
         "immediate_safety"
     ).params["cfg"]
@@ -3577,7 +3594,14 @@ def _validate_round(
     d6_residual_limit = float(immediate_safety_cfg.d6_residual_limit)
     d6_impulse_limit = float(immediate_safety_cfg.d6_impulse_limit)
     try:
-        _set_signed_slope_origins(base, slopes)
+        if candidate_batch is None:
+            _set_signed_slope_origins(base, slopes)
+        else:
+            _set_terrain_origins(
+                base,
+                [row["terrain_level"] for row in candidate_batch],
+                [row["terrain_column"] for row in candidate_batch],
+            )
         env.reset(seed=args_cli.seed)
         base.command_state.v_sample.zero_()
         base.command_state.v_ref.zero_()
@@ -3643,7 +3667,7 @@ def _validate_round(
                 safety_active = torch.ones(
                     base.num_envs, device=base.device, dtype=torch.bool
                 )
-                _, _, terminated, truncated, _ = env.step(actions)
+                _, _, terminated, _truncated, _ = env.step(actions)
                 d6_residual = _per_environment_max(base.rickshaw_state.d6_residual)
                 d6_impulse = _per_environment_max(base.rickshaw_state.d6_impulse)
                 max_d6_residual = torch.maximum(max_d6_residual, d6_residual)
@@ -3812,8 +3836,8 @@ def _validate_round(
                     active_lower_torque_ratio,
                     torch.where(safety_active, lower_torque_ratio, 0.0),
                 )
-                done = torch.logical_or(terminated, truncated).detach().cpu()
-                for env_index in torch.nonzero(done, as_tuple=False).flatten().tolist():
+                failed = terminated.detach().cpu()
+                for env_index in torch.nonzero(failed, as_tuple=False).flatten().tolist():
                     termination_steps[env_index].append(step_index + 1)
 
         final_gap = torch.linalg.vector_norm(
@@ -3848,7 +3872,7 @@ def _validate_round(
             "slopes": list(slopes),
             "seed": args_cli.seed,
             "continuous_standing": True,
-            "sample_physics_ranges": bool(cfg.runtime_randomization.sample_ranges),
+            "physics_mode": "fixed",
             "inputs": report_inputs,
             "torque_measurement_contract": dict(
                 RESET_ALIGNMENT_TORQUE_MEASUREMENT_CONTRACT
@@ -3857,9 +3881,9 @@ def _validate_round(
                 "arm_torque_ratio": arm_safety_limit,
                 "d6_residual_m_or_rad": d6_residual_limit,
                 "d6_impulse_n_s": d6_impulse_limit,
-                "static_lower_preload_ratio": args_cli.static_lower_preload_limit,
-                "static_waist_preload_ratio": args_cli.static_waist_preload_limit,
-                "static_arm_preload_ratio": args_cli.static_arm_preload_limit,
+                "static_lower_preload_ratio": RESET_TORQUE_LIMIT_FRACTION,
+                "static_waist_preload_ratio": RESET_TORQUE_LIMIT_FRACTION,
+                "static_arm_preload_ratio": RESET_TORQUE_LIMIT_FRACTION,
             },
             "rickshaw_pose_contract": {
                 "hitch_height_target_m": float(cfg.rickshaw_pose.hitch_height_target),
@@ -3992,6 +4016,17 @@ def _validate_round(
             ],
             "timeseries": timeseries,
         }
+        if candidate_batch is not None:
+            report["candidate_bindings"] = [
+                {
+                    "environment_index": index,
+                    "slope": row["slope"],
+                    "candidate_id": row["candidate_id"],
+                    "terrain_level": row["terrain_level"],
+                    "terrain_column": row["terrain_column"],
+                }
+                for index, row in enumerate(candidate_batch)
+            ]
 
         initial_gap_max = float(torch.max(initial["grasp_hitch_position_error_m"]))
         initial_preload_error_max = float(torch.max(initial["d6_preload_position_error_m"]))
@@ -4038,6 +4073,7 @@ def _validate_round(
         standing_joint_error_max = float(torch.max(maximum_policy_joint_error))
         standing_lower_torque_max = float(torch.max(maximum_lower_torque_ratio))
         final_path_displacement_max = float(torch.max(torch.abs(final_path_displacement)))
+        non_timeout_termination_count = sum(len(values) for values in termination_steps)
         rollout_arm_peak_env = int(torch.argmax(max_arm_torque_ratio))
         rollout_waist_peak_env = int(torch.argmax(max_waist_torque_ratio))
         rollout_lower_peak_env = int(torch.argmax(maximum_lower_torque_ratio))
@@ -4092,14 +4128,14 @@ def _validate_round(
             ),
             "static_preload_lower_within_hardware_margin": (
                 max(static_lower_preload_ratio)
-                <= args_cli.static_lower_preload_limit
+                <= RESET_TORQUE_LIMIT_FRACTION
             ),
             "static_preload_waist_within_hardware_margin": (
                 max(static_waist_preload_ratio)
-                <= args_cli.static_waist_preload_limit
+                <= RESET_TORQUE_LIMIT_FRACTION
             ),
             "static_preload_arm_within_hardware_margin": (
-                max(static_arm_preload_ratio) <= args_cli.static_arm_preload_limit
+                max(static_arm_preload_ratio) <= RESET_TORQUE_LIMIT_FRACTION
             ),
         }
         checks.update(
@@ -4110,6 +4146,10 @@ def _validate_round(
                     standing_joint_error_max <= 0.35
                 ),
                 "continuous_standing_no_fall_step": not bool(torch.any(first_fall_step)),
+                "no_non_timeout_termination": non_timeout_termination_count == 0,
+                "fat2_wrench_consistent_at_horizon": bool(
+                    torch.all(final_fat_wrench_consistent)
+                ),
             }
         )
         report["summary"] = {
@@ -4183,6 +4223,9 @@ def _validate_round(
             "final_fat_wrench_relative_error_max": float(
                 torch.max(final_fat_wrench_relative_error)
             ),
+            "non_timeout_termination_count": non_timeout_termination_count,
+            "non_timeout_termination_steps": termination_steps,
+            "validation_max_episode_length": int(base.max_episode_length),
             "safety_active_policy_steps_min": active_steps_min,
             "safety_active_d6_residual_max_m_or_rad": active_residual_max,
             "safety_active_d6_impulse_max_n_s": active_impulse_max,
@@ -4209,98 +4252,11 @@ def _validate_round(
         }
         report["status"] = "passed" if all(checks.values()) else "failed"
         report["failures"] = [name for name, passed in checks.items() if not passed]
-        if _input_binding(cfg) != report_inputs:
+        if _input_binding(cfg, candidate_batch_path) != report_inputs:
             raise RuntimeError("reset-alignment inputs changed while the rollout was running")
         return report
     finally:
         env.close()
-
-def _prepare_warp_for_isaac_sim() -> None:
-    """Expose the legacy public Warp names evaluated by Isaac Sim extensions.
-
-    Some newer warp-lang builds expose ``wp.array`` but no longer re-export it
-    as ``wp.types.array``. Isaac Sim evaluates that annotation while starting
-    ``isaacsim.core.utils.warp``. Replicator also evaluates
-    ``wp.context.Kernel`` while starting the camera extension. We only restore
-    names backed by real public modules/objects; a build that lacks those APIs
-    is rejected as binary/API incompatible.
-    """
-
-    import importlib
-    import importlib.metadata
-
-    try:
-        wp = importlib.import_module("warp")
-        wp_types = importlib.import_module("warp.types")
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise RuntimeError(
-            "Isaac Sim requires NVIDIA warp-lang, but the 'warp' module could "
-            "not be imported. Reinstall the Warp version bundled/required by "
-            "this Isaac Sim installation."
-        ) from exc
-
-    def package_details() -> tuple[dict[str, str], dict[str, str]]:
-        providers = importlib.metadata.packages_distributions().get("warp", [])
-        versions: dict[str, str] = {}
-        for provider in providers:
-            try:
-                versions[provider] = importlib.metadata.version(provider)
-            except importlib.metadata.PackageNotFoundError:
-                versions[provider] = "unknown"
-        isaac_versions: dict[str, str] = {}
-        for distribution in ("isaacsim", "isaaclab"):
-            try:
-                isaac_versions[distribution] = importlib.metadata.version(distribution)
-            except importlib.metadata.PackageNotFoundError:
-                pass
-        return versions, isaac_versions
-
-    array_type = getattr(wp, "array", None)
-    if not hasattr(wp_types, "array"):
-        if array_type is None:
-            versions, isaac_versions = package_details()
-            raise RuntimeError(
-                "The imported 'warp' module is not a compatible NVIDIA warp-lang "
-                f"build: file={getattr(wp, '__file__', None)!r}, "
-                f"warp_providers={versions!r}, isaac={isaac_versions!r}. "
-                "Reinstall the Warp version required by this Isaac Sim installation."
-            )
-        # Isaac Sim uses this name as an evaluated type annotation. The public
-        # wp.array object is the corresponding implementation in newer Warp.
-        setattr(wp_types, "array", array_type)
-
-    context_module = getattr(wp, "context", None)
-    if context_module is None:
-        try:
-            context_module = importlib.import_module("warp.context")
-        except (ImportError, ModuleNotFoundError) as exc:
-            versions, isaac_versions = package_details()
-            raise RuntimeError(
-                "The installed Warp is too new or otherwise incompatible with "
-                "this Isaac Sim build: the public module 'warp.context' is absent. "
-                f"file={getattr(wp, '__file__', None)!r}, "
-                f"warp_providers={versions!r}, isaac={isaac_versions!r}. "
-                "Do not patch warp._src.context into Isaac Sim; reinstall the "
-                "Warp version pinned by the Isaac Sim/Isaac Lab environment."
-            ) from exc
-        setattr(wp, "context", context_module)
-
-    if not hasattr(context_module, "Kernel"):
-        versions, isaac_versions = package_details()
-        raise RuntimeError(
-            "The installed Warp exposes warp.context but not context.Kernel, "
-            "which is required by this Isaac Sim Replicator build. "
-            f"file={getattr(wp, '__file__', None)!r}, "
-            f"warp_providers={versions!r}, isaac={isaac_versions!r}."
-        )
-
-    version = getattr(wp, "__version__", "unknown")
-    print(
-        "Warp compatibility check passed "
-        f"(version={version}, file={getattr(wp, '__file__', None)})",
-        flush=True,
-    )
-
 
 def _assert_warp_not_imported_before_launch() -> None:
     """Ensure AppLauncher can select Isaac Sim's bundled Warp build."""
@@ -4346,6 +4302,110 @@ def _pose_from_mapping(mapping: dict[str, Any]) -> ResetPose:
         root_pitch=float(mapping["root_pitch"]),
         root_height=float(mapping["root_height"]),
     )
+
+
+def _candidate_batches(
+    candidate_bank: dict[float, list[dict[str, Any]]],
+    candidates_per_slope: int,
+) -> list[list[tuple[dict[str, Any], int, int]]]:
+    """Pack candidates onto unique equivalent terrain columns."""
+
+    if not 1 <= candidates_per_slope <= TERRAIN_COLUMNS_PER_TYPE:
+        raise ValueError(
+            f"candidates_per_slope must lie in [1, {TERRAIN_COLUMNS_PER_TYPE}]"
+        )
+    rounds = max(
+        math.ceil(len(records) / candidates_per_slope)
+        for records in candidate_bank.values()
+    )
+    batches: list[list[tuple[dict[str, Any], int, int]]] = []
+    for round_index in range(rounds):
+        batch: list[tuple[dict[str, Any], int, int]] = []
+        begin = round_index * candidates_per_slope
+        end = begin + candidates_per_slope
+        for slope in SLOPE_GRADIENTS:
+            level, base_column = terrain_index_for_gradient(slope)
+            for lane, record in enumerate(candidate_bank[float(slope)][begin:end]):
+                batch.append((record, level, base_column + lane))
+        batches.append(batch)
+    return batches
+
+
+def _candidate_batch_mapping(
+    entries: list[tuple[dict[str, Any], int, int]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CANDIDATE_BATCH_SCHEMA_VERSION,
+        "candidates": [
+            {
+                "slope": float(source["pose"]["gradient"]),
+                "candidate_id": int(source["candidate_id"]),
+                "terrain_level": int(level),
+                "terrain_column": int(column),
+                "pose": source["pose"],
+            }
+            for source, level, column in entries
+        ],
+    }
+
+
+def _load_candidate_batch(path: Path) -> list[dict[str, Any]]:
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    if set(mapping) != {"schema_version", "candidates"}:
+        raise RuntimeError("candidate batch uses an invalid top-level schema")
+    if mapping["schema_version"] != CANDIDATE_BATCH_SCHEMA_VERSION:
+        raise RuntimeError("candidate batch schema_version is unsupported")
+    rows = mapping["candidates"]
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("candidate batch must contain at least one candidate")
+    result: list[dict[str, Any]] = []
+    identities: set[tuple[float, int]] = set()
+    terrain_tiles: set[tuple[int, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "slope",
+            "candidate_id",
+            "terrain_level",
+            "terrain_column",
+            "pose",
+        }:
+            raise RuntimeError("candidate batch row uses an invalid schema")
+        slope = float(row["slope"])
+        candidate_id = row["candidate_id"]
+        level = row["terrain_level"]
+        column = row["terrain_column"]
+        if isinstance(candidate_id, bool) or not isinstance(candidate_id, int):
+            raise RuntimeError("candidate batch candidate_id must be an integer")
+        if isinstance(level, bool) or not isinstance(level, int):
+            raise RuntimeError("candidate batch terrain_level must be an integer")
+        if isinstance(column, bool) or not isinstance(column, int):
+            raise RuntimeError("candidate batch terrain_column must be an integer")
+        expected_level, base_column = terrain_index_for_gradient(slope)
+        if level != expected_level or not (
+            base_column <= column < base_column + TERRAIN_COLUMNS_PER_TYPE
+        ):
+            raise RuntimeError("candidate batch terrain tile does not match its slope")
+        pose = _pose_from_mapping(row["pose"])
+        if not math.isclose(pose.gradient, slope, rel_tol=0.0, abs_tol=1.0e-12):
+            raise RuntimeError("candidate batch pose gradient does not match its slope")
+        identity = (slope, candidate_id)
+        terrain_tile = (level, column)
+        if identity in identities:
+            raise RuntimeError("candidate batch contains a duplicate candidate")
+        if terrain_tile in terrain_tiles:
+            raise RuntimeError("candidate batch assigns multiple candidates to one terrain tile")
+        identities.add(identity)
+        terrain_tiles.add(terrain_tile)
+        result.append(
+            {
+                "slope": slope,
+                "candidate_id": candidate_id,
+                "terrain_level": level,
+                "terrain_column": column,
+                "pose": pose,
+            }
+        )
+    return result
 
 
 def _survival_steps(rollout: dict[str, Any], maximum_steps: int) -> tuple[int, int | None]:
@@ -4403,11 +4463,11 @@ def _candidate_score(
         "d6_impulse": float(rollout["max_d6_impulse_n_s"])
         <= float(thresholds["d6_impulse_n_s"]),
         "arm_torque": float(rollout["max_arm_torque_ratio"])
-        <= args.static_arm_preload_limit,
+        <= RESET_TORQUE_LIMIT_FRACTION,
         "waist_torque": float(rollout["max_waist_torque_ratio"])
-        <= args.static_waist_preload_limit,
+        <= RESET_TORQUE_LIMIT_FRACTION,
         "lower_torque": float(rollout["maximum_lower_torque_ratio"])
-        <= args.static_lower_preload_limit,
+        <= RESET_TORQUE_LIMIT_FRACTION,
         "root_height": float(rollout["minimum_root_normal_height_m"]) >= 0.60,
         "torso_pitch": float(rollout["maximum_abs_torso_pitch_rad"]) <= 0.45,
         "joint_error": float(rollout["maximum_policy_joint_error_rad"]) <= 0.35,
@@ -4432,11 +4492,11 @@ def _candidate_score(
         "d6_impulse": float(rollout["max_d6_impulse_n_s"])
         / float(thresholds["d6_impulse_n_s"]),
         "arm_torque": float(rollout["max_arm_torque_ratio"])
-        / args.static_arm_preload_limit,
+        / RESET_TORQUE_LIMIT_FRACTION,
         "waist_torque": float(rollout["max_waist_torque_ratio"])
-        / args.static_waist_preload_limit,
+        / RESET_TORQUE_LIMIT_FRACTION,
         "lower_torque": float(rollout["maximum_lower_torque_ratio"])
-        / args.static_lower_preload_limit,
+        / RESET_TORQUE_LIMIT_FRACTION,
         "torso_pitch": float(rollout["maximum_abs_torso_pitch_rad"]) / 0.45,
         "joint_error": float(rollout["maximum_policy_joint_error_rad"]) / 0.35,
         "path_displacement": abs(float(rollout["final_root_path_displacement_m"]))
@@ -4504,9 +4564,7 @@ def _candidate_contract(args: argparse.Namespace) -> dict[str, Any]:
         "reuse_candidates",
         "stable_displacement_limit",
         "static_only",
-        "static_arm_preload_limit",
-        "static_lower_preload_limit",
-        "static_waist_preload_limit",
+        "stage_b_candidates_per_slope",
         "steps",
         "summary_output",
         "timeseries_stride",
@@ -4553,7 +4611,7 @@ def _candidate_output_mapping(
         if candidate_bank.get(float(slope)) and float(slope) in diagnostics_by_slope
     )
     return {
-        "schema_version": 3,
+        "schema_version": CANDIDATE_PROGRESS_SCHEMA_VERSION,
         "candidate_contract": _candidate_contract(args),
         "attempted_least_squares_starts_per_slope": attempted,
         "complete": len(completed_slopes) == len(SLOPE_GRADIENTS),
@@ -4584,7 +4642,7 @@ def _write_candidate_progress(
         args,
     )
     _write_json_yaml(args.candidate_output, mapping)
-    if args._pipeline_worker is None:
+    if not args._pipeline_worker:
         return
     progress_value = os.environ.get(PIPELINE_WORKER_PROGRESS_ENV)
     if not progress_value:
@@ -4607,36 +4665,11 @@ def _load_candidate_progress(
     if not path.is_file():
         raise FileNotFoundError(f"candidate output does not exist: {path}")
     mapping = json.loads(path.read_text(encoding="utf-8"))
-    schema_version = mapping.get("schema_version")
-    if schema_version not in (2, 3):
+    if mapping.get("schema_version") != CANDIDATE_PROGRESS_SCHEMA_VERSION:
         raise RuntimeError("candidate output uses an unsupported schema; rerun Stage A")
     stored_contract = mapping.get("candidate_contract")
     current_contract = _candidate_contract(args)
-    stored_arguments = (
-        dict(stored_contract.get("arguments", {}))
-        if isinstance(stored_contract, dict)
-        else None
-    )
-    if stored_arguments is not None:
-        # Schema-3 caches written before these operational/soft-reserve fields
-        # were excluded remain valid because their hard Stage A contract did not
-        # change.
-        stored_arguments.pop("static_only", None)
-        stored_arguments.pop("zmp_optimization_reserve_fraction", None)
-    if (
-        not isinstance(stored_contract, dict)
-        or stored_arguments != current_contract["arguments"]
-        or (
-            schema_version >= 3
-            and stored_contract.get("configured_slopes")
-            != current_contract["configured_slopes"]
-        )
-        or (
-            schema_version >= 3
-            and stored_contract.get("stage_a_solve_plan")
-            != current_contract["stage_a_solve_plan"]
-        )
-    ):
+    if stored_contract != current_contract:
         raise RuntimeError(
             "candidate output does not match the current solver arguments"
         )
@@ -4653,9 +4686,6 @@ def _load_candidate_progress(
         raise RuntimeError(
             "candidate output contains duplicate or unconfigured slope rows"
         )
-    if schema_version == 2 and set(by_slope) != configured_slopes:
-        raise RuntimeError("legacy candidate output must contain the complete slope grid")
-
     candidate_bank: dict[float, list[dict[str, Any]]] = {}
     diagnostics: list[dict[str, Any]] = []
     baseline_poses: dict[float, ResetPose] = {}
@@ -4838,12 +4868,6 @@ def _assembled_validation_command(
         str(args.timeseries_stride),
         "--stable-displacement-limit",
         str(args.stable_displacement_limit),
-        "--static-lower-preload-limit",
-        str(args.static_lower_preload_limit),
-        "--static-waist-preload-limit",
-        str(args.static_waist_preload_limit),
-        "--static-arm-preload-limit",
-        str(args.static_arm_preload_limit),
         "--device",
         str(args.device),
     ]
@@ -4859,12 +4883,16 @@ def _assembled_validation_command(
 def _run_candidate_validation_process(
     args: argparse.Namespace,
     reset_pose_path: Path,
+    candidate_batch_path: Path,
     output_dir: Path,
 ) -> dict[str, Any]:
     """Run one candidate batch in a disposable Isaac Sim process."""
 
     passed_report_path = output_dir / "alignment.json"
     failed_report_path = output_dir / "failed.json"
+    expected_candidates = _load_candidate_batch(candidate_batch_path)
+    environment = os.environ.copy()
+    environment[CANDIDATE_BATCH_ENV] = str(candidate_batch_path.resolve())
     result = subprocess.run(
         _assembled_validation_command(
             args,
@@ -4873,6 +4901,7 @@ def _run_candidate_validation_process(
             failed_report_path,
         ),
         check=False,
+        env=environment,
     )
     passed = passed_report_path.is_file()
     failed = failed_report_path.is_file()
@@ -4900,11 +4929,25 @@ def _run_candidate_validation_process(
     )
     if binding_errors:
         raise RuntimeError("; ".join(binding_errors))
+    inputs = report.get("inputs", {})
+    if inputs.get("candidate_batch_path") != str(candidate_batch_path.resolve()):
+        raise RuntimeError("candidate rollout report is bound to a different candidate batch")
+    expected_bindings = [
+        {
+            "environment_index": index,
+            "slope": row["slope"],
+            "candidate_id": row["candidate_id"],
+            "terrain_level": row["terrain_level"],
+            "terrain_column": row["terrain_column"],
+        }
+        for index, row in enumerate(expected_candidates)
+    ]
     if (
         tuple(float(value) for value in report.get("slopes", ()))
-        != tuple(float(value) for value in SLOPE_GRADIENTS)
-        or len(report.get("initial", ())) != len(SLOPE_GRADIENTS)
-        or len(report.get("rollout", ())) != len(SLOPE_GRADIENTS)
+        != tuple(row["slope"] for row in expected_candidates)
+        or len(report.get("initial", ())) != len(expected_candidates)
+        or len(report.get("rollout", ())) != len(expected_candidates)
+        or report.get("candidate_bindings") != expected_bindings
     ):
         raise RuntimeError("candidate rollout report slope rows are invalid")
     return report
@@ -4920,43 +4963,39 @@ def _run_isolated_candidate_rollouts(
     evaluated: dict[float, list[dict[str, Any]]] = {
         float(slope): [] for slope in SLOPE_GRADIENTS
     }
-    rounds = max(len(records) for records in candidate_bank.values())
+    candidates_per_slope = int(
+        getattr(
+            args,
+            "stage_b_candidates_per_slope",
+            DEFAULT_STAGE_B_CANDIDATES_PER_SLOPE,
+        )
+    )
+    batches = _candidate_batches(candidate_bank, candidates_per_slope)
     with tempfile.TemporaryDirectory(
         prefix="reset-pose-search-", dir=Path(args.output).resolve().parent
     ) as temporary:
         temporary_path = Path(temporary)
-        for round_index in range(rounds):
-            round_dir = temporary_path / f"batch-{round_index + 1:02d}"
+        baseline_path = temporary_path / "baseline_reset_poses.json"
+        _write_json_yaml(baseline_path, baseline_library.to_mapping())
+        for batch_index, entries in enumerate(batches):
+            round_dir = temporary_path / f"batch-{batch_index + 1:02d}"
             round_dir.mkdir()
-            round_poses: list[ResetPose] = []
-            active_slopes: set[float] = set()
-            round_records: dict[float, dict[str, Any]] = {}
-            for slope in SLOPE_GRADIENTS:
-                records = candidate_bank[slope]
-                if round_index < len(records):
-                    record = records[round_index]
-                    active_slopes.add(float(slope))
-                    round_records[float(slope)] = record
-                    round_poses.append(_pose_from_mapping(record["pose"]))
-                else:
-                    round_poses.append(baseline_library.pose_for_gradient(slope))
-
-            round_path = round_dir / "reset_poses.json"
+            candidate_batch_path = round_dir / "candidate_batch.json"
             _write_json_yaml(
-                round_path,
-                ResetPoseLibrary(poses=tuple(round_poses)).to_mapping(),
+                candidate_batch_path, _candidate_batch_mapping(entries)
             )
             print(
-                f"Stage B: rollout batch {round_index + 1}/{rounds} "
-                f"({len(active_slopes)} active candidates, fresh Isaac Sim process)",
+                f"Stage B: rollout batch {batch_index + 1}/{len(batches)} "
+                f"({len(entries)} candidates, up to {candidates_per_slope} per slope, "
+                "fresh Isaac Sim process)",
                 flush=True,
             )
             started = time.monotonic()
             round_report = _run_candidate_validation_process(
-                args, round_path, round_dir
+                args, baseline_path, candidate_batch_path, round_dir
             )
             print(
-                f"Stage B: rollout batch {round_index + 1}/{rounds} completed "
+                f"Stage B: rollout batch {batch_index + 1}/{len(batches)} completed "
                 f"in {time.monotonic() - started:.1f}s "
                 f"(status={round_report['status']})",
                 flush=True,
@@ -4965,13 +5004,11 @@ def _run_isolated_candidate_rollouts(
             hitch_height_target = float(
                 round_report["rickshaw_pose_contract"]["hitch_height_target_m"]
             )
-            for env_index, slope in enumerate(SLOPE_GRADIENTS):
-                if float(slope) not in active_slopes:
-                    continue
-                source = round_records[float(slope)]
+            for env_index, (source, _level, _column) in enumerate(entries):
+                slope = float(source["pose"]["gradient"])
                 initial = round_report["initial"][env_index]
                 rollout = round_report["rollout"][env_index]
-                evaluated[float(slope)].append(
+                evaluated[slope].append(
                     {
                         "slope": float(slope),
                         "candidate_id": int(source["candidate_id"]),
@@ -5030,6 +5067,8 @@ def _run_isolated_candidate_rollouts(
         "alignment_evidence": None,
         "final_validation": None,
         "candidate_evidence": str(args.candidate_output.resolve()),
+        "stage_b_candidates_per_slope": candidates_per_slope,
+        "stage_b_batch_count": len(batches),
         "winners": winners,
         "all_candidates": [
             record
@@ -5068,13 +5107,7 @@ def _run_pipeline_parent(args: argparse.Namespace) -> int:
 
         if args.reuse_candidates:
             shutil.copy2(args.candidate_output, staged_candidates)
-        worker_token = secrets.token_hex(32)
-        token_file = staging_dir / PIPELINE_WORKER_TOKEN_FILE
-        token_file.write_text(worker_token + "\n", encoding="utf-8")
-        token_file.chmod(0o600)
         worker_environment = os.environ.copy()
-        worker_environment[PIPELINE_WORKER_TOKEN_ENV] = worker_token
-        worker_environment[PIPELINE_WORKER_STAGING_ENV] = str(staging_dir.resolve())
         worker_environment[PIPELINE_WORKER_PROGRESS_ENV] = str(
             args.candidate_output.resolve()
         )
@@ -5084,7 +5117,6 @@ def _run_pipeline_parent(args: argparse.Namespace) -> int:
             str(Path(__file__).resolve()),
             *sys.argv[1:],
             "--_pipeline-worker",
-            worker_token,
             "--output",
             str(staged_library),
             "--candidate-output",
@@ -5382,7 +5414,6 @@ def main() -> int:
     simulation_app = app_launcher.app
     try:
         print("Stage B: Isaac Sim startup completed", flush=True)
-        _prepare_warp_for_isaac_sim()
         print("Stage B: loading simulation dependencies", flush=True)
         _load_simulation_dependencies()
         print("Stage B: simulation dependencies loaded", flush=True)

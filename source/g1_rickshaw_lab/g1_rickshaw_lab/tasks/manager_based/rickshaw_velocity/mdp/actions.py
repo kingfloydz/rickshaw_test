@@ -12,8 +12,14 @@ from typing import Any
 
 import torch
 
+from g1_rickshaw_lab.policy_schema import (
+    ACTION_DIM,
+    ACTION_SCALE,
+    BUTTERWORTH_A1,
+    BUTTERWORTH_B0,
+    BUTTERWORTH_B1,
+)
 
-ACTION_DIM = 29
 ACTION_GROUP_DIMS = {
     "lower": 12,
     "waist": 3,
@@ -22,20 +28,13 @@ ACTION_GROUP_DIMS = {
     "wrist": 6,
 }
 ACTION_GROUP_SCALES = {
-    "lower": 0.40,
-    "waist": 0.20,
-    "shoulder": 0.25,
-    "elbow": 0.30,
-    "wrist": 0.15,
+    "lower": ACTION_SCALE[0],
+    "waist": ACTION_SCALE[12],
+    "shoulder": ACTION_SCALE[15],
+    "elbow": ACTION_SCALE[18],
+    "wrist": ACTION_SCALE[19],
 }
 ARM_ACTION_START_INDEX = ACTION_GROUP_DIMS["lower"] + ACTION_GROUP_DIMS["waist"]
-
-
-# Bilinear-transform coefficients for a first-order, 4 Hz Butterworth filter
-# sampled at the 50 Hz policy frequency.
-BUTTERWORTH_B0 = 0.20430082
-BUTTERWORTH_B1 = 0.20430082
-BUTTERWORTH_A1 = -0.59139835
 
 
 def _check_last_dim(value: torch.Tensor, expected: int, name: str) -> None:
@@ -48,15 +47,7 @@ def action_scale_vector(
 ) -> torch.Tensor:
     """Return the fixed 29-D scale vector in checkpoint joint-group order."""
 
-    values = [ACTION_GROUP_SCALES["lower"]] * ACTION_GROUP_DIMS["lower"]
-    values.extend([ACTION_GROUP_SCALES["waist"]] * ACTION_GROUP_DIMS["waist"])
-    # The persisted arm order is left-side joints followed by right-side
-    # joints, with shoulder/elbow/wrist joints contiguous within each side.
-    for _ in range(2):
-        values.extend([ACTION_GROUP_SCALES["shoulder"]] * 3)
-        values.append(ACTION_GROUP_SCALES["elbow"])
-        values.extend([ACTION_GROUP_SCALES["wrist"]] * 3)
-    result = torch.tensor(values, device=device, dtype=dtype)
+    result = torch.tensor(ACTION_SCALE, device=device, dtype=dtype)
     _check_last_dim(result, ACTION_DIM, "action scale")
     return result
 
@@ -129,14 +120,7 @@ def gain_compensated_static_target(
     motor_strength: torch.Tensor,
     joint_model_error: torch.Tensor,
 ) -> torch.Tensor:
-    """Convert a nominal static PD target to the episode's effective gains.
-
-    The static torque is ``K_nom * (q_nominal - q_reset)``. Runtime actuator
-    scaling changes both the gain and its effort limit, so the
-    target displacement must be divided by the same per-joint gain factor.
-    Clipping the target would destroy the static torque balance and is
-    intentionally rejected.
-    """
+    """Convert a nominal static PD target to the episode's effective gains."""
 
     if q_reset.ndim != 2 or nominal_target.shape != q_reset.shape:
         raise ValueError("static target inputs must have identical [N,D] shapes")
@@ -148,59 +132,6 @@ def gain_compensated_static_target(
     if torch.any(~torch.isfinite(gain)) or torch.any(gain <= 0.0):
         raise ValueError("effective static actuator gains must be finite and positive")
     return q_reset + (nominal_target - q_reset) / gain
-
-
-def static_targets_from_torque_basis(
-    q_reset: torch.Tensor,
-    tau_unloaded: torch.Tensor,
-    tau_per_tangent_force: torch.Tensor,
-    tau_per_normal_force: torch.Tensor,
-    cart_force_tangent: torch.Tensor,
-    cart_force_normal: torch.Tensor,
-    stiffness: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build unloaded and loaded PD targets for one episode's cart load.
-
-    The basis vectors map a positive force applied by the robot to the cart in
-    the slope tangent/normal directions to robot joint torque.  At a fixed
-    reset posture, static inverse dynamics is affine in these components.
-    """
-
-    tensors = (
-        tau_unloaded,
-        tau_per_tangent_force,
-        tau_per_normal_force,
-        stiffness,
-    )
-    if q_reset.ndim != 2 or any(value.shape != q_reset.shape for value in tensors):
-        raise ValueError("static torque-basis tensors must have identical [N,D] shapes")
-    expected_force_shape = (q_reset.shape[0],)
-    if (
-        cart_force_tangent.shape != expected_force_shape
-        or cart_force_normal.shape != expected_force_shape
-    ):
-        raise ValueError("static cart force components must have shape [N]")
-    if any(torch.any(~torch.isfinite(value)) for value in (q_reset, *tensors)):
-        raise ValueError("static torque-basis inputs must be finite")
-    if torch.any(stiffness <= 0.0):
-        raise ValueError("static target stiffness must be positive")
-    force_tangent = cart_force_tangent.to(
-        device=q_reset.device, dtype=q_reset.dtype
-    )
-    force_normal = cart_force_normal.to(device=q_reset.device, dtype=q_reset.dtype)
-    if torch.any(~torch.isfinite(force_tangent)) or torch.any(
-        ~torch.isfinite(force_normal)
-    ):
-        raise ValueError("static cart force components must be finite")
-    loaded_torque = (
-        tau_unloaded
-        + force_tangent[:, None] * tau_per_tangent_force
-        + force_normal[:, None] * tau_per_normal_force
-    )
-    return (
-        q_reset + tau_unloaded / stiffness,
-        q_reset + loaded_torque / stiffness,
-    )
 
 
 @dataclass
@@ -464,7 +395,9 @@ if ISAACLAB_AVAILABLE:
             terms = self._env.action_manager._terms.values()
             target = torch.cat([term.processed_actions for term in terms], dim=-1)
             if target.shape[-1] != ACTION_DIM:
-                raise RuntimeError("ActionManager processed target is not 29-D")
+                raise RuntimeError(
+                    f"ActionManager processed target is not {ACTION_DIM}-D"
+                )
             state = self._env.action_state
             state.prev_prev_target[:] = state.prev_target
             state.prev_target[:] = state.target
@@ -557,5 +490,4 @@ __all__ = [
     "butterworth_filter_step",
     "gain_compensated_static_target",
     "butterworth_gain",
-    "static_targets_from_torque_basis",
 ]

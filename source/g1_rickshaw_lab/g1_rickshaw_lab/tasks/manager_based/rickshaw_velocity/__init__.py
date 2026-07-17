@@ -14,6 +14,7 @@ PLAY_TASK_ID = "Isaac-G1-Rickshaw-Directional-Slope-Play-v0"
 if find_spec("gymnasium") is not None and find_spec("isaaclab") is not None:
     import gymnasium as gym
 
+    from .env import G1RickshawRLEnv
     from .env_cfg import G1RickshawDirectionalSlopeEnvCfg, G1RickshawDirectionalSlopePlayEnvCfg
 
     def _register(
@@ -33,7 +34,10 @@ if find_spec("gymnasium") is not None and find_spec("isaaclab") is not None:
             kwargs["rsl_rl_student_cfg_entry_point"] = student_runner_cfg_entry_point
         gym.register(
             id=task_id,
-            entry_point="isaaclab.envs:ManagerBasedRLEnv",
+            entry_point=(
+                "g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.env:"
+                "G1RickshawRLEnv"
+            ),
             disable_env_checker=True,
             kwargs=kwargs,
         )
@@ -56,6 +60,7 @@ if find_spec("gymnasium") is not None and find_spec("isaaclab") is not None:
     __all__ = [
         "G1RickshawDirectionalSlopeEnvCfg",
         "G1RickshawDirectionalSlopePlayEnvCfg",
+        "G1RickshawRLEnv",
         "PLAY_TASK_ID",
         "TRAIN_TASK_ID",
     ]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-import hashlib
 import importlib.metadata
 import json
 import math
@@ -13,13 +12,11 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from ._hashing import sha256_file
 from .slope_contract import SLOPE_GRADIENTS
 
 
-REWARD_CALIBRATION_SCHEMA_VERSION = 3
-RAW_REWARD_SAMPLE_SCHEMA_VERSION = 3
-REWARD_RUNTIME_INPUT_CLOSURE_VERSION = 2
+REWARD_CALIBRATION_SCHEMA_VERSION = 4
+RAW_REWARD_SAMPLE_SCHEMA_VERSION = 4
 RAW_REWARD_SAMPLE_KIND = "isaaclab_reward_manager_unweighted_terms"
 SPEED_TERM = "track_speed_exp"
 TERMINATION_TERM = "termination"
@@ -33,28 +30,36 @@ GUIDE_REWARD_TERMS = (
     "heading_error_l2",
     "zmp_margin_barrier",
     "hitch_height_exp",
+    "hitch_height_recovery_l2",
     "fat2_prior_exp",
-    "feet_air_time",
+    "feet_single_stance",
     "feet_slide",
     "terrain_normal_velocity_l2",
     "joint_power_l1",
     "processed_action_rate_l2",
     "processed_action_jerk_l2",
+    "hip_yaw_roll_reference_l2",
+    "pelvis_height_limits_l2",
     "joint_position_limits",
     "termination",
 )
 
 GUIDE_PHYSICAL_SCALES = {
-    "speed_error_sigma_mps": 0.25,
+    "speed_error_sigma_mps": 0.35,
     "lateral_error_scale_m": 0.30,
     "heading_error_scale_rad": 0.30,
     "zmp_margin_m": 0.02,
     "hitch_height_error_sigma_m": 0.02,
+    "hitch_height_recovery_deadband_m": 0.05,
+    "hitch_height_recovery_scale_m": 0.05,
     "fat2_sigma_rad": 0.12,
     "processed_action_rate_scale_rad": 0.05,
     "processed_action_jerk_scale_rad": 0.03,
-    "feet_air_time_threshold_s": 0.4,
-    "feet_air_time_normalizer_s": 1.0,
+    "hip_yaw_roll_reference_scale_rad": 0.20,
+    "pelvis_height_bounds_m": [0.65, 0.80],
+    "pelvis_height_error_scale_m": 0.05,
+    "feet_single_stance_cap_s": 0.4,
+    "feet_single_stance_normalizer_s": 1.0,
     "feet_slide_normalizer_mps": 1.0,
     "terrain_normal_velocity_scale_mps": 0.25,
     "joint_power_normalizer_w": 1.0,
@@ -62,18 +67,21 @@ GUIDE_PHYSICAL_SCALES = {
 }
 
 GUIDE_REWARD_NORMALIZATION_SCALES = {
-    "track_speed_exp": {"scale": 0.25, "unit": "m/s"},
+    "track_speed_exp": {"scale": 0.35, "unit": "m/s"},
     "lateral_error_l2": {"scale": 0.30, "unit": "m"},
     "heading_error_l2": {"scale": 0.30, "unit": "rad"},
     "zmp_margin_barrier": {"scale": 0.02, "unit": "m"},
     "hitch_height_exp": {"scale": 0.02, "unit": "m"},
+    "hitch_height_recovery_l2": {"scale": 0.05, "unit": "m"},
     "fat2_prior_exp": {"scale": 0.12, "unit": "rad"},
-    "feet_air_time": {"scale": 1.0, "unit": "s"},
+    "feet_single_stance": {"scale": 1.0, "unit": "s"},
     "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {"scale": 0.25, "unit": "m/s"},
     "joint_power_l1": {"scale": 1.0, "unit": "W"},
     "processed_action_rate_l2": {"scale": 0.05, "unit": "rad"},
     "processed_action_jerk_l2": {"scale": 0.03, "unit": "rad"},
+    "hip_yaw_roll_reference_l2": {"scale": 0.20, "unit": "rad"},
+    "pelvis_height_limits_l2": {"scale": 0.05, "unit": "m"},
     "joint_position_limits": {"scale": 1.0, "unit": "rad"},
     "termination": {"scale": 1.0, "unit": "binary"},
 }
@@ -101,135 +109,12 @@ C1_NOMINAL_PHYSICS_FIELDS = (
     "joint.model_error",
 )
 
-REQUIRED_RUNTIME_INPUT_HASHES = frozenset(
-    {
-        "implementation_guide",
-        "reward_calibration_module",
-        "reward_terms",
-        "environment_config",
-        "calibration_tool",
-        "feasibility_envelope",
-        "reset_poses",
-    }
-)
-# Public semantic alias: these are labels required in ``runtime_inputs_sha256``.
-# Keep the historical name for callers that imported it before schema 3.
-REQUIRED_RUNTIME_INPUT_LABELS = REQUIRED_RUNTIME_INPUT_HASHES
-
-REQUIRED_RUNTIME_DEPENDENCY_LABELS = frozenset(
-    {
-        "dependency:source/g1_rickshaw_lab/g1_rickshaw_lab/tasks/manager_based/"
-        "rickshaw_velocity/mdp/actions.py",
-        "dependency:source/g1_rickshaw_lab/g1_rickshaw_lab/tasks/manager_based/"
-        "rickshaw_velocity/mdp/dynamics.py",
-        "dependency:source/g1_rickshaw_lab/g1_rickshaw_lab/tasks/manager_based/"
-        "rickshaw_velocity/mdp/events.py",
-        "asset:assets/g1_dex1/g1_29dof_mode_15_with_dex1_1.urdf",
-        "asset:assets/rickshaw/rickshaw.urdf",
-        "isaaclab:source/isaaclab/isaaclab/managers/reward_manager.py",
-        "isaaclab:source/isaaclab_rl/isaaclab_rl/rsl_rl/vecenv_wrapper.py",
-    }
-)
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-ASSET_DEPENDENCY_SUFFIXES = frozenset({".urdf", ".usd", ".stl", ".yaml"})
-
-
 class RewardCalibrationError(ValueError):
     """Raised when reward samples do not satisfy the calibration contract."""
 
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def reward_calibration_runtime_input_paths(
-    *,
-    repository_root: str | Path = REPOSITORY_ROOT,
-    feasibility_path: str | Path | None = None,
-    reset_pose_path: str | Path | None = None,
-    isaaclab_root: str | Path | None = None,
-) -> dict[str, Path]:
-    """Return the complete file closure that can change collected reward samples."""
-
-    root = Path(repository_root).resolve()
-    package = root / "source" / "g1_rickshaw_lab" / "g1_rickshaw_lab"
-    task = package / "tasks" / "manager_based" / "rickshaw_velocity"
-    resolved_feasibility = Path(
-        feasibility_path
-        if feasibility_path is not None
-        else os.environ.get(
-            "G1_RICKSHAW_FEASIBILITY_ENVELOPE",
-            root / "config" / "feasibility_envelope.yaml",
-        )
-    ).resolve()
-    resolved_reset = Path(
-        reset_pose_path
-        if reset_pose_path is not None
-        else os.environ.get(
-            "G1_RICKSHAW_RESET_POSES", root / "config" / "reset_poses.yaml"
-        )
-    ).resolve()
-    resolved_isaaclab = Path(
-        isaaclab_root
-        if isaaclab_root is not None
-        else os.environ.get("ISAACLAB_PATH", root.parent / "IsaacLab")
-    ).resolve()
-    paths: dict[str, Path] = {
-        "implementation_guide": root / "G1_Rickshaw_IsaacLab_Implementation_Guide.md",
-        "reward_calibration_module": package / "reward_calibration.py",
-        "reward_terms": task / "mdp" / "rewards.py",
-        "environment_config": task / "env_cfg.py",
-        "calibration_tool": root / "scripts" / "calibrate_rewards.py",
-        "feasibility_envelope": resolved_feasibility,
-        "reset_poses": resolved_reset,
-    }
-    dependency_files = {
-        package / "configuration.py",
-        root / "scripts" / "_isaaclab_wrappers.py",
-    }
-    for dependency_root in (package / "assets", package / "rl", task):
-        dependency_files.update(
-            path
-            for path in dependency_root.rglob("*.py")
-            if "tests" not in path.relative_to(dependency_root).parts
-        )
-    for path in sorted(dependency_files):
-        label = f"dependency:{path.relative_to(root).as_posix()}"
-        paths[label] = path
-    for asset_root in (root / "assets" / "g1_dex1", root / "assets" / "rickshaw"):
-        for path in sorted(asset_root.rglob("*")):
-            if path.is_file() and path.suffix.lower() in ASSET_DEPENDENCY_SUFFIXES:
-                paths[f"asset:{path.relative_to(root).as_posix()}"] = path
-    external = (
-        resolved_isaaclab
-        / "source"
-        / "isaaclab"
-        / "isaaclab"
-        / "managers"
-        / "reward_manager.py",
-        resolved_isaaclab
-        / "source"
-        / "isaaclab_rl"
-        / "isaaclab_rl"
-        / "rsl_rl"
-        / "vecenv_wrapper.py",
-    )
-    for path in external:
-        paths[f"isaaclab:{path.relative_to(resolved_isaaclab).as_posix()}"] = path
-    missing = sorted(label for label, path in paths.items() if not path.is_file())
-    if missing:
-        raise FileNotFoundError(f"reward calibration runtime inputs are missing: {missing}")
-    return dict(sorted(paths.items()))
-
-
-def reward_calibration_runtime_input_hashes(**kwargs: Any) -> dict[str, str]:
-    """Hash the exact reward-collection closure under stable labels."""
-
-    return {
-        name: sha256_file(path)
-        for name, path in reward_calibration_runtime_input_paths(**kwargs).items()
-    }
 
 
 def reward_calibration_runtime_versions() -> dict[str, str]:
@@ -292,52 +177,21 @@ def validate_c1_physics_snapshot(
             )
 
 
-def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("ascii")
-
-
-def content_sha256(value: Mapping[str, Any]) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
-
-
-def verify_content_addressed_report(value: Mapping[str, Any]) -> bool:
-    claimed = value.get("content_sha256")
-    if not isinstance(claimed, str):
-        return False
-    payload = dict(value)
-    del payload["content_sha256"]
-    return claimed == content_sha256(payload)
-
-
-def write_content_addressed_json(
+def write_reward_calibration_json(
     output_dir: str | Path,
-    stem: str,
     payload: Mapping[str, Any],
 ) -> Path:
-    """Atomically write ``stem.<full SHA256>.json`` and embed the same digest."""
+    """Atomically write the current reward-calibration report."""
 
-    if not stem or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in stem):
-        raise ValueError("content-addressed report stem must be lowercase ASCII")
-    body = dict(payload)
-    if "content_sha256" in body:
-        raise ValueError("payload must not pre-populate content_sha256")
-    digest = content_sha256(body)
-    report = {**body, "content_sha256": digest}
     directory = Path(output_dir).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"{stem}.{digest}.json"
+    destination = directory / "reward_calibration.json"
     descriptor, temporary = tempfile.mkstemp(
-        dir=directory, prefix=f".{stem}.", suffix=".tmp"
+        dir=directory, prefix=".reward_calibration.", suffix=".tmp"
     )
     try:
         with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            json.dump(report, stream, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
+            json.dump(payload, stream, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -510,7 +364,8 @@ def _normalized_slope_indices(
             )
         if not 0 <= value < len(SIGNED_C1_SLOPES):
             raise RewardCalibrationError(
-                f"sample_slope_indices[{position}] lies outside [0, 12]"
+                f"sample_slope_indices[{position}] lies outside "
+                f"[0, {len(SIGNED_C1_SLOPES) - 1}]"
             )
         result.append(value)
     missing = [
@@ -633,7 +488,7 @@ def calibrate_reward_terms(
     result["slope_failures"] = slope_failures
     result["failures"] = all_failures
     result["status"] = "passed" if not all_failures else "failed"
-    result["stratified_gate"] = {
+    result["stratified_balance"] = {
         "required_slopes": [f"{slope:+.2f}" for slope in SIGNED_C1_SLOPES],
         "all_slopes_passed": not slope_failures,
     }
@@ -713,8 +568,6 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
         raise RewardCalibrationError("unsupported raw reward sample schema_version")
     if value.get("kind") != RAW_REWARD_SAMPLE_KIND:
         raise RewardCalibrationError("raw samples were not collected from Isaac Lab RewardManager")
-    if value.get("runtime_input_closure_version") != REWARD_RUNTIME_INPUT_CLOSURE_VERSION:
-        raise RewardCalibrationError("raw samples use an unsupported runtime input closure")
     if value.get("reward_normalization_scales") != GUIDE_REWARD_NORMALIZATION_SCALES:
         raise RewardCalibrationError("raw samples use unknown reward normalization scales")
     if value.get("curriculum_stage") != "TRAINING":
@@ -781,30 +634,9 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
     checkpoint = value.get("checkpoint")
     if not isinstance(checkpoint, Mapping):
         raise RewardCalibrationError("raw samples must bind one policy checkpoint")
-    checkpoint_sha = checkpoint.get("sha256")
-    if not isinstance(checkpoint_sha, str) or len(checkpoint_sha) != 64:
-        raise RewardCalibrationError("raw sample checkpoint SHA256 is malformed")
-    try:
-        int(checkpoint_sha, 16)
-    except ValueError as error:
-        raise RewardCalibrationError("raw sample checkpoint SHA256 is malformed") from error
     checkpoint_path = checkpoint.get("path")
     if not isinstance(checkpoint_path, str) or not checkpoint_path:
         raise RewardCalibrationError("raw samples must record the bound checkpoint path")
-    runtime_hashes = value.get("runtime_inputs_sha256")
-    required_runtime_labels = REQUIRED_RUNTIME_INPUT_HASHES | REQUIRED_RUNTIME_DEPENDENCY_LABELS
-    if (
-        not isinstance(runtime_hashes, Mapping)
-        or not required_runtime_labels.issubset(runtime_hashes)
-    ):
-        raise RewardCalibrationError("raw samples must hash all reward runtime inputs")
-    for name, digest in runtime_hashes.items():
-        if not isinstance(name, str) or not name or not isinstance(digest, str) or len(digest) != 64:
-            raise RewardCalibrationError("raw sample runtime input hashes are malformed")
-        try:
-            int(digest, 16)
-        except ValueError as error:
-            raise RewardCalibrationError("raw sample runtime input hashes are malformed") from error
     runtime_versions = value.get("runtime_versions")
     if (
         not isinstance(runtime_versions, Mapping)
@@ -818,7 +650,7 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
 
 
 def validate_sample_checkpoint_binding(value: Mapping[str, Any]) -> Path:
-    """Require the raw-sample checkpoint path to still match its recorded SHA256."""
+    """Require the raw-sample checkpoint path to remain available."""
 
     checkpoint = value.get("checkpoint")
     if not isinstance(checkpoint, Mapping):
@@ -829,15 +661,13 @@ def validate_sample_checkpoint_binding(value: Mapping[str, Any]) -> Path:
     path = Path(raw_path).resolve()
     if not path.is_file():
         raise RewardCalibrationError(f"bound reward-calibration checkpoint no longer exists: {path}")
-    if sha256_file(path) != checkpoint.get("sha256"):
-        raise RewardCalibrationError("bound reward-calibration checkpoint SHA256 changed")
     return path
 
 
 def load_raw_reward_sample_artifact(
     path: str | Path, *, require_checkpoint_binding: bool = True
 ) -> Mapping[str, Any]:
-    """Load and fully validate one content-addressed raw reward sample artifact."""
+    """Load and fully validate one raw reward sample artifact."""
 
     try:
         import torch
@@ -846,11 +676,6 @@ def load_raw_reward_sample_artifact(
     sample_path = Path(path).resolve()
     if not sample_path.is_file():
         raise RewardCalibrationError(f"raw reward sample artifact does not exist: {sample_path}")
-    digest = sha256_file(sample_path)
-    if sample_path.name != f"reward_samples.{digest}.pt":
-        raise RewardCalibrationError(
-            "raw RewardManager sample artifact filename does not contain its exact SHA256"
-        )
     value = torch.load(sample_path, map_location="cpu", weights_only=True)
     if not isinstance(value, Mapping):
         raise RewardCalibrationError("raw reward sample artifact must contain a mapping")
@@ -890,9 +715,7 @@ _REPORT_SOURCE_FIELDS = (
     "term_weights",
     "term_sources",
     "reward_normalization_scales",
-    "runtime_input_closure_version",
     "runtime_versions",
-    "runtime_inputs_sha256",
 )
 
 
@@ -908,9 +731,6 @@ def reward_calibration_guide_contract() -> dict[str, Any]:
         "section": "11.2",
         "physical_scales": GUIDE_PHYSICAL_SCALES,
         "reward_normalization_scales": GUIDE_REWARD_NORMALIZATION_SCALES,
-        "normalization_numeric_compatibility": (
-            "explicit SI normalization; unit-valued scales preserve legacy weighted signals"
-        ),
         "rule": (
             "global and every fixed slope independently require "
             "abs(weight * unweighted_p90) <= "
@@ -923,8 +743,6 @@ def reward_calibration_guide_contract() -> dict[str, Any]:
 def load_and_recompute_reward_calibration_report(
     report_path: str | Path,
     *,
-    expected_runtime_hashes: Mapping[str, str] | None = None,
-    expected_runtime_versions: Mapping[str, str] | None = None,
     teacher_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load a report, reload its raw samples, and reject any unrecomputed claim."""
@@ -936,42 +754,18 @@ def load_and_recompute_reward_calibration_report(
         raise RewardCalibrationError(f"invalid reward calibration report: {path}") from error
     if not isinstance(report, Mapping):
         raise RewardCalibrationError("reward calibration report must contain a mapping")
-    content_digest = report.get("content_sha256")
     if (
         report.get("schema_version") != REWARD_CALIBRATION_SCHEMA_VERSION
         or report.get("tool") != "calibrate_rewards"
-        or not isinstance(content_digest, str)
-        or len(content_digest) != 64
-        or not verify_content_addressed_report(report)
-        or path.name != f"reward_calibration.{content_digest}.json"
     ):
-        raise RewardCalibrationError(
-            "reward calibration report is not a valid content-addressed schema"
-        )
+        raise RewardCalibrationError("reward calibration report has an unsupported schema")
     raw_binding = report.get("raw_sample_artifact")
-    if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"path", "sha256"}:
+    if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"path"}:
         raise RewardCalibrationError("reward calibration report lacks its raw sample binding")
     raw_path = Path(str(raw_binding["path"])).resolve()
-    if not raw_path.is_file() or sha256_file(raw_path) != raw_binding["sha256"]:
-        raise RewardCalibrationError("reward calibration raw sample SHA256 binding failed")
+    if not raw_path.is_file():
+        raise RewardCalibrationError("reward calibration raw sample artifact is missing")
     artifact = load_raw_reward_sample_artifact(raw_path)
-    expected_hashes = (
-        dict(expected_runtime_hashes)
-        if expected_runtime_hashes is not None
-        else reward_calibration_runtime_input_hashes()
-    )
-    expected_versions = (
-        dict(expected_runtime_versions)
-        if expected_runtime_versions is not None
-        else reward_calibration_runtime_versions()
-    )
-    if (
-        dict(artifact["runtime_inputs_sha256"]) != expected_hashes
-        or report.get("analysis_runtime_inputs_sha256") != expected_hashes
-    ):
-        raise RewardCalibrationError("reward calibration report is stale for runtime inputs")
-    if artifact["runtime_versions"] != expected_versions:
-        raise RewardCalibrationError("reward calibration report is stale for runtime versions")
     artifact_source = {name: artifact[name] for name in _REPORT_SOURCE_FIELDS}
     if report.get("source") != artifact_source:
         raise RewardCalibrationError("reward calibration report source differs from raw samples")
@@ -991,7 +785,7 @@ def load_and_recompute_reward_calibration_report(
             artifact.get("policy_kind") != "teacher"
             or checkpoint.get("stage") != "s0_teacher"
             or not teacher_path.is_file()
-            or sha256_file(teacher_path) != checkpoint.get("sha256")
+            or Path(str(checkpoint.get("path", ""))).resolve() != teacher_path
         ):
             raise RewardCalibrationError(
                 "reward calibration samples are not bound to the supplied S0 teacher"
@@ -1000,9 +794,8 @@ def load_and_recompute_reward_calibration_report(
         "report": report,
         "artifact": artifact,
         "calibration": calibration,
-        "report_sha256": sha256_file(path),
-        "content_sha256": content_digest,
-        "raw_sample_sha256": raw_binding["sha256"],
+        "report_path": str(path),
+        "raw_sample_path": str(raw_path),
     }
 
 
@@ -1015,30 +808,21 @@ __all__ = [
     "NORMAL_SAMPLE_DEFINITION",
     "RAW_REWARD_SAMPLE_KIND",
     "RAW_REWARD_SAMPLE_SCHEMA_VERSION",
-    "REQUIRED_RUNTIME_INPUT_HASHES",
-    "REQUIRED_RUNTIME_INPUT_LABELS",
-    "REQUIRED_RUNTIME_DEPENDENCY_LABELS",
     "REWARD_CALIBRATION_SCHEMA_VERSION",
-    "REWARD_RUNTIME_INPUT_CLOSURE_VERSION",
     "RewardCalibrationError",
     "SIGNED_C1_SLOPES",
     "calibrate_reward_terms",
     "collect_reward_manager_unweighted_step",
-    "content_sha256",
     "load_and_recompute_reward_calibration_report",
     "load_raw_reward_sample_artifact",
     "recompute_reward_calibration",
     "reward_calibration_guide_contract",
-    "reward_calibration_runtime_input_hashes",
-    "reward_calibration_runtime_input_paths",
     "reward_calibration_runtime_versions",
     "reward_manager_term_weights",
     "reward_sample_report_source",
-    "sha256_file",
     "utc_timestamp",
     "validate_raw_sample_artifact",
     "validate_c1_physics_snapshot",
     "validate_sample_checkpoint_binding",
-    "verify_content_addressed_report",
-    "write_content_addressed_json",
+    "write_reward_calibration_json",
 ]

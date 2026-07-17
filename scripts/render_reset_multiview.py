@@ -62,13 +62,17 @@ def main() -> None:
     cfg.scene.num_envs = len(SLOPE_GRADIENTS)
     cfg.sim.device = args.device
     cfg.viewer.resolution = (args.width, args.height)
+    cfg.domain_randomization = replace(
+        cfg.domain_randomization,
+        enabled=False,
+        curriculum=replace(
+            cfg.domain_randomization.curriculum,
+            static_hand_load_iterations=0,
+        ),
+    )
+    cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
     cfg.curriculum = None
     cfg.scene.terrain.terrain_generator.curriculum = True
-    cfg.sample_physics_ranges = False
-    cfg.runtime_randomization = replace(cfg.runtime_randomization, sample_ranges=False)
-    cfg.events.sample_physics.params = {"cfg": cfg.runtime_randomization}
-    cfg.events.initialize_curriculum.params = {"cfg": cfg.runtime_randomization}
-
     env = gym.make(PLAY_TASK_ID, cfg=cfg, render_mode="rgb_array")
     base = env.unwrapped
     output_dir = args.output_dir.resolve()

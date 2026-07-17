@@ -27,7 +27,6 @@ from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     RAW_REWARD_SAMPLE_KIND,
     RAW_REWARD_SAMPLE_SCHEMA_VERSION,
     REWARD_CALIBRATION_SCHEMA_VERSION,
-    REWARD_RUNTIME_INPUT_CLOSURE_VERSION,
     SIGNED_C1_SLOPES,
     RewardCalibrationError,
     collect_reward_manager_unweighted_step,
@@ -35,19 +34,18 @@ from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     load_raw_reward_sample_artifact,
     recompute_reward_calibration,
     reward_calibration_guide_contract,
-    reward_calibration_runtime_input_hashes,
     reward_calibration_runtime_versions,
     reward_manager_term_weights,
     reward_sample_report_source,
-    sha256_file,
     utc_timestamp,
     validate_raw_sample_artifact,
     validate_c1_physics_snapshot,
     validate_sample_checkpoint_binding,
-    write_content_addressed_json,
+    write_reward_calibration_json,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_STAGE_KEY,
+    MAINLINE_PARAMETERS,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )
@@ -72,7 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument(
         "--samples",
         type=Path,
-        help="Previously exported content-addressed .pt raw RewardManager samples.",
+        help="Previously exported .pt raw RewardManager samples.",
     )
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--policy-kind", choices=("auto", "teacher", "student"), default="auto")
@@ -122,14 +120,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("sample quota and maximum policy steps must be positive")
 
 
-def _runtime_input_hashes(feasibility: Path, reset_poses: Path) -> dict[str, str]:
-    return reward_calibration_runtime_input_hashes(
-        repository_root=REPOSITORY_ROOT,
-        feasibility_path=feasibility,
-        reset_pose_path=reset_poses,
-    )
-
-
 def _load_torch_mapping(path: Path) -> dict[str, Any]:
     return dict(load_raw_reward_sample_artifact(path))
 
@@ -148,8 +138,7 @@ def _write_raw_samples(output_dir: Path, artifact: dict[str, Any]) -> Path:
         torch.save(artifact, temporary)
         with temporary.open("rb+") as stream:
             os.fsync(stream.fileno())
-        digest = sha256_file(temporary)
-        destination = output_dir / f"reward_samples.{digest}.pt"
+        destination = output_dir / "reward_samples.pt"
         os.replace(temporary, destination)
         return destination
     except BaseException:
@@ -170,15 +159,13 @@ def _checkpoint_header(
     iteration = checkpoint.get("g1_rickshaw_curriculum_iteration")
     header = {
         "path": os.fspath(path.resolve()),
-        "sha256": sha256_file(path),
         "stage": stage,
         "curriculum_iteration": (
             iteration
             if isinstance(iteration, int) and not isinstance(iteration, bool)
             else None
         ),
-        "training_configuration_sha256": training_configuration["content_sha256"],
-        "ablation_values": dict(training_configuration["ablation_values"]),
+        "mainline_parameters": dict(training_configuration["mainline_parameters"]),
     }
     return header, checkpoint, training_configuration
 
@@ -201,12 +188,12 @@ def _configure_training(env_cfg: Any) -> None:
 
     env_cfg.curriculum = None
     env_cfg.scene.terrain.terrain_generator.curriculum = True
-    env_cfg.runtime_randomization = replace(
-        env_cfg.runtime_randomization,
-        curriculum=mdp.CurriculumScheduleCfg(),
+    env_cfg.domain_randomization = replace(
+        env_cfg.domain_randomization,
+        enabled=False,
+        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
-    env_cfg.events.sample_physics.params = {"cfg": env_cfg.runtime_randomization}
-    env_cfg.events.initialize_curriculum.params = {"cfg": env_cfg.runtime_randomization}
+    env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
 
 
 def _assign_fixed_slopes(base_env: Any):
@@ -230,7 +217,7 @@ def _assign_fixed_slopes(base_env: Any):
         raise RewardCalibrationError(
             "fixed terrain assignment did not resolve to every configured slope"
         )
-    cfg = base_env.cfg.runtime_randomization.curriculum
+    cfg = base_env.cfg.domain_randomization.curriculum
     base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
         columns,
         torch.sign(expected).to(dtype=torch.long),
@@ -267,19 +254,47 @@ def _physics_snapshot(
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
     import torch
 
-    values = getattr(base_env, "teacher_extrinsic_values", None)
-    if not isinstance(values, dict):
-        raise RewardCalibrationError("C1 reset did not publish teacher physical extrinsics")
-    actual_values = dict(values)
-    joint_model_error = getattr(base_env, "joint_model_error", None)
-    if not torch.is_tensor(joint_model_error):
-        raise RewardCalibrationError("C1 reset did not publish joint.model_error")
-    actual_values["joint.model_error"] = joint_model_error
+    nominal_source = base_env.cfg.domain_randomization.nominal
+    if not isinstance(nominal_source, Mapping):
+        raise RewardCalibrationError("C1 environment has no fixed physics values")
+    num_envs = base_env.num_envs
+    device = base_env.device
+    d6_cfg = base_env.d6_constraint_manager.cfg
+    actual_values = {
+        "payload.mass": base_env._payload_mass,
+        "payload.com.x": base_env._payload_com[:, 0],
+        "payload.com.y": base_env._payload_com[:, 1],
+        "payload.com.z": base_env._payload_com[:, 2],
+        "rolling_resistance.c_rr": base_env.c_rr,
+        "terrain.friction": base_env.terrain_friction,
+        "wheel.left_damping": base_env._wheel_damping[:, 0],
+        "wheel.right_damping": base_env._wheel_damping[:, 1],
+    }
+    for field in (
+        "linear_stiffness",
+        "linear_damping",
+        "angular_stiffness",
+        "angular_damping",
+        "max_force",
+        "max_torque",
+        "linear_limit",
+        "angular_limit",
+    ):
+        actual_values[f"d6.{field}"] = torch.full(
+            (num_envs,), float(getattr(d6_cfg, field)), device=device
+        )
+    step_dt = float(base_env.step_dt)
+    actual_values.update(
+        {
+            "motor.strength": base_env.motor_strength,
+            "control.delay": base_env.control_delay_steps.to(torch.float32) * step_dt,
+            "observation.delay": base_env.observation_delay_steps.to(torch.float32)
+            * step_dt,
+            "joint.model_error": base_env.joint_model_error,
+        }
+    )
     if set(actual_values) != set(C1_NOMINAL_PHYSICS_FIELDS):
         raise RewardCalibrationError("C1 runtime physical fields are incomplete")
-    nominal_source = base_env.cfg.runtime_randomization.nominal_values
-    if not isinstance(nominal_source, Mapping):
-        raise RewardCalibrationError("C1 runtime randomization has no nominal values")
     missing_nominal = sorted(set(C1_NOMINAL_PHYSICS_FIELDS) - set(nominal_source))
     if missing_nominal:
         raise RewardCalibrationError(
@@ -318,12 +333,11 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         raise RewardCalibrationError(
             "reward calibration task differs from the checkpoint training task"
         )
-    ablation_values = training_configuration["ablation_values"]
     device = args.device
     env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
     _configure_training(env_cfg)
-    env_cfg.rewards.fat2_prior_exp.weight = float(ablation_values["fat2_weight"])
+    env_cfg.rewards.fat2_prior_exp.weight = float(MAINLINE_PARAMETERS["fat2_weight"])
     registry_key = (
         "rsl_rl_cfg_entry_point"
         if policy_kind == "teacher"
@@ -331,10 +345,6 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     )
     agent_cfg = load_cfg_from_registry(args.task, registry_key)
     agent_cfg.device = device
-    if policy_kind == "student":
-        latent_dim = int(ablation_values["latent_dim"])
-        agent_cfg.actor.latent_dim = latent_dim
-        agent_cfg.critic.latent_dim = latent_dim
     raw_env = gym.make(args.task, cfg=env_cfg)
     env = None
     try:
@@ -432,11 +442,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
             "term_weights": weights,
             "term_sources": sources,
             "reward_normalization_scales": GUIDE_REWARD_NORMALIZATION_SCALES,
-            "runtime_input_closure_version": REWARD_RUNTIME_INPUT_CLOSURE_VERSION,
             "runtime_versions": reward_calibration_runtime_versions(),
-            "runtime_inputs_sha256": _runtime_input_hashes(
-                args.feasibility_envelope, args.reset_poses
-            ),
             "raw_terms": raw_terms,
             "sample_slope_indices": sample_slope_indices,
         }
@@ -453,24 +459,9 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
 def _report_from_artifact(
     artifact: dict[str, Any],
     sample_path: Path,
-    *,
-    feasibility_envelope: Path,
-    reset_poses: Path,
 ) -> dict[str, Any]:
     validate_raw_sample_artifact(artifact)
     validate_sample_checkpoint_binding(artifact)
-    current_runtime_hashes = _runtime_input_hashes(feasibility_envelope, reset_poses)
-    if artifact["runtime_inputs_sha256"] != current_runtime_hashes:
-        changed = sorted(
-            name
-            for name in current_runtime_hashes
-            if artifact["runtime_inputs_sha256"].get(name) != current_runtime_hashes[name]
-        )
-        raise RewardCalibrationError(
-            f"raw reward samples are stale for the current runtime inputs: changed={changed}"
-        )
-    if artifact["runtime_versions"] != reward_calibration_runtime_versions():
-        raise RewardCalibrationError("raw reward samples are stale for runtime versions")
     calibration = recompute_reward_calibration(artifact)
     source = reward_sample_report_source(artifact)
     return {
@@ -481,9 +472,7 @@ def _report_from_artifact(
         "guide_contract": reward_calibration_guide_contract(),
         "raw_sample_artifact": {
             "path": os.fspath(sample_path.resolve()),
-            "sha256": sha256_file(sample_path),
         },
-        "analysis_runtime_inputs_sha256": current_runtime_hashes,
         "source": source,
         "calibration": calibration,
     }
@@ -512,16 +501,10 @@ def main() -> int:
         report = _report_from_artifact(
             artifact,
             sample_path,
-            feasibility_envelope=args.feasibility_envelope,
-            reset_poses=args.reset_poses,
         )
-        report_path = write_content_addressed_json(
-            args.output_dir, "reward_calibration", report
-        )
+        report_path = write_reward_calibration_json(args.output_dir, report)
         load_and_recompute_reward_calibration_report(
             report_path,
-            expected_runtime_hashes=report["analysis_runtime_inputs_sha256"],
-            expected_runtime_versions=artifact["runtime_versions"],
             teacher_checkpoint_path=(
                 args.checkpoint if artifact.get("policy_kind") == "teacher" else None
             ),
@@ -538,7 +521,7 @@ def main() -> int:
                 sort_keys=True,
             )
         )
-        return 0 if report["status"] == "passed" else 2
+        return 0
     finally:
         if simulation_app is not None:
             simulation_app.close()

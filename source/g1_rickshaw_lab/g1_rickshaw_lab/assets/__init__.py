@@ -15,7 +15,6 @@ from .g1_dex1 import (
     missing_g1_dex1_assets,
     partition_articulation_joints,
     partition_joint_names,
-    sha256_file,
 )
 from .rickshaw import (
     HANDLE_CONSTRAINT_CALIBRATION_REQUIRED,
@@ -76,6 +75,5 @@ __all__ = [
     "missing_rickshaw_assets",
     "partition_articulation_joints",
     "partition_joint_names",
-    "sha256_file",
     "validate_rickshaw_urdf",
 ]

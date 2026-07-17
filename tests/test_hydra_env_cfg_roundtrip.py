@@ -31,7 +31,7 @@ HYDRA_EMBEDDED_CFG_TYPES = (
     mdp.SupportPolygonCfg,
     mdp.RickshawPoseTargetCfg,
     mdp.SpeedCommandSamplingCfg,
-    mdp.RuntimeRandomizationCfg,
+    mdp.DomainRandomizationCfg,
     mdp.HandleConstraintCfg,
     mdp.ResetValidationCfg,
     mdp.TaskEntityNamesCfg,
@@ -78,8 +78,7 @@ def _assert_manager_cfg_bindings(env_cfg) -> None:
     assert initialize_params["entity_names_cfg"] is env_cfg.task_entity_names
     assert initialize_params["rickshaw_pose_cfg"] is env_cfg.rickshaw_pose
 
-    assert env_cfg.events.sample_physics.params["cfg"] is env_cfg.runtime_randomization
-    assert env_cfg.events.initialize_curriculum.params["cfg"] is env_cfg.runtime_randomization
+    assert env_cfg.events.initialize_domain.params["cfg"] is env_cfg.domain_randomization
     assert env_cfg.events.policy_interval.params["cfg"] is env_cfg.policy_update
     assert env_cfg.terminations.refresh_policy_state.params["cfg"] is env_cfg.policy_update
 
@@ -88,6 +87,12 @@ def test_hydra_embedded_cfg_dataclasses_are_mutable() -> None:
     for cfg_type in HYDRA_EMBEDDED_CFG_TYPES:
         assert is_dataclass(cfg_type)
         assert not cfg_type.__dataclass_params__.frozen, cfg_type.__name__
+
+
+def test_privileged_observation_dimensions_are_fixed() -> None:
+    assert mdp.TEACHER_STATIC_DIM == 40
+    assert mdp.TEACHER_DYNAMIC_DIM == 21
+    assert mdp.CRITIC_PRIVILEGED_DIM == 64
 
 
 @pytest.mark.skipif(not ISAACLAB_RUNTIME_AVAILABLE, reason="IsaacLab runtime is not installed")
@@ -106,9 +111,14 @@ def test_manager_env_cfg_survives_full_hydra_round_trip(task_id: str) -> None:
     assert env_cfg.scene.num_envs == 8
     assert env_cfg.scene.replicate_physics is True
     assert env_cfg.scene.clone_in_fabric is False
-    assert env_cfg.sample_physics_ranges is False
+    assert env_cfg.domain_randomization.enabled is (task_id == TRAIN_TASK_ID)
+    assert set(env_cfg.domain_randomization.ranges) == set(mdp.DOMAIN_PARAMETER_NAMES)
+    assert set(env_cfg.domain_randomization.nominal) == set(mdp.DOMAIN_PARAMETER_NAMES)
     assert len(env_cfg.reset_pose_library.poses) == 19
     assert "reset_pose_library" not in env_cfg.to_dict()
+    assert hasattr(env_cfg.observations, "teacher_dynamic_history")
+    assert hasattr(env_cfg.observations, "teacher_static")
+    assert not hasattr(env_cfg.observations, "teacher_extrinsics")
     assert env_cfg.handle_constraint.max_force == pytest.approx(1234.5)
     assert env_cfg.scene.closed_chain.spawn.handle_constraint.max_force == pytest.approx(1234.5)
     assert env_cfg.rolling_resistance.enabled is False

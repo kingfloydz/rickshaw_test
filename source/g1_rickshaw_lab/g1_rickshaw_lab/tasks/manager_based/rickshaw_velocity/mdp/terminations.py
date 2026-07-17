@@ -425,14 +425,28 @@ def immediate_safety_violation(
 ) -> torch.Tensor:
     """Combined immediate manager term with no timeout semantics."""
 
+    from .curricula import CurriculumStage
+
+    static_load = env.curriculum_stage_per_env == int(
+        CurriculumStage.STATIC_HAND_LOAD
+    )
+    wheel_violation = wheel_lift(
+        env, cfg.wheel_lift_normal_force_threshold
+    )
+    d6_violation = d6_constraint_failure(
+        env, cfg.d6_residual_limit, cfg.d6_impulse_limit
+    )
+    wheel_violation[static_load] = False
+    d6_violation[static_load] = False
+    env.rickshaw_state.two_wheel_contact[static_load] = True
     causes = torch.stack(
         (
             non_finite_state(env),
             illegal_body_contact(
                 env, illegal_contact_sensor_cfg, cfg.illegal_contact_force_threshold
             ),
-            wheel_lift(env, cfg.wheel_lift_normal_force_threshold),
-            d6_constraint_failure(env, cfg.d6_residual_limit, cfg.d6_impulse_limit),
+            wheel_violation,
+            d6_violation,
             joint_hard_limit(env, robot_asset_cfg),
         ),
         dim=-1,

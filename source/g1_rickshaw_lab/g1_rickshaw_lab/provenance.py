@@ -1,39 +1,29 @@
-"""Checkpoint provenance, validation, and atomic persistence.
+"""Checkpoint runtime metadata, validation, and atomic persistence.
 
-The implementation guide makes provenance part of the policy ABI.  A
-checkpoint without this metadata, with a different joint order, with modified
-configuration files, or built against another RSL-RL revision is rejected
-before any state dictionary is consumed.
+Only runtime versions and the policy joint order are part of the checkpoint
+ABI. Source and configuration files are not fingerprinted, so implementation
+edits do not make an otherwise compatible checkpoint unloadable.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+import importlib
 import importlib.metadata
-import importlib.util
 import os
 from pathlib import Path
-import re
-import subprocess
 import tempfile
-from types import MappingProxyType
 from typing import Any
 
-from ._hashing import sha256_file
 from .configuration import FIXED_G1_JOINT_ORDER, validate_joint_order
 
 
-PROVENANCE_SCHEMA_VERSION = 1
+PROVENANCE_SCHEMA_VERSION = 2
 CHECKPOINT_METADATA_KEY = "g1_rickshaw_provenance"
-RSL_RL_VERSION = "v5.0.1"
-RSL_RL_COMMIT = "3ac56acd3376f2952eb636a133f4b5aa30142552"
+RSL_RL_VERSION = "5.0.1"
 PINNED_RSL_RL_VERSION = RSL_RL_VERSION
-PINNED_RSL_RL_COMMIT = RSL_RL_COMMIT
 CUDA_NOT_AVAILABLE = "none"
-
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ProvenanceError(ValueError):
@@ -55,72 +45,10 @@ def _require_torch():
     return torch
 
 
-def _normalize_config_files(
-    config_files: Mapping[str, str | Path] | Sequence[str | Path],
-) -> dict[str, Path]:
-    if isinstance(config_files, Mapping):
-        if not config_files:
-            raise ProvenanceError("at least one configuration file is required")
-        result: dict[str, Path] = {}
-        for label, path in config_files.items():
-            if not isinstance(label, str) or not label:
-                raise ProvenanceError("configuration hash labels must be non-empty strings")
-            result[label] = Path(path)
-        return result
-    if isinstance(config_files, (str, bytes)) or not isinstance(config_files, Sequence):
-        raise TypeError("config_files must be a label-to-path mapping or path sequence")
-    if not config_files:
-        raise ProvenanceError("at least one configuration file is required")
-    result = {}
-    for value in config_files:
-        path = Path(value)
-        # Preserve the caller's spelling as the stable label.  Callers that
-        # need relocatable checkpoints should pass an explicit label mapping.
-        label = os.fspath(value)
-        if label in result:
-            raise ProvenanceError(f"duplicate configuration path label {label!r}")
-        result[label] = path
-    return result
-
-
-def hash_config_files(
-    config_files: Mapping[str, str | Path] | Sequence[str | Path],
-) -> Mapping[str, str]:
-    """Hash every runtime configuration file under stable caller labels."""
-
-    normalized = _normalize_config_files(config_files)
-    hashes: dict[str, str] = {}
-    for label, path in normalized.items():
-        if not path.is_file():
-            raise FileNotFoundError(f"configuration file does not exist: {path}")
-        hashes[label] = sha256_file(path)
-    return MappingProxyType(hashes)
-
-
 def _required_text(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProvenanceError(f"{path} must be a non-empty string")
     return value.strip()
-
-
-def _commit(value: Any, path: str) -> str:
-    commit = _required_text(value, path).lower()
-    if _GIT_COMMIT_RE.fullmatch(commit) is None:
-        raise ProvenanceError(f"{path} must be a full 40-character hexadecimal git commit")
-    return commit
-
-
-def _hashes(value: Any) -> Mapping[str, str]:
-    if not isinstance(value, Mapping) or not value:
-        raise ProvenanceError("config_sha256 must be a non-empty label-to-SHA256 mapping")
-    result: dict[str, str] = {}
-    for label, digest in value.items():
-        if not isinstance(label, str) or not label:
-            raise ProvenanceError("config_sha256 labels must be non-empty strings")
-        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest.lower()) is None:
-            raise ProvenanceError(f"config_sha256[{label!r}] must be a 64-character SHA256")
-        result[label] = digest.lower()
-    return MappingProxyType(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,13 +56,11 @@ class CheckpointMetadata:
     """The immutable policy ABI persisted under ``CHECKPOINT_METADATA_KEY``."""
 
     isaac_sim_version: str
-    isaaclab_commit: str
+    isaaclab_version: str
     pytorch_version: str
     cuda_version: str
-    config_sha256: Mapping[str, str]
     joint_order: tuple[str, ...] = FIXED_G1_JOINT_ORDER
     rsl_rl_version: str = RSL_RL_VERSION
-    rsl_rl_commit: str = RSL_RL_COMMIT
     schema_version: int = PROVENANCE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -148,37 +74,22 @@ class CheckpointMetadata:
                 f"expected {PROVENANCE_SCHEMA_VERSION}"
             )
         isaac_sim_version = _required_text(self.isaac_sim_version, "isaac_sim_version")
-        isaaclab_commit = _commit(self.isaaclab_commit, "isaaclab_commit")
+        isaaclab_version = _required_text(self.isaaclab_version, "isaaclab_version")
         pytorch_version = _required_text(self.pytorch_version, "pytorch_version")
         cuda_version = _required_text(self.cuda_version, "cuda_version")
         rsl_rl_version = _required_text(self.rsl_rl_version, "rsl_rl_version")
-        rsl_rl_commit = _commit(self.rsl_rl_commit, "rsl_rl_commit")
         if rsl_rl_version != RSL_RL_VERSION:
             raise ProvenanceError(
                 f"RSL-RL version mismatch: checkpoint has {rsl_rl_version!r}, "
                 f"project requires {RSL_RL_VERSION!r}"
             )
-        if rsl_rl_commit != RSL_RL_COMMIT:
-            raise ProvenanceError(
-                f"RSL-RL commit mismatch: checkpoint has {rsl_rl_commit}, "
-                f"project requires {RSL_RL_COMMIT}"
-            )
         joint_order = validate_joint_order(self.joint_order, path="checkpoint joint_order")
-        config_sha256 = _hashes(self.config_sha256)
         object.__setattr__(self, "isaac_sim_version", isaac_sim_version)
-        object.__setattr__(self, "isaaclab_commit", isaaclab_commit)
+        object.__setattr__(self, "isaaclab_version", isaaclab_version)
         object.__setattr__(self, "pytorch_version", pytorch_version)
         object.__setattr__(self, "cuda_version", cuda_version)
         object.__setattr__(self, "rsl_rl_version", rsl_rl_version)
-        object.__setattr__(self, "rsl_rl_commit", rsl_rl_commit)
         object.__setattr__(self, "joint_order", joint_order)
-        object.__setattr__(self, "config_sha256", config_sha256)
-
-    @property
-    def torch_version(self) -> str:
-        """Compatibility alias for code that calls PyTorch simply ``torch``."""
-
-        return self.pytorch_version
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "CheckpointMetadata":
@@ -187,13 +98,11 @@ class CheckpointMetadata:
         expected = {
             "schema_version",
             "isaac_sim_version",
-            "isaaclab_commit",
+            "isaaclab_version",
             "rsl_rl_version",
-            "rsl_rl_commit",
             "pytorch_version",
             "cuda_version",
             "joint_order",
-            "config_sha256",
         }
         actual = set(value)
         missing = sorted(expected - actual)
@@ -208,79 +117,23 @@ class CheckpointMetadata:
         return cls(
             schema_version=value["schema_version"],
             isaac_sim_version=value["isaac_sim_version"],
-            isaaclab_commit=value["isaaclab_commit"],
+            isaaclab_version=value["isaaclab_version"],
             rsl_rl_version=value["rsl_rl_version"],
-            rsl_rl_commit=value["rsl_rl_commit"],
             pytorch_version=value["pytorch_version"],
             cuda_version=value["cuda_version"],
             joint_order=value["joint_order"],
-            config_sha256=value["config_sha256"],
         )
 
     def to_mapping(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "isaac_sim_version": self.isaac_sim_version,
-            "isaaclab_commit": self.isaaclab_commit,
+            "isaaclab_version": self.isaaclab_version,
             "rsl_rl_version": self.rsl_rl_version,
-            "rsl_rl_commit": self.rsl_rl_commit,
             "pytorch_version": self.pytorch_version,
             "cuda_version": self.cuda_version,
             "joint_order": list(self.joint_order),
-            "config_sha256": dict(self.config_sha256),
         }
-
-
-def _git_commit_at(path: Path) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", os.fspath(path), "rev-parse", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5.0,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return None
-    candidate = completed.stdout.strip().lower()
-    return candidate if _GIT_COMMIT_RE.fullmatch(candidate) is not None else None
-
-
-def _module_paths(module_name: str) -> tuple[Path, ...]:
-    try:
-        spec = importlib.util.find_spec(module_name)
-    except (ImportError, ModuleNotFoundError, ValueError):
-        return ()
-    if spec is None:
-        return ()
-    paths: list[Path] = []
-    if spec.origin and spec.origin not in {"built-in", "frozen"}:
-        paths.append(Path(spec.origin).resolve().parent)
-    if spec.submodule_search_locations:
-        paths.extend(Path(value).resolve() for value in spec.submodule_search_locations)
-    return tuple(dict.fromkeys(paths))
-
-
-def _discover_git_commit(module_name: str, explicit_root: str | Path | None) -> str | None:
-    starts = (Path(explicit_root).resolve(),) if explicit_root is not None else _module_paths(module_name)
-    visited: set[Path] = set()
-    for start in starts:
-        for candidate in (start, *start.parents):
-            if candidate in visited:
-                continue
-            visited.add(candidate)
-            if (candidate / ".git").exists():
-                commit = _git_commit_at(candidate)
-                if commit is not None:
-                    return commit
-    # Worktrees and some installations expose git metadata outside the package
-    # path; allow git itself one final discovery attempt from each start.
-    for start in starts:
-        commit = _git_commit_at(start)
-        if commit is not None:
-            return commit
-    return None
 
 
 def discover_isaac_sim_version() -> str:
@@ -302,36 +155,55 @@ def discover_isaac_sim_version() -> str:
     )
 
 
-def discover_isaaclab_commit(root: str | Path | None = None) -> str:
-    environment_value = os.environ.get("ISAACLAB_COMMIT")
+def _discover_package_version(distribution: str, module_name: str) -> str | None:
+    try:
+        value = importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        value = None
+    if value:
+        return value
+    try:
+        module = importlib.import_module(module_name)
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return getattr(module, "__version__", None)
+
+
+def discover_isaaclab_version() -> str:
+    """Discover the installed Isaac Lab release without inspecting Git state."""
+
+    environment_value = os.environ.get("ISAACLAB_VERSION")
     if environment_value:
-        return _commit(environment_value, "ISAACLAB_COMMIT")
-    commit = _discover_git_commit("isaaclab", root)
-    if commit is None:
+        return _required_text(environment_value, "ISAACLAB_VERSION")
+    version = _discover_package_version("isaaclab", "isaaclab")
+    if version is None:
         raise ProvenanceError(
-            "cannot determine Isaac Lab commit; pass isaaclab_commit explicitly, provide "
-            "isaaclab_root, or set ISAACLAB_COMMIT"
+            "cannot determine Isaac Lab version; pass isaaclab_version explicitly or set "
+            "ISAACLAB_VERSION inside the Isaac Lab environment"
         )
-    return commit
+    return _required_text(version, "Isaac Lab version")
 
 
-def discover_rsl_rl_commit(root: str | Path | None = None) -> str:
-    environment_value = os.environ.get("RSL_RL_COMMIT")
-    commit = (
-        _commit(environment_value, "RSL_RL_COMMIT")
+def discover_rsl_rl_version() -> str:
+    """Discover and enforce the RSL-RL release used by the policy ABI."""
+
+    environment_value = os.environ.get("RSL_RL_VERSION")
+    version = (
+        _required_text(environment_value, "RSL_RL_VERSION")
         if environment_value
-        else _discover_git_commit("rsl_rl", root)
+        else _discover_package_version("rsl-rl-lib", "rsl_rl")
     )
-    if commit is None:
+    if version is None:
         raise ProvenanceError(
-            "cannot determine RSL-RL commit; install the pinned source checkout, pass "
-            "rsl_rl_commit explicitly, provide rsl_rl_root, or set RSL_RL_COMMIT"
+            "cannot determine RSL-RL version; install the required release or set "
+            "RSL_RL_VERSION"
         )
-    if commit != RSL_RL_COMMIT:
+    normalized = _required_text(version, "RSL-RL version").removeprefix("v")
+    if normalized != RSL_RL_VERSION:
         raise ProvenanceError(
-            f"installed RSL-RL commit is {commit}; required {RSL_RL_COMMIT} ({RSL_RL_VERSION})"
+            f"installed RSL-RL version is {normalized}; required {RSL_RL_VERSION}"
         )
-    return commit
+    return normalized
 
 
 def torch_cuda_versions() -> tuple[str, str]:
@@ -343,16 +215,13 @@ def torch_cuda_versions() -> tuple[str, str]:
 
 
 def collect_checkpoint_metadata(
-    config_files: Mapping[str, str | Path] | Sequence[str | Path],
     *,
     isaac_sim_version: str | None = None,
-    isaaclab_commit: str | None = None,
-    rsl_rl_commit: str | None = None,
-    isaaclab_root: str | Path | None = None,
-    rsl_rl_root: str | Path | None = None,
+    isaaclab_version: str | None = None,
+    rsl_rl_version: str | None = None,
     joint_order: Sequence[str] = FIXED_G1_JOINT_ORDER,
 ) -> CheckpointMetadata:
-    """Collect a complete checkpoint ABI, failing if any source is unknown."""
+    """Collect the runtime versions and joint order needed to reload a policy."""
 
     torch_version, cuda_version = torch_cuda_versions()
     resolved_isaac_sim = (
@@ -360,24 +229,23 @@ def collect_checkpoint_metadata(
         if isaac_sim_version is None
         else _required_text(isaac_sim_version, "isaac_sim_version")
     )
-    resolved_isaaclab = (
-        discover_isaaclab_commit(isaaclab_root)
-        if isaaclab_commit is None
-        else _commit(isaaclab_commit, "isaaclab_commit")
+    resolved_isaaclab_version = (
+        discover_isaaclab_version()
+        if isaaclab_version is None
+        else _required_text(isaaclab_version, "isaaclab_version")
     )
-    resolved_rsl_rl = (
-        discover_rsl_rl_commit(rsl_rl_root)
-        if rsl_rl_commit is None
-        else _commit(rsl_rl_commit, "rsl_rl_commit")
+    resolved_rsl_rl_version = (
+        discover_rsl_rl_version()
+        if rsl_rl_version is None
+        else _required_text(rsl_rl_version, "rsl_rl_version").removeprefix("v")
     )
     return CheckpointMetadata(
         isaac_sim_version=resolved_isaac_sim,
-        isaaclab_commit=resolved_isaaclab,
-        rsl_rl_commit=resolved_rsl_rl,
+        isaaclab_version=resolved_isaaclab_version,
+        rsl_rl_version=resolved_rsl_rl_version,
         pytorch_version=torch_version,
         cuda_version=cuda_version,
         joint_order=tuple(joint_order),
-        config_sha256=hash_config_files(config_files),
     )
 
 
@@ -421,18 +289,17 @@ def validate_checkpoint_metadata(
     metadata: CheckpointMetadata | Mapping[str, Any],
     *,
     expected: CheckpointMetadata | Mapping[str, Any] | None = None,
-    config_files: Mapping[str, str | Path] | Sequence[str | Path] | None = None,
     joint_order: Sequence[str] = FIXED_G1_JOINT_ORDER,
     isaac_sim_version: str | None = None,
-    isaaclab_commit: str | None = None,
+    isaaclab_version: str | None = None,
     pytorch_version: str | None = None,
     cuda_version: str | None = None,
     validate_torch_runtime: bool = False,
 ) -> CheckpointMetadata:
     """Validate checkpoint metadata against explicit runtime authorities.
 
-    Structural validation, the pinned RSL-RL revision, and the fixed 29-joint
-    order are always enforced.  Isaac versions/commits are compared when passed
+    Structural validation, the pinned RSL-RL release, and the fixed 29-joint
+    order are always enforced.  Runtime versions are compared when passed
     explicitly or through ``expected``.  Set ``validate_torch_runtime`` to also
     compare the currently imported PyTorch/CUDA build.
     """
@@ -450,32 +317,16 @@ def validate_checkpoint_metadata(
         if parsed.to_mapping() != expected_parsed.to_mapping():
             fields = (
                 "isaac_sim_version",
-                "isaaclab_commit",
+                "isaaclab_version",
                 "rsl_rl_version",
-                "rsl_rl_commit",
                 "pytorch_version",
                 "cuda_version",
                 "joint_order",
-                "config_sha256",
             )
             differing = [
                 field for field in fields if getattr(parsed, field) != getattr(expected_parsed, field)
             ]
             raise ProvenanceError(f"checkpoint metadata differs from expected fields: {differing}")
-
-    if config_files is not None:
-        current_hashes = hash_config_files(config_files)
-        if dict(parsed.config_sha256) != dict(current_hashes):
-            missing = sorted(set(parsed.config_sha256) - set(current_hashes))
-            extra = sorted(set(current_hashes) - set(parsed.config_sha256))
-            changed = sorted(
-                key
-                for key in set(parsed.config_sha256) & set(current_hashes)
-                if parsed.config_sha256[key] != current_hashes[key]
-            )
-            raise ProvenanceError(
-                f"configuration SHA256 mismatch: missing={missing}, unknown={extra}, changed={changed}"
-            )
 
     if isaac_sim_version is not None:
         _assert_equal(
@@ -483,11 +334,11 @@ def validate_checkpoint_metadata(
             parsed.isaac_sim_version,
             _required_text(isaac_sim_version, "isaac_sim_version"),
         )
-    if isaaclab_commit is not None:
+    if isaaclab_version is not None:
         _assert_equal(
-            "Isaac Lab commit",
-            parsed.isaaclab_commit,
-            _commit(isaaclab_commit, "isaaclab_commit"),
+            "Isaac Lab version",
+            parsed.isaaclab_version,
+            _required_text(isaaclab_version, "isaaclab_version"),
         )
     if validate_torch_runtime:
         runtime_torch, runtime_cuda = torch_cuda_versions()
@@ -583,35 +434,24 @@ def load_checkpoint_with_validation(
     return checkpoint
 
 
-# Short aliases used by training scripts and downstream deployment wrappers.
-atomic_save = save_checkpoint_atomic
-load_checkpoint = load_checkpoint_with_validation
-
-
 __all__ = [
     "CHECKPOINT_METADATA_KEY",
     "CUDA_NOT_AVAILABLE",
     "CheckpointMetadata",
-    "PINNED_RSL_RL_COMMIT",
     "PINNED_RSL_RL_VERSION",
     "PROVENANCE_SCHEMA_VERSION",
     "ProvenanceDependencyError",
     "ProvenanceError",
-    "RSL_RL_COMMIT",
     "RSL_RL_VERSION",
-    "atomic_save",
     "atomic_torch_save",
     "attach_checkpoint_metadata",
     "collect_checkpoint_metadata",
     "discover_isaac_sim_version",
-    "discover_isaaclab_commit",
-    "discover_rsl_rl_commit",
+    "discover_isaaclab_version",
+    "discover_rsl_rl_version",
     "extract_checkpoint_metadata",
-    "hash_config_files",
-    "load_checkpoint",
     "load_checkpoint_with_validation",
     "save_checkpoint_atomic",
-    "sha256_file",
     "torch_cuda_versions",
     "validate_checkpoint",
     "validate_checkpoint_metadata",

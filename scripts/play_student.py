@@ -13,9 +13,7 @@ add_project_source_to_path()
 
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
-    TRAINING_CONFIGURATION_KEY,
-    load_final_policy_acceptance_artifact,
-    load_policy_ablation_artifact,
+    MAINLINE_PARAMETERS,
     load_stage_checkpoint,
 )
 
@@ -73,16 +71,6 @@ def main() -> int:
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument(
-        "--acceptance-report",
-        required=True,
-        help="Passed fixed-seed S2 TRAINING acceptance report bound to this checkpoint.",
-    )
-    parser.add_argument(
-        "--ablation-manifest",
-        required=True,
-        help="Passed three-sweep ablation manifest selecting this checkpoint.",
-    )
-    parser.add_argument(
         "--video-dir",
         default=None,
         help="Write RecordVideo output to this directory instead of the checkpoint log tree.",
@@ -104,27 +92,7 @@ def main() -> int:
         expected_stage="s2_student_ppo",
         validate_runtime=True,
     )
-    training_configuration = dict(loaded_checkpoint[TRAINING_CONFIGURATION_KEY])
-    latent_dim = int(training_configuration["ablation_values"]["latent_dim"])
-    fat2_weight = float(training_configuration["ablation_values"]["fat2_weight"])
-    acceptance_path = require_existing_file(
-        args.acceptance_report,
-        "final S2 acceptance report",
-    ).resolve()
-    load_final_policy_acceptance_artifact(
-        acceptance_path,
-        checkpoint_path=checkpoint,
-    )
-    os.environ["G1_RICKSHAW_FINAL_ACCEPTANCE_REPORT"] = os.fspath(acceptance_path)
-    ablation_path = require_existing_file(
-        args.ablation_manifest,
-        "policy ablation manifest",
-    ).resolve()
-    load_policy_ablation_artifact(
-        ablation_path,
-        checkpoint_path=checkpoint,
-    )
-    os.environ["G1_RICKSHAW_ABLATION_MANIFEST"] = os.fspath(ablation_path)
+    fat2_weight = float(MAINLINE_PARAMETERS["fat2_weight"])
     os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
     os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s2_student_ppo"
     curriculum_iteration = loaded_checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
@@ -141,9 +109,9 @@ def main() -> int:
             args.task,
             "--checkpoint",
             str(checkpoint),
-            f"agent.actor.latent_dim={latent_dim}",
-            f"agent.critic.latent_dim={latent_dim}",
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
+            "env.observations.teacher_dynamic_history=null",
+            "env.observations.teacher_static=null",
             *remaining,
         ],
     )

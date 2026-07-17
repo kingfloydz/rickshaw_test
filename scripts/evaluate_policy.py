@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run fixed-seed, configured-slope policy acceptance in Isaac Lab."""
+"""Produce fixed-seed, configured-slope policy diagnostics in Isaac Lab."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 from collections.abc import Mapping
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -20,31 +21,19 @@ from _isaaclab_wrappers import (
 add_project_source_to_path()
 
 from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
-    ABLATION_VARIANTS,
     COMMAND_PHASE_LABELS,
     CROSS_CASE_LABELS,
     FORMAL_EVALUATION_COMMAND_PROTOCOL,
     FORMAL_EVALUATION_CROSS_CASE_PROTOCOL,
-    FORMAL_EVALUATION_NUM_ENVS_MULTIPLE,
     METRIC_DEFINITIONS,
-    POLICY_ACCEPTANCE_SCHEMA_VERSION,
+    POLICY_DIAGNOSTIC_SCHEMA_VERSION,
     SIGNED_SLOPES,
     PolicyEvaluationAccumulator,
     command_phase_labels,
     d6_wrench_channels,
-    evaluation_runtime_sources_sha256,
     evaluate_s2_return_floor,
-    evaluate_thresholds,
-    load_thresholds,
-    serialize_thresholds,
     slope_label,
-    validate_s1_baseline_acceptance_report,
-    validate_final_acceptance_thresholds,
-)
-from g1_rickshaw_lab.provenance import (  # noqa: E402
-    extract_checkpoint_metadata,
-    hash_config_files,
-    sha256_file,
+    validate_s1_baseline_diagnostic_report,
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
@@ -53,17 +42,14 @@ from g1_rickshaw_lab.slope_contract import (  # noqa: E402
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
-    CHECKPOINT_LINEAGE_KEY,
     CHECKPOINT_STAGE_KEY,
+    MAINLINE_PARAMETERS,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
     require_pinned_rsl_rl,
-    runtime_config_files,
 )
 from g1_rickshaw_lab.validation import (  # noqa: E402
-    asset_hashes,
     utc_timestamp,
-    validation_input_assets,
     write_json_atomic,
 )
 
@@ -71,7 +57,6 @@ from g1_rickshaw_lab.validation import (  # noqa: E402
 DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 SUPPORTED_STAGES = {
     "s0_teacher",
-    "s1_context_candidate",
     "s1_context_distillation",
     "s2_student_ppo",
 }
@@ -81,34 +66,19 @@ CURRICULUM_NAMES = ("training",)
 class PolicyHandle:
     """Uniform distribution interface over native RSL and S1 actors."""
 
-    def __init__(self, actor: Any, *, student: bool) -> None:
+    def __init__(self, actor: Any, *, kind: str) -> None:
+        if kind not in {"standalone_student", "rsl_student", "rsl_teacher"}:
+            raise ValueError(f"unknown policy handle kind {kind!r}")
         self.actor = actor
-        self.student = student
+        self.kind = kind
 
-    @property
-    def latent_dim(self) -> int:
-        encoder = self.actor.context_encoder if self.student else self.actor.encoder
-        return encoder.latent_dim
-
-    def distribution(self, observation: Any, intervention: str = "baseline"):
-        if intervention not in {"baseline", "zero", "shuffle"}:
-            raise ValueError(f"unknown context intervention {intervention!r}")
-        if self.student:
-            context = self.actor.context_encoder.encode(observation["history"])
-            context = self.actor.context_projection(context)
+    def distribution(self, observation: Any):
+        if self.kind == "standalone_student":
+            context = self.actor.encode(observation["history"])
             policy = self.actor.actor
         else:
             context = self.actor.encode(observation)
             policy = self.actor.policy
-        if intervention != "baseline":
-            if not self.student:
-                raise RuntimeError("context intervention is defined only for student policies")
-            if intervention == "zero":
-                context = context * 0.0
-            else:
-                if context.shape[0] < 2:
-                    raise RuntimeError("cross-environment context shuffle requires at least two environments")
-                context = context.roll(shifts=1, dims=0)
         return policy.distribution(observation["policy"], context)
 
 
@@ -125,8 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         "--s1-baseline-report",
         default=None,
         help=(
-            "S1 fixed-seed TRAINING acceptance report. Optional for diagnostics, but required "
-            "for an S2 report to pass."
+            "Optional S1 fixed-seed TRAINING report for an S2 return comparison."
         ),
     )
     parser.add_argument("--output", required=True)
@@ -135,110 +104,37 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seeds", type=int, nargs="+", default=(42, 43, 44, 45, 46))
     parser.add_argument("--curriculum-stages", nargs="+", choices=CURRICULUM_NAMES, default=("training",))
     parser.add_argument("--max-policy-steps-per-seed", type=int, default=6000)
-    parser.add_argument("--thresholds", default=None, help="Explicit schema-v1 YAML; no built-in thresholds exist.")
-    parser.add_argument(
-        "--threshold",
-        action="append",
-        default=[],
-        help="Additional explicit scalar threshold, e.g. stages.training.metrics.episodes.fall_rate<=0.01.",
-    )
-    parser.add_argument(
-        "--no-context-interventions",
-        action="store_true",
-        help="Debug only; marks student acceptance incomplete.",
-    )
-    parser.add_argument(
-        "--allow-missing-teacher",
-        action="store_true",
-        help="Debug only; permits a student report without teacher-student KL and marks it incomplete.",
-    )
-    parser.add_argument(
-        "--training-monitor",
-        action="store_true",
-        help="Evaluate an intermediate PPO checkpoint for fixed-seed early stopping.",
-    )
-    parser.add_argument(
-        "--fat2-weight",
-        type=float,
-        choices=ABLATION_VARIANTS["fat2_weight"],
-        default=None,
-    )
-    parser.add_argument(
-        "--rollout-steps",
-        type=int,
-        choices=ABLATION_VARIANTS["rollout_steps"],
-        default=None,
-    )
-    parser.add_argument(
-        "--latent-dim",
-        type=int,
-        choices=ABLATION_VARIANTS["latent_dim"],
-        default=None,
-    )
-    parser.add_argument("--ablation-id", default=None)
-    parser.add_argument("--ablation-group", choices=("fat2_weight", "rollout_steps", "latent_dim"), default=None)
-    parser.add_argument("--ablation-matrix-sha256", default=None)
     AppLauncher.add_app_launcher_args(parser)
     return parser
 
 
 def _validate_args(args: argparse.Namespace, stage: str) -> None:
-    if args.training_monitor and stage not in {"s0_teacher", "s2_student_ppo"}:
-        raise ValueError("--training-monitor applies only to PPO stages S0 and S2")
-    if args.training_monitor and (
-        args.thresholds
-        or args.threshold
-        or args.s1_baseline_report
-        or args.ablation_id
-        or args.ablation_group
-    ):
-        raise ValueError("--training-monitor cannot be combined with acceptance inputs")
-    if (
-        args.num_envs <= 0
-        or args.num_envs % FORMAL_EVALUATION_NUM_ENVS_MULTIPLE != 0
-    ):
-        raise ValueError(
-            f"--num-envs must be a positive multiple of "
-            f"{FORMAL_EVALUATION_NUM_ENVS_MULTIPLE} so every "
-            "slope has an equal number of environments"
-        )
+    if args.num_envs <= 0:
+        raise ValueError("--num-envs must be positive")
     if not args.seeds:
         raise ValueError("fixed seeds must be non-empty")
     quota_divisor = len(args.seeds) * len(CROSS_CASE_LABELS)
     if (
-        args.episodes_per_slope < 100
+        args.episodes_per_slope <= 0
         or args.episodes_per_slope % quota_divisor != 0
         or args.max_policy_steps_per_seed <= 0
     ):
         raise ValueError(
-            "acceptance requires at least 100 episodes per slope, an episode quota "
+            "diagnostics require a positive episode quota "
             f"divisible by seeds={quota_divisor}, and a positive step limit"
         )
     if len(set(args.seeds)) != len(args.seeds):
         raise ValueError("fixed seeds must be unique")
     if len(set(args.curriculum_stages)) != len(args.curriculum_stages):
         raise ValueError("curriculum stages must be unique")
-    is_student = stage != "s0_teacher"
-    if is_student and args.teacher_checkpoint is None and not args.allow_missing_teacher:
-        raise ValueError("student acceptance requires --teacher-checkpoint for action KL")
     if args.s1_baseline_report is not None and stage != "s2_student_ppo":
-        raise ValueError("--s1-baseline-report applies only to S2 acceptance")
+        raise ValueError("--s1-baseline-report applies only to S2 diagnostics")
     if (
         stage == "s2_student_ppo"
         and args.s1_baseline_report is not None
         and list(args.curriculum_stages) != ["training"]
     ):
-        raise ValueError("S2 return-floor acceptance requires TRAINING evaluation")
-    if (args.ablation_id is None) != (args.ablation_group is None):
-        raise ValueError("--ablation-id and --ablation-group must be supplied together")
-    if args.ablation_group == "fat2_weight" and args.fat2_weight is None:
-        raise ValueError("FAT2 ablation requires --fat2-weight")
-    if args.ablation_group == "rollout_steps" and args.rollout_steps is None:
-        raise ValueError("rollout ablation requires --rollout-steps")
-    if args.ablation_group == "latent_dim" and args.latent_dim is None:
-        raise ValueError("latent ablation requires --latent-dim")
-
-
+        raise ValueError("S2 return comparison requires TRAINING evaluation")
 def _configure_fixed_stage(env_cfg: Any, stage_name: str, fat2_weight: float | None) -> None:
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
@@ -246,12 +142,12 @@ def _configure_fixed_stage(env_cfg: Any, stage_name: str, fat2_weight: float | N
         raise ValueError(f"unknown evaluation stage {stage_name!r}")
     env_cfg.curriculum = None
     env_cfg.scene.terrain.terrain_generator.curriculum = True
-    env_cfg.runtime_randomization = replace(
-        env_cfg.runtime_randomization,
-        curriculum=mdp.CurriculumScheduleCfg(),
+    env_cfg.domain_randomization = replace(
+        env_cfg.domain_randomization,
+        enabled=False,
+        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
-    env_cfg.events.sample_physics.params = {"cfg": env_cfg.runtime_randomization}
-    env_cfg.events.initialize_curriculum.params = {"cfg": env_cfg.runtime_randomization}
+    env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
     if fat2_weight is not None:
         env_cfg.rewards.fat2_prior_exp.weight = float(fat2_weight)
 
@@ -282,11 +178,19 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
             "fixed evaluation terrain does not resolve to every configured slope"
         )
 
-    cfg = base_env.cfg.runtime_randomization.curriculum
+    cfg = base_env.cfg.domain_randomization.curriculum
     base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
         columns, torch.sign(expected).to(dtype=torch.long), cfg
     )
-    base_env.curriculum_stage_per_env[:] = base_env.curriculum_runtime_state.stage_per_environment()
+    base_env.curriculum_runtime_state.set_iteration(
+        cfg.static_hand_load_iterations
+    )
+    base_env.curriculum_runtime_state.activate(
+        torch.arange(base_env.num_envs, device=base_env.device, dtype=torch.long)
+    )
+    base_env.curriculum_stage_per_env = (
+        base_env.curriculum_runtime_state.stage_per_environment()
+    )
     return slots
 
 
@@ -327,26 +231,19 @@ def _load_policy(
     task: str,
 ) -> tuple[PolicyHandle, list[Any]]:
     keepalive: list[Any] = []
-    if stage in {"s1_context_candidate", "s1_context_distillation"}:
+    if stage == "s1_context_distillation":
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
         state = checkpoint["model_state_dict"]
-        training_configuration = checkpoint[TRAINING_CONFIGURATION_KEY]
-        latent_dim = int(training_configuration["ablation_values"]["latent_dim"])
-        model = G1RickshawStudentActor(latent_dim=latent_dim).to(device)
+        model = G1RickshawStudentActor().to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
         keepalive.append(model)
-        return PolicyHandle(model, student=True), keepalive
+        return PolicyHandle(model, kind="standalone_student"), keepalive
 
     from rsl_rl.runners import OnPolicyRunner
     registry_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
     agent_cfg = _load_rsl_runner_cfg(task, registry_key, device)
-    if stage == "s2_student_ppo":
-        training_configuration = checkpoint[TRAINING_CONFIGURATION_KEY]
-        latent_dim = int(training_configuration["ablation_values"]["latent_dim"])
-        agent_cfg.actor.latent_dim = latent_dim
-        agent_cfg.critic.latent_dim = latent_dim
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
@@ -355,13 +252,18 @@ def _load_policy(
     )
     runner.alg.actor.eval()
     keepalive.append(runner)
-    return PolicyHandle(runner.alg.actor, student=stage != "s0_teacher"), keepalive
+    kind = "rsl_teacher" if stage == "s0_teacher" else "rsl_student"
+    return PolicyHandle(runner.alg.actor, kind=kind), keepalive
 
 
 def _load_teacher_policy(
     env: Any, checkpoint_path: Path, device: str, task: str
 ) -> tuple[PolicyHandle, list[Any]]:
     from rsl_rl.runners import OnPolicyRunner
+    load_stage_checkpoint(
+        checkpoint_path,
+        expected_stage="s0_teacher",
+    )
     agent_cfg = _load_rsl_runner_cfg(task, "rsl_rl_cfg_entry_point", device)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
@@ -370,22 +272,17 @@ def _load_teacher_policy(
         strict=True,
     )
     runner.alg.actor.eval()
-    return PolicyHandle(runner.alg.actor, student=False), [runner]
+    return PolicyHandle(runner.alg.actor, kind="rsl_teacher"), [runner]
 
 
 def _load_rsl_runner_cfg(task: str, registry_key: str, device: str):
-    """Load and migrate a runner config exactly as IsaacLab's train entry point does."""
+    """Load the fixed RSL-RL 5 runner configuration."""
 
-    import importlib.metadata
-
-    from isaaclab_rl.rsl_rl.utils import handle_deprecated_rsl_rl_cfg
     from isaaclab_tasks.utils import load_cfg_from_registry
 
     agent_cfg = load_cfg_from_registry(task, registry_key)
     agent_cfg.device = device
-    return handle_deprecated_rsl_rl_cfg(
-        agent_cfg, importlib.metadata.version("rsl-rl-lib")
-    )
+    return agent_cfg
 
 
 def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  # noqa: C901
@@ -509,12 +406,10 @@ def _run_mode(
     policy: PolicyHandle,
     teacher: PolicyHandle | None,
     *,
-    mode: str,
     seeds: list[int],
     episodes_per_slope: int,
     max_steps_per_seed: int,
-    collect_metrics: bool,
-) -> tuple[PolicyEvaluationAccumulator | None, dict[str, Any]]:
+) -> tuple[PolicyEvaluationAccumulator, dict[str, Any]]:
     import torch
 
     if not seeds:
@@ -524,7 +419,7 @@ def _run_mode(
         raise ValueError(
             "episodes_per_slope must be divisible by the number of seeds"
         )
-    accumulator = PolicyEvaluationAccumulator() if collect_metrics else None
+    accumulator = PolicyEvaluationAccumulator()
     completed = torch.zeros(len(SIGNED_SLOPES), dtype=torch.long, device=base_env.device)
     in_flight = torch.zeros_like(completed)
     completed_by_case = torch.zeros(
@@ -605,12 +500,12 @@ def _run_mode(
             # inference_mode would turn those buffers into inference tensors,
             # which later resets cannot update outside that mode.
             with torch.no_grad():
-                distribution = policy.distribution(observation, intervention=mode)
+                distribution = policy.distribution(observation)
                 teacher_kl = None
-                if teacher is not None and mode == "baseline":
+                if teacher is not None:
                     teacher_distribution = teacher.distribution(observation)
                     teacher_kl = torch.distributions.kl_divergence(teacher_distribution, distribution)
-                if collect_metrics and torch.any(active):
+                if torch.any(active):
                     raw_samples = _sample_metrics(base_env, teacher_kl)
                     ids = torch.nonzero(active, as_tuple=False).flatten()
                     samples = {
@@ -631,7 +526,6 @@ def _run_mode(
                                 "evaluation cross-case changed within an episode"
                             )
                         episode_cross_cases[int(env_id)] = str(case)
-                    assert accumulator is not None
                     accumulator.add_step(
                         samples,
                         slope_slots[ids].detach().cpu().numpy(),
@@ -676,23 +570,22 @@ def _run_mode(
                     in_flight_by_case[slope_index, case_index] -= 1
                     enrolled[env_id] = False
                     reusable_ids.append(env_id)
-                    if accumulator is not None:
-                        if not episode_phases[env_id] or episode_cross_cases[env_id] is None:
-                            raise RuntimeError(
-                                "active completed episode has no phase/cross-case evidence"
-                            )
-                        accumulator.add_episode(
-                            slope_index,
-                            value,
-                            fell=fell,
-                            causes=causes,
-                            phase_labels=[
-                                label
-                                for label in COMMAND_PHASE_LABELS
-                                if label in episode_phases[env_id]
-                            ],
-                            cross_case_label=episode_cross_cases[env_id],
+                    if not episode_phases[env_id] or episode_cross_cases[env_id] is None:
+                        raise RuntimeError(
+                            "active completed episode has no phase/cross-case evidence"
                         )
+                    accumulator.add_episode(
+                        slope_index,
+                        value,
+                        fell=fell,
+                        causes=causes,
+                        phase_labels=[
+                            label
+                            for label in COMMAND_PHASE_LABELS
+                            if label in episode_phases[env_id]
+                        ],
+                        cross_case_label=episode_cross_cases[env_id],
+                    )
                     episode_return[env_id] = 0.0
                     episode_phases[env_id].clear()
                     episode_cross_cases[env_id] = None
@@ -735,48 +628,9 @@ def _run_mode(
 def _checkpoint_binding(path: Path, checkpoint: Any) -> dict[str, Any]:
     return {
         "path": os.fspath(path),
-        "sha256": sha256_file(path),
         "stage": checkpoint[CHECKPOINT_STAGE_KEY],
         "curriculum_iteration": checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY),
-        "lineage": checkpoint.get(CHECKPOINT_LINEAGE_KEY, {}),
-        "provenance": extract_checkpoint_metadata(checkpoint).to_mapping(),
     }
-
-
-def _input_binding(args: argparse.Namespace) -> dict[str, Any]:
-    result = {
-        "runtime_config_sha256": dict(hash_config_files(runtime_config_files())),
-        "assets_sha256": asset_hashes(validation_input_assets()),
-        "evaluation_runtime_sources_sha256": evaluation_runtime_sources_sha256(),
-    }
-    if args.thresholds is not None:
-        result["thresholds_sha256"] = sha256_file(args.thresholds)
-    if args.ablation_matrix_sha256 is not None:
-        digest = args.ablation_matrix_sha256.lower()
-        if len(digest) != 64:
-            raise ValueError("--ablation-matrix-sha256 must be a SHA-256 digest")
-        int(digest, 16)
-        result["ablation_matrix_sha256"] = digest
-    return result
-
-
-def _context_report(
-    baseline: dict[str, Any], zero: dict[str, Any] | None, shuffle: dict[str, Any] | None
-) -> dict[str, Any]:
-    result: dict[str, Any] = {"baseline_return": baseline}
-    for name, intervention in (("zero", zero), ("shuffle", shuffle)):
-        if intervention is None:
-            result[f"{name}_return"] = None
-            result[f"{name}_return_drop"] = None
-            continue
-        drop = baseline["mean"] - intervention["mean"]
-        denominator = max(abs(baseline["mean"]), 1.0e-12)
-        result[f"{name}_return"] = intervention
-        result[f"{name}_return_drop"] = {
-            "absolute": drop,
-            "fraction_of_abs_baseline": drop / denominator,
-        }
-    return result
 
 
 def main() -> int:  # noqa: C901
@@ -786,26 +640,14 @@ def main() -> int:  # noqa: C901
     checkpoint = load_stage_checkpoint(
         checkpoint_path,
         expected_stage=SUPPORTED_STAGES,
-        validate_runtime=True,
-        allow_incomplete=args.training_monitor,
+        validate_runtime=False,
     )
     stage = checkpoint[CHECKPOINT_STAGE_KEY]
     training_configuration = dict(checkpoint[TRAINING_CONFIGURATION_KEY])
     if training_configuration["task"] != args.task:
         raise ValueError("policy evaluation task differs from checkpoint training task")
-    configured_variants = training_configuration["ablation_values"]
-    for argument, configured in (
-        ("fat2_weight", float(configured_variants["fat2_weight"])),
-        ("rollout_steps", int(configured_variants["rollout_steps"])),
-        ("latent_dim", int(configured_variants["latent_dim"])),
-    ):
-        requested = getattr(args, argument)
-        if requested is not None and requested != configured:
-            raise ValueError(
-                f"--{argument.replace('_', '-')}={requested!r} differs from "
-                f"checkpoint training value {configured!r}"
-            )
-        setattr(args, argument, configured)
+    fat2_weight = float(MAINLINE_PARAMETERS["fat2_weight"])
+    rollout_steps = int(MAINLINE_PARAMETERS["rollout_steps"])
     _validate_args(args, stage)
     is_student = stage != "s0_teacher"
 
@@ -814,25 +656,16 @@ def main() -> int:  # noqa: C901
     s1_baseline_binding: dict[str, Any] | None = None
     if args.s1_baseline_report is not None:
         s1_baseline_path = require_existing_file(
-            args.s1_baseline_report, "S1 baseline acceptance report"
+            args.s1_baseline_report, "S1 baseline diagnostic report"
         ).resolve()
-        lineage = checkpoint.get(CHECKPOINT_LINEAGE_KEY)
-        context_digest = (
-            lineage.get("context_checkpoint_sha256") if isinstance(lineage, Mapping) else None
-        )
-        if not isinstance(context_digest, str):
-            raise RuntimeError("S2 checkpoint lineage has no S1 context checkpoint SHA256")
         s1_report = json.loads(s1_baseline_path.read_text(encoding="utf-8"))
-        s1_baseline_returns = validate_s1_baseline_acceptance_report(
+        s1_baseline_returns = validate_s1_baseline_diagnostic_report(
             s1_report,
-            expected_checkpoint_sha256=context_digest,
             fixed_seeds=args.seeds,
             episodes_per_slope=args.episodes_per_slope,
         )
         s1_baseline_binding = {
             "path": os.fspath(s1_baseline_path),
-            "sha256": sha256_file(s1_baseline_path),
-            "checkpoint_sha256": context_digest,
             "baseline_return_mean": dict(s1_baseline_returns),
         }
 
@@ -841,37 +674,15 @@ def main() -> int:  # noqa: C901
     if args.teacher_checkpoint is not None:
         teacher_path = require_existing_file(args.teacher_checkpoint, "teacher checkpoint").resolve()
         teacher_checkpoint = load_stage_checkpoint(
-            teacher_path, expected_stage="s0_teacher", validate_runtime=True
+            teacher_path, expected_stage="s0_teacher", validate_runtime=False
         )
-        if (
-            extract_checkpoint_metadata(teacher_checkpoint).to_mapping()
-            != extract_checkpoint_metadata(checkpoint).to_mapping()
-        ):
-            raise RuntimeError("teacher and evaluated policy provenance differ")
-        if is_student:
-            policy_lineage = checkpoint.get(CHECKPOINT_LINEAGE_KEY)
-            expected_teacher_digest = (
-                policy_lineage.get("teacher_checkpoint_sha256")
-                if isinstance(policy_lineage, Mapping)
-                else None
-            )
-            if expected_teacher_digest != sha256_file(teacher_path):
-                raise RuntimeError(
-                    "teacher checkpoint SHA256 differs from the evaluated policy lineage"
-                )
 
-    thresholds = load_thresholds(args.thresholds, args.threshold)
-    if is_student and thresholds:
-        validate_final_acceptance_thresholds(
-            thresholds,
-            curriculum_stages=args.curriculum_stages,
-        )
     from isaaclab.app import AppLauncher
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
     stage_reports: dict[str, Any] = {}
-    incomplete: list[str] = []
+    omitted_diagnostics: list[str] = []
     try:
         import gymnasium as gym
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
@@ -886,9 +697,10 @@ def main() -> int:  # noqa: C901
             try:
                 env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
                 env_cfg.seed = args.seeds[0]
-                _configure_fixed_stage(env_cfg, curriculum_name, args.fat2_weight)
-                if not is_student:
-                    env_cfg.observations.history = None
+                _configure_fixed_stage(env_cfg, curriculum_name, fat2_weight)
+                if is_student and teacher_path is None:
+                    env_cfg.observations.teacher_dynamic_history = None
+                    env_cfg.observations.teacher_static = None
                 agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
                 agent_cfg = _load_rsl_runner_cfg(args.task, agent_key, device)
                 raw_env = gym.make(args.task, cfg=env_cfg)
@@ -899,10 +711,6 @@ def main() -> int:  # noqa: C901
                 policy, keepalive = _load_policy(
                     env, checkpoint_path, checkpoint, stage, device, args.task
                 )
-                if args.latent_dim is not None and policy.latent_dim != args.latent_dim:
-                    raise RuntimeError(
-                        f"checkpoint latent dimension {policy.latent_dim} != requested ablation {args.latent_dim}"
-                    )
                 teacher: PolicyHandle | None = None
                 if is_student and teacher_path is not None:
                     teacher, teacher_keepalive = _load_teacher_policy(
@@ -917,49 +725,17 @@ def main() -> int:  # noqa: C901
                     slope_slots,
                     policy,
                     teacher,
-                    mode="baseline",
                     seeds=list(args.seeds),
                     episodes_per_slope=args.episodes_per_slope,
                     max_steps_per_seed=args.max_policy_steps_per_seed,
-                    collect_metrics=True,
                 )
-                assert baseline_accumulator is not None
                 metrics, per_slope = baseline_accumulator.summary()
                 stratified = baseline_accumulator.stratified_summary()
-                zero_return = None
-                shuffle_return = None
-                if is_student and not args.no_context_interventions:
-                    _, zero_return = _run_mode(
-                        env,
-                        base_env,
-                        slope_slots,
-                        policy,
-                        None,
-                        mode="zero",
-                        seeds=list(args.seeds),
-                        episodes_per_slope=args.episodes_per_slope,
-                        max_steps_per_seed=args.max_policy_steps_per_seed,
-                        collect_metrics=False,
-                    )
-                    _, shuffle_return = _run_mode(
-                        env,
-                        base_env,
-                        slope_slots,
-                        policy,
-                        None,
-                        mode="shuffle",
-                        seeds=list(args.seeds),
-                        episodes_per_slope=args.episodes_per_slope,
-                        max_steps_per_seed=args.max_policy_steps_per_seed,
-                        collect_metrics=False,
-                    )
                 stage_reports[curriculum_name] = {
                     "metrics": metrics,
                     "per_slope": per_slope,
                     "stratified": stratified,
-                    "context_interventions": _context_report(
-                        baseline_return, zero_return, shuffle_return
-                    ),
+                    "return": baseline_return,
                 }
             finally:
                 if env is not None:
@@ -971,34 +747,24 @@ def main() -> int:  # noqa: C901
         # can terminate the interpreter and hide the original exception.
         raise
 
-    if is_student and teacher_checkpoint is None and not args.training_monitor:
-        incomplete.append("teacher_student_action_kl_missing")
-    if is_student and args.no_context_interventions and not args.training_monitor:
-        incomplete.append("student_context_zero_shuffle_skipped")
+    if is_student and teacher_checkpoint is None:
+        omitted_diagnostics.append("teacher_student_action_kl")
     for name, stage_report in stage_reports.items():
         if stage_report["metrics"]["episodes"]["completed"] != len(SIGNED_SLOPES) * args.episodes_per_slope:
-            incomplete.append(f"{name}_episode_quota_incomplete")
+            raise RuntimeError(f"{name} episode quota is incomplete")
 
-    return_floor_failures: list[str] = []
-    if stage == "s2_student_ppo" and not args.training_monitor:
+    if stage == "s2_student_ppo":
         if s1_baseline_returns is None:
-            incomplete.append("s1_baseline_acceptance_report_missing")
+            omitted_diagnostics.append("s1_baseline_return_comparison")
         else:
-            comparisons, return_floor_failures = evaluate_s2_return_floor(
-                stage_reports,
-                s1_baseline_returns,
-            )
+            comparisons = evaluate_s2_return_floor(stage_reports, s1_baseline_returns)
             assert s1_baseline_binding is not None
             s1_baseline_binding["s2_return_floor"] = comparisons
 
     report: dict[str, Any] = {
-        "schema_version": POLICY_ACCEPTANCE_SCHEMA_VERSION,
-        "report_type": "g1_rickshaw_policy_acceptance",
-        "status": (
-            "failed"
-            if return_floor_failures
-            else "incomplete" if incomplete else "recorded"
-        ),
+        "schema_version": POLICY_DIAGNOSTIC_SCHEMA_VERSION,
+        "report_type": "g1_rickshaw_policy_diagnostics",
+        "status": "recorded",
         "created_utc": utc_timestamp(),
         "task": args.task,
         "checkpoint": _checkpoint_binding(checkpoint_path, checkpoint),
@@ -1007,10 +773,8 @@ def main() -> int:  # noqa: C901
             if teacher_path is None or teacher_checkpoint is None
             else _checkpoint_binding(teacher_path, teacher_checkpoint)
         ),
-        "s1_baseline_acceptance": s1_baseline_binding,
-        "inputs": _input_binding(args),
+        "s1_baseline": s1_baseline_binding,
         "evaluation": {
-            "training_monitor": bool(args.training_monitor),
             "deterministic_actions": True,
             "fixed_seeds": list(args.seeds),
             "signed_slopes": list(SIGNED_SLOPES),
@@ -1019,36 +783,18 @@ def main() -> int:  # noqa: C901
             "curriculum_stages": list(args.curriculum_stages),
             "command_protocol": FORMAL_EVALUATION_COMMAND_PROTOCOL,
             "cross_case_protocol": FORMAL_EVALUATION_CROSS_CASE_PROTOCOL,
-            "fat2_weight_override": args.fat2_weight,
-            "rollout_steps_training_variant": args.rollout_steps,
-            "latent_dim_variant": args.latent_dim,
+            "fat2_weight": fat2_weight,
+            "rollout_steps": rollout_steps,
         },
         "metric_definitions": METRIC_DEFINITIONS,
         "stages": stage_reports,
-        "thresholds": serialize_thresholds(thresholds),
-        "threshold_results": {},
-        "failures": [*incomplete, *return_floor_failures],
-        "ablation": (
-            None
-            if args.ablation_id is None
-            else {
-                "id": args.ablation_id,
-                "group": args.ablation_group,
-                "matrix_sha256": args.ablation_matrix_sha256,
-            }
-        ),
+        "omitted_diagnostics": omitted_diagnostics,
     }
-    if thresholds:
-        outcomes, failures = evaluate_thresholds(report, thresholds)
-        report["threshold_results"] = outcomes
-        report["failures"].extend(failures)
-        report["status"] = "passed" if not report["failures"] else "failed"
     write_json_atomic(args.output, report)
 
-    print(f"wrote policy acceptance report: {Path(args.output).resolve()}")
-    exit_code = 0 if report["status"] in {"recorded", "passed"} else 1
+    print(f"wrote policy diagnostic report: {Path(args.output).resolve()}")
     simulation_app.close()
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":

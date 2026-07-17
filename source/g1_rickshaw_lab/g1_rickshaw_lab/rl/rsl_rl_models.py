@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import copy
-import weakref
 from typing import Any
 
 import torch
 from torch import nn
 from torch.distributions import Independent, Normal
 
+from g1_rickshaw_lab.policy_schema import (
+    ACTION_SCALE,
+    ACTOR_OBSERVATION_DIM,
+    BUTTERWORTH_A1,
+    BUTTERWORTH_B0,
+    BUTTERWORTH_B1,
+    DEFAULT_CONTEXT_DIM,
+    HISTORY_LENGTH,
+    validate_context_dim,
+)
+
 from .actor_critic import (
     ACTION_DIM,
+    CRITIC_PRIVILEGE_DIM,
     GaussianActor,
     PrivilegedCritic,
-    build_context_projection,
 )
 from .context_encoder import ContextEncoder
 from .teacher_model import TeacherEncoder
@@ -60,7 +70,7 @@ class RslRickshawActorModel(_RslModelContract):
         activation: str = "elu",
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
-        latent_dim: int = 16,
+        latent_dim: int = DEFAULT_CONTEXT_DIM,
     ) -> None:
         super().__init__()
         _require_rsl_rl()
@@ -72,39 +82,52 @@ class RslRickshawActorModel(_RslModelContract):
             raise ValueError("runtime empirical observation normalization is forbidden")
         if distribution_cfg is None:
             raise ValueError("the PPO actor requires a Gaussian distribution configuration")
+        self.latent_dim = validate_context_dim(latent_dim)
 
         self.obs_groups = list(obs_groups[obs_set])
-        if "policy" not in self.obs_groups or obs["policy"].shape[-1] != 96:
-            raise ValueError("actor observation set must contain policy[N,96]")
-        has_teacher = "teacher_extrinsics" in self.obs_groups
-        has_history = "history" in self.obs_groups
-        if has_teacher == has_history:
-            raise ValueError("actor must use exactly one of teacher_extrinsics or history")
-
-        self.source_group = "teacher_extrinsics" if has_teacher else "history"
-        if has_teacher:
-            if latent_dim != 16:
-                raise ValueError("the privileged teacher latent dimension is fixed to 16")
-            if len(obs[self.source_group].shape) != 2:
-                raise ValueError("teacher_extrinsics must have shape [N,E]")
-            self.encoder = TeacherEncoder(obs[self.source_group].shape[-1])
+        if (
+            "policy" not in self.obs_groups
+            or obs["policy"].shape[-1] != ACTOR_OBSERVATION_DIM
+        ):
+            raise ValueError(
+                f"actor observation set must contain policy[N,{ACTOR_OBSERVATION_DIM}]"
+            )
+        groups = set(self.obs_groups)
+        teacher_groups = {
+            "policy",
+            "history",
+            "teacher_dynamic_history",
+            "teacher_static",
+        }
+        if groups == teacher_groups:
+            self.encoder = TeacherEncoder(self.latent_dim)
             self.stage = "teacher"
         else:
-            if latent_dim not in {8, 16, 24, 32}:
-                raise ValueError("student latent_dim must be one of 8, 16, 24, or 32")
-            if tuple(obs[self.source_group].shape[1:]) != (61, 96):
-                raise ValueError("history must have shape [N,61,96]")
-            self.encoder = ContextEncoder(latent_dim=latent_dim)
+            if groups != {"policy", "history"}:
+                raise ValueError(
+                    "actor groups must match the fixed teacher or student interface"
+                )
+            if tuple(obs["history"].shape[1:]) != (
+                HISTORY_LENGTH,
+                ACTOR_OBSERVATION_DIM,
+            ):
+                raise ValueError(
+                    "history must have shape "
+                    f"[N,{HISTORY_LENGTH},{ACTOR_OBSERVATION_DIM}]"
+                )
+            self.encoder = ContextEncoder(self.latent_dim)
             self.stage = "student"
-        self.context_projection = build_context_projection(latent_dim)
-        self.policy = GaussianActor(latent_dim=16, action_dim=output_dim)
+        self.policy = GaussianActor(self.latent_dim)
         self._distribution: Independent | None = None
 
     def encode(self, obs) -> torch.Tensor:
-        source = obs[self.source_group]
         if self.stage == "teacher":
-            return self.encoder(source)
-        return self.context_projection(self.encoder.encode(source))
+            return self.encoder(
+                obs["history"],
+                obs["teacher_dynamic_history"],
+                obs["teacher_static"],
+            )
+        return self.encoder(obs["history"])
 
     def forward(
         self,
@@ -176,7 +199,7 @@ class RslRickshawActorModel(_RslModelContract):
 
 
 class RslRickshawCriticModel(_RslModelContract):
-    """Independent value trunk that reuses the actor's sole context encoder."""
+    """Independent value trunk using only current and raw privileged state."""
 
     def __init__(
         self,
@@ -184,45 +207,27 @@ class RslRickshawCriticModel(_RslModelContract):
         obs_groups: dict[str, list[str]],
         obs_set: str,
         output_dim: int,
-        hidden_dims=(512, 256, 128),
+        hidden_dims=(256, 128),
         activation: str = "elu",
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
-        latent_dim: int = 16,
     ) -> None:
         super().__init__()
         _require_rsl_rl()
         if output_dim != 1 or distribution_cfg is not None:
             raise ValueError("critic must be deterministic with scalar output")
-        if tuple(hidden_dims) != (512, 256, 128) or activation.lower() != "elu":
-            raise ValueError("rickshaw critic architecture is fixed to [512,256,128] with ELU")
+        if tuple(hidden_dims) != (256, 128) or activation.lower() != "elu":
+            raise ValueError("rickshaw critic architecture is fixed to [256,128] with ELU")
         if obs_normalization:
             raise ValueError("runtime empirical observation normalization is forbidden")
         self.obs_groups = list(obs_groups[obs_set])
-        if "policy" not in self.obs_groups or "critic" not in self.obs_groups:
-            raise ValueError("critic observation set requires policy and critic groups")
-        source_groups = [name for name in ("teacher_extrinsics", "history") if name in self.obs_groups]
-        if len(source_groups) != 1:
-            raise ValueError("critic must use the same single context source as actor")
-        self.source_group = source_groups[0]
-        if latent_dim not in {8, 16, 24, 32}:
-            raise ValueError("critic latent_dim must be one of 8, 16, 24, or 32")
-        if self.source_group == "teacher_extrinsics" and latent_dim != 16:
-            raise ValueError("the privileged teacher critic latent dimension is fixed to 16")
-        privileged_dim = obs["critic"].shape[-1]
-        self.value = PrivilegedCritic(privileged_dim=privileged_dim, latent_dim=16)
-        self._actor_ref: weakref.ReferenceType[RslRickshawActorModel] | None = None
-
-    def link_actor(self, actor: RslRickshawActorModel) -> None:
-        if actor.source_group != self.source_group:
-            raise ValueError("actor and critic context sources differ")
-        self._actor_ref = weakref.ref(actor)
-
-    def _actor(self) -> RslRickshawActorModel:
-        actor = None if self._actor_ref is None else self._actor_ref()
-        if actor is None:
-            raise RuntimeError("critic must be linked to the actor context encoder")
-        return actor
+        if set(self.obs_groups) != {"policy", "critic"}:
+            raise ValueError("critic observation set requires only policy and critic")
+        if obs["critic"].shape[-1] != CRITIC_PRIVILEGE_DIM:
+            raise ValueError(
+                f"critic privilege must have width {CRITIC_PRIVILEGE_DIM}"
+            )
+        self.value = PrivilegedCritic()
 
     def forward(self, obs, masks: torch.Tensor | None = None, hidden_state: Any = None) -> torch.Tensor:
         del hidden_state
@@ -230,8 +235,7 @@ class RslRickshawCriticModel(_RslModelContract):
             from rsl_rl.utils import unpad_trajectories
 
             obs = unpad_trajectories(obs, masks)
-        context = self._actor().encode(obs)
-        return self.value(obs["policy"], context, obs["critic"])
+        return self.value(obs["policy"], obs["critic"])
 
 
 class _RelativeLearningRateAdam(torch.optim.Adam):
@@ -249,7 +253,7 @@ class _RelativeLearningRateAdam(torch.optim.Adam):
 
 
 class RickshawPPO:
-    """Factory facade returning an RSL-RL PPO with shared context and split LR."""
+    """Factory facade returning RSL-RL PPO with a separate encoder LR."""
 
     @staticmethod
     def construct_algorithm(obs, env, cfg: dict, device: str):
@@ -272,7 +276,6 @@ class RickshawPPO:
         critic = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
         if not isinstance(actor, RslRickshawActorModel) or not isinstance(critic, RslRickshawCriticModel):
             raise TypeError("RickshawPPO requires the rickshaw actor and critic adapters")
-        critic.link_actor(actor)
         storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
         algorithm = alg_class(
             actor,
@@ -301,8 +304,7 @@ class RickshawPPO:
         if optimizer.lower() != "adam":
             raise ValueError("the fixed rickshaw optimizer is Adam")
         if not isinstance(actor, RslRickshawActorModel) or not isinstance(critic, RslRickshawCriticModel):
-            raise TypeError("RickshawPPO requires linked rickshaw model adapters")
-        critic.link_actor(actor)
+            raise TypeError("RickshawPPO requires rickshaw model adapters")
         algorithm = PPO(
             actor,
             critic,
@@ -314,10 +316,7 @@ class RickshawPPO:
         context_lr = learning_rate if context_learning_rate is None else context_learning_rate
         if context_lr <= 0.0 or learning_rate <= 0.0:
             raise ValueError("learning rates must be positive")
-        context_parameters = [
-            *actor.encoder.parameters(),
-            *actor.context_projection.parameters(),
-        ]
+        context_parameters = list(actor.encoder.parameters())
         context_ids = {id(parameter) for parameter in context_parameters}
         actor_head = [parameter for parameter in actor.parameters() if id(parameter) not in context_ids]
         groups = [
@@ -337,11 +336,10 @@ class _StudentExport(nn.Module):
     def __init__(self, model: RslRickshawActorModel) -> None:
         super().__init__()
         self.context_encoder = _DeploymentContextEncoder(model.encoder)
-        self.context_projection = copy.deepcopy(model.context_projection)
         self.policy = copy.deepcopy(model.policy.network)
 
     def forward(self, current: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
-        context = self.context_projection(self.context_encoder(history))
+        context = self.context_encoder(history)
         return self.policy(torch.cat((current, context), dim=-1)).clamp(-1.0, 1.0)
 
     @torch.jit.export
@@ -355,7 +353,10 @@ class _StudentOnnxExport(_StudentExport):
         self.verbose = verbose
 
     def get_dummy_inputs(self):
-        return torch.zeros(1, 96), torch.zeros(1, 61, 96)
+        return (
+            torch.zeros(1, ACTOR_OBSERVATION_DIM),
+            torch.zeros(1, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM),
+        )
 
     @property
     def input_names(self) -> list[str]:
@@ -372,13 +373,12 @@ class _DeploymentController(nn.Module):
     def __init__(self, policy: nn.Module) -> None:
         super().__init__()
         self.policy = policy
-        scales = [0.40] * 12 + [0.20] * 3
-        for _ in range(2):
-            scales.extend([0.25] * 3 + [0.30] + [0.15] * 3)
-        self.register_buffer("action_scale", torch.tensor(scales, dtype=torch.float32))
-        self.b0 = 0.20430082
-        self.b1 = 0.20430082
-        self.a1 = -0.59139835
+        self.register_buffer(
+            "action_scale", torch.tensor(ACTION_SCALE, dtype=torch.float32)
+        )
+        self.b0 = BUTTERWORTH_B0
+        self.b1 = BUTTERWORTH_B1
+        self.a1 = BUTTERWORTH_A1
 
     def forward(
         self,
@@ -400,7 +400,7 @@ class _DeploymentController(nn.Module):
 
 
 class _DeploymentContextEncoder(nn.Module):
-    """TCN export without the four S1-only auxiliary heads."""
+    """Scriptable copy of the student TCN."""
 
     def __init__(self, encoder: ContextEncoder) -> None:
         super().__init__()
