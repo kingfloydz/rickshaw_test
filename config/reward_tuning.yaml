@@ -1,0 +1,27 @@
+schema_version: 1
+task: Isaac-G1-Rickshaw-Directional-Slope-v0
+fixed:
+  num_envs: 4096
+  rollout_steps: 48
+  latent_dim: 16
+  fat2_weight: 0.1
+  max_iterations: 6000
+factors:
+  zmp:
+    term: zmp_margin_barrier
+    low: -2.0
+    high: 0.0
+    high_label: zmp_0
+  hitch:
+    term: hitch_height_recovery_l2
+    low: -0.25
+    high: -0.5
+    high_label: hitch_050
+  slide:
+    term: feet_slide
+    low: -0.1
+    high: -0.2
+    high_label: slide_020
+calibration:
+  samples_per_slope: 10000
+  max_policy_steps: 5000

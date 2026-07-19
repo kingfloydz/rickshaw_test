@@ -43,10 +43,15 @@ from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     validate_sample_checkpoint_binding,
     write_reward_calibration_json,
 )
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    apply_reward_weight_overrides,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_STAGE_KEY,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
+    normalize_rsl_rl_runner_configuration,
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
@@ -183,14 +188,11 @@ def _resolve_policy_kind(requested: str, checkpoint: dict[str, Any]) -> str:
 
 
 def _configure_training(env_cfg: Any) -> None:
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
-
     env_cfg.curriculum = None
     env_cfg.scene.terrain.terrain_generator.curriculum = True
     env_cfg.domain_randomization = replace(
         env_cfg.domain_randomization,
         enabled=False,
-        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
     env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
 
@@ -216,15 +218,6 @@ def _assign_fixed_slopes(base_env: Any):
         raise RewardCalibrationError(
             "fixed terrain assignment did not resolve to every configured slope"
         )
-    cfg = base_env.cfg.domain_randomization.curriculum
-    base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
-        columns,
-        torch.sign(expected).to(dtype=torch.long),
-        cfg,
-    )
-    base_env.curriculum_stage_per_env[:] = (
-        base_env.curriculum_runtime_state.stage_per_environment()
-    )
     return slots
 
 
@@ -259,6 +252,16 @@ def _physics_snapshot(
     num_envs = base_env.num_envs
     device = base_env.device
     d6_cfg = base_env.d6_constraint_manager.cfg
+    d6_fields = (
+        "linear_stiffness",
+        "linear_damping",
+        "angular_stiffness",
+        "angular_damping",
+        "max_force",
+        "max_torque",
+        "linear_limit",
+        "angular_limit",
+    )
     actual_values = {
         "payload.mass": base_env._payload_mass,
         "payload.com.x": base_env._payload_com[:, 0],
@@ -269,16 +272,7 @@ def _physics_snapshot(
         "wheel.left_damping": base_env._wheel_damping[:, 0],
         "wheel.right_damping": base_env._wheel_damping[:, 1],
     }
-    for field in (
-        "linear_stiffness",
-        "linear_damping",
-        "angular_stiffness",
-        "angular_damping",
-        "max_force",
-        "max_torque",
-        "linear_limit",
-        "angular_limit",
-    ):
+    for field in d6_fields:
         actual_values[f"d6.{field}"] = torch.full(
             (num_envs,), float(getattr(d6_cfg, field)), device=device
         )
@@ -294,13 +288,17 @@ def _physics_snapshot(
     )
     if set(actual_values) != set(C1_NOMINAL_PHYSICS_FIELDS):
         raise RewardCalibrationError("C1 runtime physical fields are incomplete")
-    missing_nominal = sorted(set(C1_NOMINAL_PHYSICS_FIELDS) - set(nominal_source))
+    nominal_values = dict(nominal_source)
+    nominal_values.update(
+        {f"d6.{field}": float(getattr(d6_cfg, field)) for field in d6_fields}
+    )
+    missing_nominal = sorted(set(C1_NOMINAL_PHYSICS_FIELDS) - set(nominal_values))
     if missing_nominal:
         raise RewardCalibrationError(
             f"C1 runtime nominal physics fields are incomplete: missing={missing_nominal}"
         )
     nominal_values = {
-        name: float(nominal_source[name]) for name in C1_NOMINAL_PHYSICS_FIELDS
+        name: float(nominal_values[name]) for name in C1_NOMINAL_PHYSICS_FIELDS
     }
     result: dict[str, dict[str, float]] = {}
     for name, value in sorted(actual_values.items()):
@@ -337,6 +335,10 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     env_cfg.seed = args.seed
     _configure_training(env_cfg)
     training_parameters = training_configuration["training_parameters"]
+    apply_reward_weight_overrides(
+        env_cfg,
+        reward_weight_overrides_from_configuration(training_configuration),
+    )
     env_cfg.rewards.fat2_prior_exp.weight = float(
         training_parameters["fat2_weight"]
     )
@@ -348,6 +350,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     agent_cfg = load_cfg_from_registry(args.task, registry_key)
     agent_cfg.device = device
     agent_cfg.actor.latent_dim = int(training_parameters["latent_dim"])
+    agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
     raw_env = gym.make(args.task, cfg=env_cfg)
     env = None
     try:
@@ -356,12 +359,6 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         env.seed(args.seed)
         slope_slots = _assign_fixed_slopes(base_env)
         observation, _ = env.reset()
-        if base_env.curriculum_runtime_state.stage != mdp.CurriculumStage.TRAINING:
-            raise RewardCalibrationError("runtime curriculum is not TRAINING")
-        if not torch.all(
-            base_env.curriculum_stage_per_env == int(mdp.CurriculumStage.TRAINING)
-        ):
-            raise RewardCalibrationError("not every rollout environment is assigned to TRAINING")
         c1_physics, c1_nominal_values = _physics_snapshot(base_env)
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
         runner.load(
@@ -524,10 +521,13 @@ def main() -> int:
                 sort_keys=True,
             )
         )
-        return 0
-    finally:
-        if simulation_app is not None:
-            simulation_app.close()
+    except BaseException:
+        # Process teardown releases Kit resources. Closing SimulationApp here
+        # can terminate the interpreter and hide the original exception.
+        raise
+    if simulation_app is not None:
+        simulation_app.close()
+    return 0
 
 
 if __name__ == "__main__":

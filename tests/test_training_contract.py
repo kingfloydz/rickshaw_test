@@ -6,11 +6,11 @@ import torch
 from g1_rickshaw_lab.training_contract import (
     DISTILLATION_ROLLOUT_STEPS,
     GUIDE_MAX_ITERATIONS,
+    GUIDE_TRAINING_PARAMETERS,
     ROLLOUT_DEFAULT_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
     ROLLOUT_STAGE_SEQUENCE,
     SIGNED_SLOPE_LABELS,
-    STATIC_HAND_LOAD_ITERATIONS,
     guide_max_iterations,
     rollout_scaled_iterations,
     s0_remaining_learning_iterations,
@@ -33,7 +33,14 @@ def test_mainline_has_fixed_stage_budgets_and_19_slopes() -> None:
         f"{value / 100:+.2f}" for value in range(-8, 11)
     )
     assert guide_max_iterations("s0_teacher") == 6000
-    assert STATIC_HAND_LOAD_ITERATIONS == 2000
+    assert GUIDE_TRAINING_PARAMETERS["s0_teacher"] == {
+        "domain_randomization_refresh_interval": 200,
+        "domain_randomization_max_scale": 0.6,
+        "domain_randomization_ramp_refreshes": 30,
+        "domain_randomization_friction_scale": 0.5,
+        "delay_randomization_max_probability": 0.25,
+        "delay_randomization_ramp_refreshes": 60,
+    }
     with pytest.raises(ValueError, match="unknown training stage"):
         guide_max_iterations("legacy")
 

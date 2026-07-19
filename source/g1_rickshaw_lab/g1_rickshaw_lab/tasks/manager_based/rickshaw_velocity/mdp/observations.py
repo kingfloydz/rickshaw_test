@@ -376,13 +376,10 @@ def actor_observation(
     env: Any,
     asset_cfg: Any | None = None,
     *,
-    use_cache: bool = True,
     active_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Isaac Lab observation-manager adapter for the complete 96-D vector."""
 
-    if use_cache and hasattr(env, "_actor_observation_cache"):
-        return env._actor_observation_cache
     asset = _resolve_asset(env, asset_cfg)
     ids = _policy_joint_ids(env, asset_cfg)
     # Component manager functions above are scaled; this call uses the pure
@@ -483,23 +480,16 @@ def dynamic_privileged_observation(env: Any) -> torch.Tensor:
         "path_lateral_w",
         "path_normal_w",
         "rickshaw_state",
-        "curriculum_stage_per_env",
     )
     if not all(hasattr(env, name) for name in required):
         raise RuntimeError("dynamic privilege requested before MDP startup")
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     cart_velocity_w = cart.data.root_lin_vel_w
-    from .curricula import CurriculumStage
-
-    static_load = env.curriculum_stage_per_env == int(CurriculumStage.STATIC_HAND_LOAD)
-    cart_velocity_w = torch.where(
-        static_load[:, None], torch.zeros_like(cart_velocity_w), cart_velocity_w
-    )
     basis = torch.stack(
         (env.path_tangent_w, env.path_lateral_w, env.path_normal_w), dim=1
     )
-    wrench_w = env.rickshaw_state.d6_wrench_w
+    wrench_w = env.rickshaw_state.d6_truth_wrench_w
     force_sln = torch.einsum("nsw,ncw->nsc", wrench_w[..., :3], basis)
     torque_sln = torch.einsum("nsw,ncw->nsc", wrench_w[..., 3:], basis)
     d6_wrench_sln = torch.cat((force_sln, torque_sln), dim=-1).reshape(

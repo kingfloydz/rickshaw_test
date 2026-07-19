@@ -6,31 +6,35 @@ from typing import Any
 
 import torch
 
+from g1_rickshaw_lab.policy_schema import ACTION_SCALE
+
 
 REWARD_WEIGHTS = {
-    "track_speed_exp": 2.0,
+    "track_speed_exp": 1.0,
+    "track_speed_precise_exp": 2.0,
+    "speed_error_pseudo_huber": -0.5,
     "lateral_error_l2": -0.5,
     "heading_error_l2": -0.5,
     "zmp_margin_barrier": -2.0,
     "hitch_height_exp": 0.5,
     "hitch_height_recovery_l2": -0.25,
     "fat2_prior_exp": 0.1,
-    "feet_single_stance": 0.10,
-    "feet_slide": -0.10,
-    "terrain_normal_velocity_l2": -0.5,
-    "joint_power_l1": -1.0e-4,
+    "feet_landing": 0.25,
+    "feet_air_time_excess_l2": -0.25,
+    "feet_slide": -0.20,
+    "terrain_normal_velocity_l2": -0.25,
+    "joint_power_l1": -2.0e-4,
     "processed_action_rate_l2": -0.01,
-    "processed_action_jerk_l2": -0.005,
     "hip_yaw_roll_reference_l2": -0.05,
     "pelvis_height_limits_l2": -1.0,
     "joint_position_limits": -1.0,
     "termination": -200.0,
 }
 
-# Every reward callable returns a dimensionless value.  Unit-valued SI
-# normalizers make the formerly implicit units explicit without changing the
-# numerical reward signal or any persisted policy training scale.
-SPEED_ERROR_SCALE_MPS = 0.35
+# Every reward callable returns a dimensionless value; SI scales are explicit.
+SPEED_ERROR_SCALE_MPS = 0.5
+SPEED_PRECISE_ERROR_SCALE_MPS = 0.25
+SPEED_PSEUDO_HUBER_SCALE_MPS = 0.5
 LATERAL_ERROR_SCALE_M = 0.30
 HEADING_ERROR_SCALE_RAD = 0.30
 ZMP_MARGIN_SCALE_M = 0.02
@@ -38,21 +42,29 @@ HITCH_HEIGHT_ERROR_SCALE_M = 0.02
 HITCH_HEIGHT_RECOVERY_DEADBAND_M = 0.05
 HITCH_HEIGHT_RECOVERY_SCALE_M = 0.05
 FAT2_ERROR_SCALE_RAD = 0.12
-FEET_SINGLE_STANCE_NORMALIZER_S = 1.0
-FEET_SINGLE_STANCE_CAP_S = 0.4
+FEET_LANDING_TARGET_AIR_TIME_S = 0.30
+FEET_LANDING_SIGMA_S = 0.12
+FEET_MAX_AIR_TIME_S = 0.50
+FEET_AIR_TIME_EXCESS_SCALE_S = 0.20
 FEET_SLIDE_NORMALIZER_MPS = 1.0
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
-PROCESSED_ACTION_RATE_SCALE_RAD = 0.05
-PROCESSED_ACTION_JERK_SCALE_RAD = 0.03
 HIP_YAW_ROLL_REFERENCE_SCALE_RAD = 0.20
 HIP_YAW_ROLL_POLICY_INDICES = (1, 2, 7, 8)
-PELVIS_HEIGHT_BOUNDS_M = (0.65, 0.80)
+PELVIS_HEIGHT_BOUNDS_M = (0.58, 0.87)
 PELVIS_HEIGHT_ERROR_SCALE_M = 0.05
 JOINT_LIMIT_NORMALIZER_RAD = 1.0
 
 REWARD_NORMALIZATION_SCALES = {
     "track_speed_exp": {"scale": SPEED_ERROR_SCALE_MPS, "unit": "m/s"},
+    "track_speed_precise_exp": {
+        "scale": SPEED_PRECISE_ERROR_SCALE_MPS,
+        "unit": "m/s",
+    },
+    "speed_error_pseudo_huber": {
+        "scale": SPEED_PSEUDO_HUBER_SCALE_MPS,
+        "unit": "m/s",
+    },
     "lateral_error_l2": {"scale": LATERAL_ERROR_SCALE_M, "unit": "m"},
     "heading_error_l2": {"scale": HEADING_ERROR_SCALE_RAD, "unit": "rad"},
     "zmp_margin_barrier": {"scale": ZMP_MARGIN_SCALE_M, "unit": "m"},
@@ -62,8 +74,12 @@ REWARD_NORMALIZATION_SCALES = {
         "unit": "m",
     },
     "fat2_prior_exp": {"scale": FAT2_ERROR_SCALE_RAD, "unit": "rad"},
-    "feet_single_stance": {
-        "scale": FEET_SINGLE_STANCE_NORMALIZER_S,
+    "feet_landing": {
+        "scale": FEET_LANDING_SIGMA_S,
+        "unit": "s",
+    },
+    "feet_air_time_excess_l2": {
+        "scale": FEET_AIR_TIME_EXCESS_SCALE_S,
         "unit": "s",
     },
     "feet_slide": {"scale": FEET_SLIDE_NORMALIZER_MPS, "unit": "m/s"},
@@ -73,12 +89,8 @@ REWARD_NORMALIZATION_SCALES = {
     },
     "joint_power_l1": {"scale": JOINT_POWER_NORMALIZER_W, "unit": "W"},
     "processed_action_rate_l2": {
-        "scale": PROCESSED_ACTION_RATE_SCALE_RAD,
-        "unit": "rad",
-    },
-    "processed_action_jerk_l2": {
-        "scale": PROCESSED_ACTION_JERK_SCALE_RAD,
-        "unit": "rad",
+        "scale": 1.0,
+        "unit": "normalized_action",
     },
     "hip_yaw_roll_reference_l2": {
         "scale": HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
@@ -95,6 +107,21 @@ REWARD_NORMALIZATION_SCALES = {
 
 def track_speed_exp_value(v_ref: torch.Tensor, v_robot_s: torch.Tensor) -> torch.Tensor:
     return torch.exp(-torch.square((v_ref - v_robot_s) / SPEED_ERROR_SCALE_MPS))
+
+
+def track_speed_precise_exp_value(
+    v_ref: torch.Tensor, v_robot_s: torch.Tensor
+) -> torch.Tensor:
+    return torch.exp(
+        -torch.square((v_ref - v_robot_s) / SPEED_PRECISE_ERROR_SCALE_MPS)
+    )
+
+
+def speed_error_pseudo_huber_value(
+    v_ref: torch.Tensor, v_robot_s: torch.Tensor
+) -> torch.Tensor:
+    normalized_error = (v_ref - v_robot_s) / SPEED_PSEUDO_HUBER_SCALE_MPS
+    return torch.sqrt(1.0 + torch.square(normalized_error)) - 1.0
 
 
 def lateral_error_l2_value(lateral_error: torch.Tensor) -> torch.Tensor:
@@ -125,7 +152,6 @@ def hitch_height_exp_value(
 def hitch_height_recovery_l2_value(
     hitch_height: torch.Tensor,
     target_height: float,
-    two_wheel_contact: torch.Tensor,
     *,
     deadband: float = HITCH_HEIGHT_RECOVERY_DEADBAND_M,
     scale: float = HITCH_HEIGHT_RECOVERY_SCALE_M,
@@ -136,8 +162,12 @@ def hitch_height_recovery_l2_value(
         raise ValueError("hitch height recovery deadband must be non-negative")
     if scale <= 0.0:
         raise ValueError("hitch height recovery scale must be positive")
-    violation = torch.relu(torch.abs(hitch_height - target_height) - deadband)
-    return torch.square(violation / scale) * two_wheel_contact.to(hitch_height.dtype)
+    normalized = torch.relu(torch.abs(hitch_height - target_height) - deadband) / scale
+    return torch.where(
+        normalized <= 1.0,
+        torch.square(normalized),
+        2.0 * normalized - 1.0,
+    )
 
 
 def fat2_prior_exp_value(
@@ -165,25 +195,13 @@ def joint_power_l1_value(torque: torch.Tensor, joint_velocity: torch.Tensor) -> 
 
 
 def processed_action_rate_l2_value(
-    target: torch.Tensor, previous_target: torch.Tensor
+    target: torch.Tensor,
+    previous_target: torch.Tensor,
 ) -> torch.Tensor:
     if target.shape != previous_target.shape:
         raise ValueError("processed action histories must have identical shapes")
-    return torch.mean(
-        torch.square((target - previous_target) / PROCESSED_ACTION_RATE_SCALE_RAD),
-        dim=-1,
-    )
-
-
-def processed_action_jerk_l2_value(
-    target: torch.Tensor,
-    previous_target: torch.Tensor,
-    previous_previous_target: torch.Tensor,
-) -> torch.Tensor:
-    if target.shape != previous_target.shape or target.shape != previous_previous_target.shape:
-        raise ValueError("processed action histories must have identical shapes")
-    jerk = target - 2.0 * previous_target + previous_previous_target
-    return torch.mean(torch.square(jerk / PROCESSED_ACTION_JERK_SCALE_RAD), dim=-1)
+    action_scale = target.new_tensor(ACTION_SCALE)
+    return torch.mean(torch.square((target - previous_target) / action_scale), dim=-1)
 
 
 def hip_yaw_roll_reference_l2_value(
@@ -198,31 +216,38 @@ def hip_yaw_roll_reference_l2_value(
     return torch.mean(torch.square((joint_position - reference_position) / scale), dim=-1)
 
 
-def feet_single_stance_value(
-    current_air_time: torch.Tensor,
-    current_contact_time: torch.Tensor,
-    moving: torch.Tensor,
-    *,
-    cap: float = FEET_SINGLE_STANCE_CAP_S,
+def feet_landing_value(
+    first_contact: torch.Tensor,
+    last_air_time: torch.Tensor,
+    v_ref: torch.Tensor,
+    v_robot_s: torch.Tensor,
 ) -> torch.Tensor:
-    """Return capped biped single-stance duration without a hidden gait phase."""
+    """Score the previous swing only when exactly one foot lands this step."""
 
-    if current_air_time.shape != current_contact_time.shape:
-        raise ValueError("foot air/contact-time tensors must have identical shapes")
-    if current_air_time.ndim != 2 or current_air_time.shape[1] != 2:
-        raise ValueError("single-stance reward requires exactly two feet")
-    if moving.shape != current_air_time.shape[:1]:
-        raise ValueError("moving gate must contain one value per environment")
-    if cap <= 0.0:
-        raise ValueError("single-stance cap must be positive")
-    in_contact = current_contact_time > 0.0
-    in_mode_time = torch.where(in_contact, current_contact_time, current_air_time)
-    single_stance = torch.sum(in_contact.to(dtype=torch.int32), dim=-1) == 1
-    reward = torch.min(
-        torch.where(single_stance[:, None], in_mode_time, 0.0), dim=-1
-    ).values
-    reward = torch.clamp(reward, max=cap) / FEET_SINGLE_STANCE_NORMALIZER_S
-    return reward * moving.to(dtype=reward.dtype)
+    contact = first_contact.to(last_air_time.dtype)
+    single_landing = torch.sum(first_contact, dim=-1) == 1
+    tracking = (v_robot_s > 0.1) & (torch.abs(v_ref - v_robot_s) < 0.5)
+    landing_kernel = torch.exp(
+        -torch.square(
+            (last_air_time - FEET_LANDING_TARGET_AIR_TIME_S) / FEET_LANDING_SIGMA_S
+        )
+    )
+    overlong = torch.square(
+        torch.relu(last_air_time - FEET_MAX_AIR_TIME_S)
+        / FEET_AIR_TIME_EXCESS_SCALE_S
+    )
+    gated_kernel = landing_kernel * tracking[:, None].to(last_air_time.dtype)
+    return torch.sum(contact * (gated_kernel - overlong), dim=-1) * single_landing.to(
+        last_air_time.dtype
+    )
+
+
+def feet_air_time_excess_l2_value(current_air_time: torch.Tensor) -> torch.Tensor:
+    excess = (
+        torch.relu(current_air_time - FEET_MAX_AIR_TIME_S)
+        / FEET_AIR_TIME_EXCESS_SCALE_S
+    )
+    return torch.sum(torch.square(excess), dim=-1)
 
 
 def pelvis_height_limits_l2_value(
@@ -243,6 +268,18 @@ def pelvis_height_limits_l2_value(
 
 def track_speed_exp(env: Any) -> torch.Tensor:
     return track_speed_exp_value(env.command_state.v_ref, env.policy_robot_speed_s)
+
+
+def track_speed_precise_exp(env: Any) -> torch.Tensor:
+    return track_speed_precise_exp_value(
+        env.command_state.v_ref, env.policy_robot_speed_s
+    )
+
+
+def speed_error_pseudo_huber(env: Any) -> torch.Tensor:
+    return speed_error_pseudo_huber_value(
+        env.command_state.v_ref, env.policy_robot_speed_s
+    )
 
 
 def lateral_error_l2(env: Any) -> torch.Tensor:
@@ -273,7 +310,6 @@ def hitch_height_recovery_l2(
     return hitch_height_recovery_l2_value(
         env.rickshaw_state.hitch_height,
         env.rickshaw_pose_cfg.hitch_height_target,
-        env.rickshaw_state.two_wheel_contact,
         deadband=deadband,
         scale=scale,
     )
@@ -296,22 +332,30 @@ def _resolve_body_ids(entity_cfg: Any | None, fallback: Any) -> Any:
     return fallback
 
 
-def feet_single_stance(
+def feet_landing(
     env: Any,
     sensor_cfg: Any | None = None,
-    cap: float = FEET_SINGLE_STANCE_CAP_S,
 ) -> torch.Tensor:
-    """Reward sustained single stance, capped at 0.4 s and gated while moving."""
+    """Reward a clean landing event while actual speed tracks the reference."""
 
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
     body_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    return feet_single_stance_value(
-        sensor.data.current_air_time[:, body_ids],
-        sensor.data.current_contact_time[:, body_ids],
-        env.command_state.v_ref > 0.1,
-        cap=cap,
+    return feet_landing_value(
+        sensor.compute_first_contact(env.step_dt)[:, body_ids],
+        sensor.data.last_air_time[:, body_ids],
+        env.command_state.v_ref,
+        env.policy_robot_speed_s,
     )
+
+
+def feet_air_time_excess_l2(
+    env: Any, sensor_cfg: Any | None = None
+) -> torch.Tensor:
+    sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
+    sensor = env.scene[sensor_name]
+    body_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
+    return feet_air_time_excess_l2_value(sensor.data.current_air_time[:, body_ids])
 
 
 def feet_slide(
@@ -361,14 +405,6 @@ def joint_power_l1(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
 def processed_action_rate_l2(env: Any) -> torch.Tensor:
     return processed_action_rate_l2_value(
         env.action_state.target, env.action_state.prev_target
-    )
-
-
-def processed_action_jerk_l2(env: Any) -> torch.Tensor:
-    return processed_action_jerk_l2_value(
-        env.action_state.target,
-        env.action_state.prev_target,
-        env.action_state.prev_prev_target,
     )
 
 
@@ -438,8 +474,10 @@ def termination(env: Any) -> torch.Tensor:
 
 __all__ = [
     "FAT2_ERROR_SCALE_RAD",
-    "FEET_SINGLE_STANCE_CAP_S",
-    "FEET_SINGLE_STANCE_NORMALIZER_S",
+    "FEET_AIR_TIME_EXCESS_SCALE_S",
+    "FEET_LANDING_SIGMA_S",
+    "FEET_LANDING_TARGET_AIR_TIME_S",
+    "FEET_MAX_AIR_TIME_S",
     "FEET_SLIDE_NORMALIZER_MPS",
     "HEADING_ERROR_SCALE_RAD",
     "HIP_YAW_ROLL_POLICY_INDICES",
@@ -452,17 +490,19 @@ __all__ = [
     "LATERAL_ERROR_SCALE_M",
     "PELVIS_HEIGHT_BOUNDS_M",
     "PELVIS_HEIGHT_ERROR_SCALE_M",
-    "PROCESSED_ACTION_JERK_SCALE_RAD",
-    "PROCESSED_ACTION_RATE_SCALE_RAD",
     "REWARD_NORMALIZATION_SCALES",
     "REWARD_WEIGHTS",
     "SPEED_ERROR_SCALE_MPS",
+    "SPEED_PRECISE_ERROR_SCALE_MPS",
+    "SPEED_PSEUDO_HUBER_SCALE_MPS",
     "TERRAIN_NORMAL_VELOCITY_SCALE_MPS",
     "ZMP_MARGIN_SCALE_M",
     "fat2_prior_exp",
     "fat2_prior_exp_value",
-    "feet_single_stance",
-    "feet_single_stance_value",
+    "feet_air_time_excess_l2",
+    "feet_air_time_excess_l2_value",
+    "feet_landing",
+    "feet_landing_value",
     "feet_slide",
     "heading_error_l2",
     "heading_error_l2_value",
@@ -477,8 +517,6 @@ __all__ = [
     "joint_power_l1_value",
     "lateral_error_l2",
     "lateral_error_l2_value",
-    "processed_action_jerk_l2",
-    "processed_action_jerk_l2_value",
     "pelvis_height_limits_l2",
     "pelvis_height_limits_l2_value",
     "processed_action_rate_l2",
@@ -488,6 +526,10 @@ __all__ = [
     "terrain_normal_velocity_l2_value",
     "track_speed_exp",
     "track_speed_exp_value",
+    "track_speed_precise_exp",
+    "track_speed_precise_exp_value",
+    "speed_error_pseudo_huber",
+    "speed_error_pseudo_huber_value",
     "zmp_margin_barrier",
     "zmp_margin_barrier_value",
 ]

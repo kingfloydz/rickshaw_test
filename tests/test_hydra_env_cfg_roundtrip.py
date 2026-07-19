@@ -22,7 +22,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
 
 HYDRA_EMBEDDED_CFG_TYPES = (
-    mdp.CurriculumScheduleCfg,
+    mdp.DomainRandomizationScheduleCfg,
     mdp.SpeedReferenceCfg,
     mdp.RollingResistanceCfg,
     mdp.AnalyticForceCfg,

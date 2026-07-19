@@ -232,6 +232,7 @@ def test_cart_interaction_preserves_complete_per_side_d6_wrench(
     runtime_state = SimpleNamespace(
         hand_force_w=torch.zeros((1, 3)),
         hand_torque_w=torch.ones((1, 3)),
+        d6_truth_wrench_w=torch.zeros((1, 2, 6)),
         d6_wrench_w=torch.zeros((1, 2, 6)),
     )
     interaction_state = SimpleNamespace(
@@ -264,6 +265,7 @@ def test_cart_interaction_preserves_complete_per_side_d6_wrench(
     torch.testing.assert_close(hand_force, -force_on_cart)
     torch.testing.assert_close(runtime_state.hand_force_w, -force_on_cart)
     torch.testing.assert_close(runtime_state.hand_torque_w, torch.zeros((1, 3)))
+    torch.testing.assert_close(runtime_state.d6_truth_wrench_w, d6_wrench)
     torch.testing.assert_close(runtime_state.d6_wrench_w, d6_wrench)
     assert not torch.equal(runtime_state.d6_wrench_w[:, 0], runtime_state.d6_wrench_w[:, 1])
     assert torch.all(runtime_state.d6_wrench_w[..., 3:] != 0.0)
@@ -978,6 +980,10 @@ def test_payload_write_updates_physx_mass_com_and_inertia_from_default() -> None
         device="cpu",
         scene=_FakeScene(rickshaw=cart),
         rickshaw_body_masses=view.masses.clone(),
+        rickshaw_total_mass=torch.sum(view.masses, dim=-1),
+        rickshaw_body_mass_weights=(
+            view.masses / torch.sum(view.masses, dim=-1)[:, None]
+        ),
         rickshaw_body_com_pos_b=view.coms[..., :3].clone(),
     )
     payload_mass = torch.tensor([2.0], dtype=torch.float64)
@@ -988,6 +994,11 @@ def test_payload_write_updates_physx_mass_com_and_inertia_from_default() -> None
     assert torch.sum(view.masses[0]).item() == pytest.approx(40.04)
     assert torch.sum(view.masses[1]).item() == pytest.approx(42.04)
     assert view.masses[1, 0].item() == pytest.approx(38.0)
+    assert env.rickshaw_total_mass[1].item() == pytest.approx(42.04)
+    torch.testing.assert_close(
+        env.rickshaw_body_mass_weights[1],
+        env.rickshaw_body_masses[1] / env.rickshaw_total_mass[1],
+    )
     expected_com = (36.0 * base_com + 2.0 * payload_com[0]) / 38.0
     torch.testing.assert_close(view.coms[1, 0, :3], expected_com)
     assert not torch.equal(view.inertias[1, 0], view.inertias[0, 0])

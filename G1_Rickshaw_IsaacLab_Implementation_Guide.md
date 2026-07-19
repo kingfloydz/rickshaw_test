@@ -2,7 +2,7 @@
 
 ## 1. 范围与固定配置
 
-目标：使用 Isaac Lab manager-based task 和 RSL-RL PPO，使 G1 在平地、上坡和下坡沿单一方向跟踪 `0–1 m/s` 速度。课程第一阶段使用等效双手静载，第二阶段恢复真实 rickshaw 闭链。
+目标：使用 Isaac Lab manager-based task 和 RSL-RL PPO，使 G1 在平地、上坡和下坡沿单一方向跟踪 `0–1 m/s` 速度。训练从真实 rickshaw 闭链开始，仅分阶段收窄和展开物理域随机化。
 
 ```text
 G1 body                         29 DoF
@@ -344,7 +344,7 @@ wheel_pos = torch.stack((wheel_phase, wheel_phase), dim=-1)
 wheel_vel = torch.zeros_like(wheel_pos)
 ```
 
-Reset 顺序：按当前课程阶段配置真实车或等效静载；写 cart root/wheels、G1 root、29 关节 IK pose 和 Dex `q_grasp`；清零速度、动作滤波器、FAT、delay 与 history 状态；使用最终 nominal D6 配置直接提交状态并执行一次 simulation forward。随后读取真实当前 observation，同时用该帧填满 student history 和 teacher dynamic history。Reset 不使用 gain ramp、兼容阈值或临时控制器。
+Reset 顺序：始终写入真实 cart root/wheels、G1 root、29 关节 IK pose 和 Dex `q_grasp`；清零速度、动作滤波器、FAT、delay 与 history 状态；使用最终 nominal D6 配置直接提交状态并执行一次 simulation forward。随后读取真实当前 observation，同时用该帧填满 student history 和 teacher dynamic history。Reset 不使用 gain ramp、兼容阈值或临时控制器。
 
 ### 5.5 Scene 与命令
 
@@ -745,13 +745,13 @@ class ContextEncoder(nn.Module):
 
 Teacher 的 observation 与 dynamic 分支先分别做 `1x1` 投影，再逐元素相加进入同一组 4 层 causal blocks；static 经过 `40 -> 32 + ELU`，与最后时刻的 64 维 temporal feature 拼接成 96 维并线性输出 `z_star=D`。Teacher 与 student 不包含 auxiliary head 或 projection adapter；latent 消融直接改变两个 encoder 的输出和 actor 输入，不把结果投影回 16 维。
 
-Actor MLP 为 `(96+D) -> 512 -> 256 -> 128 -> 29`，ELU；Gaussian log-std 为独立参数，lower-body 初始 std `0.4`、waist/arm 初始 std `0.25`。Critic 固定为 `160 -> 256 -> 128 -> 1`，直接读取原始 64 维 privilege，不接收 latent，也不与 actor 共享 trunk。
+Actor MLP 为 `(96+D) -> 512 -> 256 -> 128 -> 29`，ELU；Gaussian log-std 为独立参数，lower-body 初始 std `0.4`、waist/arm 初始 std `0.25`。运行时 std 下限为 `0.05`，lower-body 上限为 `0.8`，waist/arm 上限为 `0.5`。Critic 固定为 `160 -> 256 -> 128 -> 1`，直接读取原始 64 维 privilege，不接收 latent，也不与 actor 共享 trunk。
 
 ## 10. 训练流程与 PPO
 
 ### 10.1 S0 Privileged Teacher PPO
 
-S0 使用两阶段课程。第 1 阶段不让 rickshaw 参与物理：双 D6 关闭、车辆停放并禁用重力；双手持续施加对应坡度 reset 静力解的 cart-on-robot wrench，19 个坡度均衡且固定分配。第 2 阶段在环境自然 reset 时恢复车辆重力、双 D6、真实滚阻、车辆奖励和安全终止。Teacher 使用：
+S0 从第一个 episode 就使用真实 rickshaw、双 D6 和完整安全终止。物理参数采用渐进域随机化，Teacher 使用：
 
 ```text
 z_star       = teacher_encoder(observation_history, dynamic_history, static)
@@ -759,7 +759,7 @@ actor input  = current + z_star
 critic input = current + raw_privilege_64
 ```
 
-课程、域刷新和总预算都按 48-step 基准 iteration 计数：前 `2000` 个基准 iteration 为 `STATIC_HAND_LOAD`，之后为 `TRAINING`，S0 总预算仍为 `6000*48` 条每环境 transition。静载边界对应 `2000*48/R` 个实际 PPO update，即 R=`24/48/64` 时分别为 `4000/2000/1500`；S0 总 update 数仍分别为 `12000/6000/4500`。4096 个环境在基准 iteration 0 完成一次 domain 采样并固定；每 `200*48/R` 个实际 update 重新采样并同步 reset，普通 episode reset 不采样。阶段切换只在环境 reset 时生效；这里没有 off-policy replay buffer。
+刷新和总预算都按 48-step 基准 iteration 计数。`refresh_index=iteration//200`，物理随机化幅度为 `min(0.6, refresh_index/30.0)`，摩擦只使用该幅度的 `0.5` 倍。控制与观测延迟独立按 `min(0.25, refresh_index/60.0)` 的概率采样离散延迟步数。S0 总预算为 `6000*48` 条每环境 transition；R=`24/48/64` 时总 update 数分别为 `12000/6000/4500`。4096 个环境在基准 iteration 0 写入 nominal 参数，之后每 `200*48/R` 个实际 update 重新采样并同步 reset，普通 episode reset 不采样。
 
 ### 10.2 S1 On-policy Student Distillation
 
@@ -793,7 +793,7 @@ algorithm = RslRlPpoAlgorithmCfg(
     value_loss_coef=1.0,
     use_clipped_value_loss=True,
     clip_param=0.2,
-    entropy_coef=0.005,
+    entropy_coef=0.001,
     num_learning_epochs=5,
     num_mini_batches=8,
     learning_rate=3.0e-4,
@@ -816,21 +816,23 @@ algorithm = RslRlPpoAlgorithmCfg(
 
 | 类别     | term                         |    weight | 定义/尺度                                        |
 | -------- | ---------------------------- | --------: | ------------------------------------------------ |
-| 任务     | `track_speed_exp`            |    `+2.0` | `exp(-((v_ref-v_robot,s)/0.35)^2)`               |
+| 任务     | `track_speed_exp`            |    `+1.0` | `exp(-((v_ref-v_robot,s)/0.50)^2)`               |
+| 任务     | `track_speed_precise_exp`    |    `+2.0` | `exp(-((v_ref-v_robot,s)/0.25)^2)`               |
+| 任务     | `speed_error_pseudo_huber`   |    `-0.5` | `sqrt(1+((v_ref-v_robot,s)/0.50)^2)-1`           |
 | 任务     | `lateral_error_l2`           |    `-0.5` | `(e_y/0.30 m)^2`                                 |
 | 任务     | `heading_error_l2`           |    `-0.5` | `(e_psi/0.30 rad)^2`                             |
 | 稳定     | `zmp_margin_barrier`         |    `-2.0` | `(relu(0.02-d_zmp)/0.02)^2`                      |
 | 车辆     | `hitch_height_exp`           |    `+0.5` | `exp(-((H-H_target)/0.02)^2)`，仅双轮接触有效    |
-| 车辆     | `hitch_height_recovery_l2`   |   `-0.25` | `relu(abs(H-H_target)-0.05)^2/0.05^2`，仅双轮接触有效 |
+| 车辆     | `hitch_height_recovery_l2`   |   `-0.25` | 以 `0.05 m` deadband/scale 归一化，单位区间内平方、区间外线性增长 |
 | 先验     | `fat2_prior_exp`             |    `+0.1` | 第 7.3 节，`sigma=0.12 rad`，仅 `fat_valid` 有效 |
-| 步态     | `feet_single_stance`         |   `+0.10` | 双足恰有一足接触时奖励较短 mode time，封顶 `0.4 s` |
-| 步态     | `feet_slide`                 |   `-0.10` | 仅接触足                                         |
-| 运动质量 | `terrain_normal_velocity_l2` |    `-0.5` | `(v_n/0.25 m/s)^2`                               |
-| 运动质量 | `joint_power_l1`             | `-1.0e-4` | `sum(abs(tau*qd))`                               |
-| 运动质量 | `processed_action_rate_l2`   |   `-0.01` | `mean(((u_t-u_t-1)/0.05 rad)^2)`                 |
-| 运动质量 | `processed_action_jerk_l2`   |  `-0.005` | `mean(((u_t-2u_t-1+u_t-2)/0.03 rad)^2)`          |
+| 步态     | `feet_landing`               |   `+0.25` | 单脚 `first_contact` 时按上一段 air time 结算；奖励要求 `v_robot>0.1` 且速度误差 `<0.3 m/s`，过长摆动在落脚时惩罚 |
+| 步态     | `feet_air_time_excess_l2`    |   `-0.25` | 当前 air time 超过 `0.50 s` 后惩罚，避免单脚长期悬空 |
+| 步态     | `feet_slide`                 |   `-0.20` | 对所有接触足累计坡面切向速度，双脚蹭地会叠加     |
+| 运动质量 | `terrain_normal_velocity_l2` |   `-0.25` | `(v_n/0.25 m/s)^2`                               |
+| 运动质量 | `joint_power_l1`             | `-2.0e-4` | `sum(abs(tau*qd))`                               |
+| 运动质量 | `processed_action_rate_l2`   |   `-0.01` | `mean(((u_t-u_t-1)/ACTION_SCALE)^2)`             |
 | 约束     | `hip_yaw_roll_reference_l2`  |   `-0.05` | 四个 hip yaw/roll 相对当前坡度 `q_ref` 的误差除以 `0.20 rad` 后取均方 |
-| 约束     | `pelvis_height_limits_l2`    |    `-1.0` | 坡面法向高度越出 `[0.65,0.80] m` 的距离除以 `0.05 m` 后平方 |
+| 约束     | `pelvis_height_limits_l2`    |    `-1.0` | 坡面法向高度越出 `[0.58,0.87] m` 的距离除以 `0.05 m` 后平方 |
 | 约束     | `joint_position_limits`      |    `-1.0` | Isaac Lab soft-limit term                        |
 | 失败     | `termination`                |  `-200.0` | 仅非 timeout 终止                                |
 
@@ -841,7 +843,7 @@ def track_speed_exp(env):
     v_s = torch.sum(
         env.scene["robot"].data.root_lin_vel_w * env.path_tangent_w, dim=-1
     )
-    return torch.exp(-torch.square((env.command_state.v_ref - v_s) / 0.35))
+    return torch.exp(-torch.square((env.command_state.v_ref - v_s) / 0.60))
 
 
 def lateral_error_l2(env):
@@ -868,22 +870,18 @@ def hitch_height_recovery_l2(env):
     error = torch.abs(
         env.rickshaw_state.hitch_height - env.rickshaw_pose_cfg.hitch_height_target
     )
-    valid = env.rickshaw_state.two_wheel_contact
-    return torch.square(torch.relu(error - 0.05) / 0.05) * valid
+    normalized = torch.relu(error - 0.05) / 0.05
+    return torch.where(
+        normalized <= 1.0,
+        torch.square(normalized),
+        2.0 * normalized - 1.0,
+    )
 
 
 def processed_action_rate_l2(env):
     delta = env.action_state.target - env.action_state.prev_target
-    return torch.mean(torch.square(delta / 0.05), dim=-1)
-
-
-def processed_action_jerk_l2(env):
-    jerk = (
-        env.action_state.target
-        - 2.0 * env.action_state.prev_target
-        + env.action_state.prev_prev_target
-    )
-    return torch.mean(torch.square(jerk / 0.03), dim=-1)
+    scale = delta.new_tensor(ACTION_SCALE)
+    return torch.mean(torch.square(delta / scale), dim=-1)
 
 
 def pelvis_height_limits_l2(env):
@@ -892,17 +890,17 @@ def pelvis_height_limits_l2(env):
     height = torch.sum(
         (pelvis - env.scene.terrain.env_origins) * env.path_normal_w, dim=-1
     )
-    violation = torch.relu(0.65 - height) + torch.relu(height - 0.80)
+    violation = torch.relu(0.58 - height) + torch.relu(height - 0.87)
     return torch.square(violation / 0.05)
 ```
 
-禁用上游 `track_lin_vel_xy_exp`、固定零 yaw-rate tracking、`flat_orientation_l2`、world-frame `lin_vel_z_l2`、raw action-rate、joint acceleration penalty 和单独 joint torque penalty。后两项已由 power、processed rate 和 processed jerk 覆盖。
+禁用上游 `track_lin_vel_xy_exp`、固定零 yaw-rate tracking、`flat_orientation_l2`、world-frame `lin_vel_z_l2`、raw action-rate、joint acceleration penalty 和单独 joint torque penalty。后两项已由 power 和 normalized processed rate 覆盖；processed jerk 只作为诊断指标。
 
 不为 wheel contact、wheel height、D6 residual、D6 asymmetry、arm saturation、overspeed 或 cart pitch-rate设置额外 dense reward；这些量进入 barrier、termination 和日志。机器人 pelvis 高度是独立的姿态可行域约束：以坡面法向距离计算，区间内不计分，只惩罚越界距离，避免与目标高度跟踪重复。hip yaw/roll 只以小权重跟随各坡度静力学 `q_ref`，不约束承担牵引姿态的 hip pitch。FAT2 权重默认 `+0.1`，受控消融支持 `0.0/0.1/0.2`，其余训练配置不变。
 
 ### 11.2 Reward 定标
 
-先在固定 `TRAINING` policy rollout 上保留每个样本的坡度标签，并记录每个未加权 term 的 `p50/p90/p99`。要求总体样本以及 19 个坡度中的每一个，任一 term 加权后的 `p90` 绝对值均不超过该层 speed term 加权 `p90` 的 50%，termination 除外；任一单坡失败都使定标报告失败，不能用总体分位数掩盖。只允许按最严格单坡比例调整表中 weight，不调整 term 的物理尺度；`0.35 m/s`、`0.30 m`、`0.30 rad`、`0.02 m`、`0.02 m ZMP margin`、pelvis 高度边界 `[0.65,0.80] m` 和越界尺度 `0.05 m` 若需修改，必须先修改验收阈值和可行性扫描，再重训全部阶段。
+先在固定 `TRAINING` policy rollout 上保留每个样本的坡度标签，并记录每个未加权 term 的 `p50/p90/p99`。要求总体样本以及 19 个坡度中的每一个，任一 term 加权后的 `p90` 绝对值均不超过该层 speed term 加权 `p90` 的 50%，termination 除外；任一单坡失败都使定标报告失败，不能用总体分位数掩盖。只允许按最严格单坡比例调整表中 weight，不调整 term 的物理尺度；`0.60 m/s`、`0.30 m`、`0.30 rad`、`0.02 m`、`0.02 m ZMP margin`、pelvis 高度边界 `[0.58,0.87] m` 和越界尺度 `0.05 m` 若需修改，必须先修改验收阈值和可行性扫描，再重训全部阶段。
 
 ### 11.3 Termination
 
@@ -930,8 +928,9 @@ q_ref 到 joint limit 的余量达标
 
 | 训练分布 | 默认迭代 | 配置 |
 | --- | ---: | --- |
-| `STATIC_HAND_LOAD` | `0..1999` | 不使用真实 rickshaw；关闭双 D6，将车辆停放并禁用重力；在双手施加 reset pose 静力解，均衡覆盖 `-0.08` 到 `+0.10` 的 19 个坡度。 |
-| `TRAINING` | `>=2000` | 恢复真实 rickshaw、双 D6 和滚阻；使用当前 200-iteration domain epoch 的物理参数，D6 保持 nominal；阶段只在 episode reset 时切换。 |
+| `NOMINAL` | `0..199` | 真实 rickshaw、双 D6 和滚阻；使用 nominal 物理参数。 |
+| `NARROW` | `200..3599` | 每 200 iteration 增加 `1/30` 幅度，最大不超过 `0.6`。 |
+| `FULL` | `>=3600` | 保持 `0.6` 最大幅度；摩擦仍额外乘 `0.5`。 |
 
 训练按正常 checkpoint 周期保存；评估脚本独立运行，不作为训练启动、续训或发布门禁。
 
@@ -941,7 +940,7 @@ q_ref 到 joint limit 的余量达标
 s=\operatorname{mean}\exp[-((v_{ref}-v_s)/0.25)^2]
 \]
 
-`STATIC_HAND_LOAD` 阶段固定 19 坡分配。进入 `TRAINING` 后，Timeout 且 `s>=0.8`、无安全计数器触发时升一级；提前终止或 `s<0.5` 时降一级；其余保持。更新 level 后重新计算 slope frame，再执行闭链 reset。
+训练从 iteration 0 开始执行地形 level 课程：Timeout 且 `s>=0.8`、无安全计数器触发时升一级；提前终止或 `s<0.5` 时降一级；其余保持。更新 level 后重新计算 slope frame，再执行闭链 reset。
 
 ## 12. Task 注册与命令
 
@@ -987,7 +986,7 @@ PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
 资产检查、alignment、feasibility 与 dynamics 报告仅用于离线诊断；缺失或过期
 不阻止训练或续训。训练入口直接加载当前配置，具体命令见 `RUN_COMMANDS.md`。
 
-Play 配置关闭 terrain level curriculum，并直接使用真实车阶段；域随机化切换为 nominal，保留 command limiter、nominal `c_rr`、action filter、61 帧 history、rickshaw pose target 和全部安全检查。导出包只包含 observation scale、student TCN、actor、action filter、关节顺序和安全参数；teacher、critic 和 privileged group 不导出。
+Play 配置关闭 terrain level curriculum，并直接使用真实车动力学；域随机化切换为 nominal，保留 command limiter、nominal `c_rr`、action filter、61 帧 history、rickshaw pose target 和全部安全检查。导出包只包含 observation scale、student TCN、actor、action filter、关节顺序和安全参数；teacher、critic 和 privileged group 不导出。
 
 ## 13. 验收
 

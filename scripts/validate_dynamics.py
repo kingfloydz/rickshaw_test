@@ -237,10 +237,6 @@ def _run() -> tuple[dict[str, object], list[str], dict[str, object]]:
     cfg.domain_randomization = replace(
         cfg.domain_randomization,
         enabled=False,
-        curriculum=replace(
-            cfg.domain_randomization.curriculum,
-            static_hand_load_iterations=0,
-        ),
     )
     cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
     cfg.curriculum = None

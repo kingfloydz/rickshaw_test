@@ -55,6 +55,17 @@ class TestRickshawRLModels(unittest.TestCase):
         torch.testing.assert_close(actor.std[:12], torch.full((12,), 0.4))
         torch.testing.assert_close(actor.std[12:], torch.full((17,), 0.25))
 
+        actor.log_std.data.fill_(10.0)
+        self.assertLessEqual(float(actor.std[:12].max().detach()), 0.800001)
+        self.assertLessEqual(float(actor.std[12:].max().detach()), 0.500001)
+        actor.log_std.data.fill_(-10.0)
+        self.assertGreaterEqual(float(actor.std.min().detach()), 0.049999)
+        distribution = actor.distribution(torch.zeros(2, 96), torch.zeros(2, 16))
+        self.assertLessEqual(
+            float(distribution.base_dist.scale[:, :12].max().detach()), 0.050001
+        )
+        self.assertGreaterEqual(float(distribution.base_dist.scale.min().detach()), 0.049999)
+
         critic = PrivilegedCritic()
         critic_shapes = [
             (layer.in_features, layer.out_features)

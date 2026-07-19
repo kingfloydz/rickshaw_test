@@ -1,9 +1,8 @@
-"""Two-stage load curriculum and task-specific terrain curriculum."""
+"""Task-specific terrain curriculum helpers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
 from typing import Any
 
 import torch
@@ -14,114 +13,7 @@ from g1_rickshaw_lab.slope_contract import (
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
 )
-from g1_rickshaw_lab.training_contract import STATIC_HAND_LOAD_ITERATIONS
 from .dynamics import update_slope_frame
-
-
-class CurriculumStage(IntEnum):
-    STATIC_HAND_LOAD = 0
-    TRAINING = 1
-
-
-@dataclass(kw_only=True)
-class CurriculumScheduleCfg:
-    """Iteration schedule for static hand-load pretraining and full-cart training."""
-
-    rollout_steps_per_iteration: int = 48
-    static_hand_load_iterations: int = STATIC_HAND_LOAD_ITERATIONS
-
-    def validate(self) -> None:
-        if self.rollout_steps_per_iteration <= 0:
-            raise ValueError("rollout_steps_per_iteration must be positive")
-        if self.static_hand_load_iterations < 0:
-            raise ValueError("static_hand_load_iterations cannot be negative")
-
-
-def curriculum_stage_for_iteration(
-    iteration: int,
-    cfg: CurriculumScheduleCfg | None = None,
-) -> CurriculumStage:
-    """Resolve the desired global stage for a training iteration."""
-
-    if iteration < 0:
-        raise ValueError("curriculum iteration cannot be negative")
-    if cfg is None:
-        cfg = CurriculumScheduleCfg()
-    cfg.validate()
-    if iteration < cfg.static_hand_load_iterations:
-        return CurriculumStage.STATIC_HAND_LOAD
-    return CurriculumStage.TRAINING
-
-
-@dataclass
-class CurriculumRuntimeState:
-    """Desired global stage plus the stage active in each environment.
-
-    A new desired stage is adopted only when an environment resets. This keeps
-    policy observations and physical load changes on an episode boundary.
-    """
-
-    cfg: CurriculumScheduleCfg
-    num_envs: int
-    device: torch.device
-    iteration: int = 0
-    stage: CurriculumStage = CurriculumStage.STATIC_HAND_LOAD
-    active_stage_per_env: torch.Tensor | None = None
-
-    @classmethod
-    def create(
-        cls,
-        terrain_strata: torch.Tensor,
-        terrain_direction: torch.Tensor,
-        cfg: CurriculumScheduleCfg,
-    ) -> "CurriculumRuntimeState":
-        cfg.validate()
-        if terrain_strata.shape != terrain_direction.shape:
-            raise ValueError("terrain strata and directions must have identical shapes")
-        stage = curriculum_stage_for_iteration(0, cfg)
-        return cls(
-            cfg=cfg,
-            num_envs=terrain_strata.numel(),
-            device=terrain_strata.device,
-            stage=stage,
-            active_stage_per_env=torch.full(
-                terrain_strata.shape,
-                int(stage),
-                dtype=torch.long,
-                device=terrain_strata.device,
-            ),
-        )
-
-    def set_iteration(self, iteration: int) -> CurriculumStage:
-        if isinstance(iteration, bool) or not isinstance(iteration, int):
-            raise TypeError("curriculum iteration must be an integer")
-        if iteration < 0:
-            raise ValueError("curriculum iteration cannot be negative")
-        self.iteration = iteration
-        self.stage = curriculum_stage_for_iteration(iteration, self.cfg)
-        return self.stage
-
-    def activate(self, env_ids: torch.Tensor) -> torch.Tensor:
-        """Adopt the desired stage for reset environments and return changed ids."""
-
-        if self.active_stage_per_env is None:
-            raise RuntimeError("curriculum active-stage state is not initialized")
-        ids = env_ids.to(device=self.device, dtype=torch.long)
-        changed = ids[self.active_stage_per_env[ids] != int(self.stage)]
-        self.active_stage_per_env[ids] = int(self.stage)
-        return changed
-
-    def stage_per_environment(self) -> torch.Tensor:
-        if self.active_stage_per_env is None:
-            raise RuntimeError("curriculum active-stage state is not initialized")
-        return self.active_stage_per_env
-
-    def distribution(self) -> dict[str, int]:
-        stage = self.stage_per_environment()
-        return {
-            item.name: int(torch.sum(stage == int(item)).item())
-            for item in CurriculumStage
-        }
 
 
 def balanced_slope_assignment(
@@ -141,20 +33,6 @@ def balanced_slope_assignment(
         SLOPE_TERRAIN_TYPES, device=device, dtype=torch.long
     )[slots]
     return slots, levels, terrain_types
-
-
-def install_balanced_slope_assignment(env: Any) -> torch.Tensor:
-    """Place every environment on the fixed 19-slope first-stage grid."""
-
-    slots, levels, terrain_types = balanced_slope_assignment(
-        env.num_envs, device=env.device
-    )
-    terrain = env.scene.terrain
-    terrain.terrain_levels.copy_(levels)
-    terrain.terrain_types.copy_(terrain_types)
-    terrain.env_origins.copy_(terrain.terrain_origins[levels, terrain_types])
-    update_slope_frame(env)
-    return slots
 
 
 def speed_tracking_score(v_ref: torch.Tensor, actual_speed: torch.Tensor) -> torch.Tensor:
@@ -276,12 +154,6 @@ def terrain_level_curriculum(env: Any, env_ids: torch.Tensor) -> torch.Tensor:
     )
     move_up = delta > 0
     move_down = delta < 0
-    # Stage one deliberately covers the complete slope grid. Keep its terrain
-    # assignment fixed until each environment enters real-cart training.
-    active_stage = env.curriculum_stage_per_env[env_ids]
-    static_load = active_stage == int(CurriculumStage.STATIC_HAND_LOAD)
-    move_up &= ~static_load
-    move_down &= ~static_load
     levels = env.scene.terrain.terrain_levels[env_ids]
     downhill_at_limit = (env.slope[env_ids] < 0.0) & (
         levels >= MAX_TRAINING_DOWNHILL_LEVEL
@@ -295,13 +167,8 @@ def terrain_level_curriculum(env: Any, env_ids: torch.Tensor) -> torch.Tensor:
 
 
 __all__ = [
-    "CurriculumRuntimeState",
-    "CurriculumScheduleCfg",
-    "CurriculumStage",
     "TerrainCurriculumState",
     "balanced_slope_assignment",
-    "curriculum_stage_for_iteration",
-    "install_balanced_slope_assignment",
     "record_curriculum_tracking",
     "speed_tracking_score",
     "terrain_level_curriculum",

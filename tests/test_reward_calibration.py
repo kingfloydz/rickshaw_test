@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 
 import pytest
 import torch
@@ -31,6 +32,13 @@ from g1_rickshaw_lab.reward_calibration import (
     write_reward_calibration_json,
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import rewards
+
+
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from calibrate_rewards import _physics_snapshot  # noqa: E402
 
 
 def _weights() -> dict[str, float]:
@@ -223,6 +231,57 @@ def test_c1_snapshot_requires_every_field_at_its_nominal_value() -> None:
         validate_c1_physics_snapshot(artifact["c1_physics"], artifact["c1_nominal_values"])
 
 
+def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
+    d6_fields = (
+        "linear_stiffness",
+        "linear_damping",
+        "angular_stiffness",
+        "angular_damping",
+        "max_force",
+        "max_torque",
+        "linear_limit",
+        "angular_limit",
+    )
+    d6_values = {name: float(index + 2) for index, name in enumerate(d6_fields)}
+    domain_nominal = {
+        "payload.mass": 1.0,
+        "payload.com.x": 1.0,
+        "payload.com.y": 1.0,
+        "payload.com.z": 1.0,
+        "rolling_resistance.c_rr": 1.0,
+        "terrain.friction": 1.0,
+        "wheel.left_damping": 1.0,
+        "wheel.right_damping": 1.0,
+        "motor.strength": 1.0,
+        "control.delay": 0.0,
+        "observation.delay": 0.0,
+        "joint.model_error": 1.0,
+    }
+    ones = torch.ones(2)
+    base_env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            domain_randomization=SimpleNamespace(nominal=domain_nominal)
+        ),
+        num_envs=2,
+        device="cpu",
+        d6_constraint_manager=SimpleNamespace(cfg=SimpleNamespace(**d6_values)),
+        _payload_mass=ones,
+        _payload_com=torch.ones(2, 3),
+        c_rr=ones,
+        terrain_friction=ones,
+        _wheel_damping=torch.ones(2, 2),
+        motor_strength=ones,
+        control_delay_steps=torch.zeros(2, dtype=torch.long),
+        observation_delay_steps=torch.zeros(2, dtype=torch.long),
+        joint_model_error=ones,
+        step_dt=0.02,
+    )
+
+    _, nominal = _physics_snapshot(base_env)
+
+    assert {name: nominal[f"d6.{name}"] for name in d6_fields} == d6_values
+
+
 def test_report_recomputes_statistics_from_bound_raw_samples(tmp_path: Path) -> None:
     checkpoint = tmp_path / "teacher.pt"
     checkpoint.write_bytes(b"teacher")
@@ -267,6 +326,7 @@ def test_reward_report_uses_one_stable_path(tmp_path: Path) -> None:
 def test_reward_normalization_constants_match_runtime() -> None:
     assert rewards.REWARD_NORMALIZATION_SCALES == GUIDE_REWARD_NORMALIZATION_SCALES
     assert set(rewards.REWARD_WEIGHTS) == set(GUIDE_REWARD_TERMS)
+    assert rewards.REWARD_WEIGHTS["zmp_margin_barrier"] == pytest.approx(-2.0)
     assert rewards.REWARD_WEIGHTS["fat2_prior_exp"] == pytest.approx(0.1)
     power = rewards.joint_power_l1_value(
         torch.tensor([[2.0, -3.0]]), torch.tensor([[4.0, 5.0]])

@@ -28,6 +28,12 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     training_artifact_interval,
     validate_guide_training_configuration,
 )
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    REWARD_WEIGHT_OVERRIDES_KEY,
+    parse_reward_weight_arguments,
+    reward_weight_hydra_overrides,
+    reward_weight_overrides_from_configuration,
+)
 from _training_configuration import (  # noqa: E402
     build_training_configuration,
     cli_value,
@@ -56,6 +62,13 @@ def main() -> int:
         "--rollout-steps", type=int, choices=SUPPORTED_ROLLOUT_STEPS, default=None
     )
     parser.add_argument(
+        "--reward-weight",
+        action="append",
+        default=[],
+        metavar="TERM=WEIGHT",
+        help="Override one non-FAT2 reward weight; may be repeated.",
+    )
+    parser.add_argument(
         "--num-envs",
         "--num_envs",
         dest="num_envs",
@@ -63,6 +76,7 @@ def main() -> int:
         default=GUIDE_TRAINING_NUM_ENVS,
     )
     args, remaining = parser.parse_known_args()
+    requested_reward_overrides = parse_reward_weight_arguments(args.reward_weight)
     owned_resume_flags = ("--resume", "--load_run", "--checkpoint", "--agent")
     if args.resume_checkpoint is not None:
         owned_resume_flags += ("--experiment_name",)
@@ -95,6 +109,15 @@ def main() -> int:
     resume_parameters = (
         None if resume_configuration is None else resume_configuration["training_parameters"]
     )
+    if resume_configuration is None:
+        reward_weight_overrides = requested_reward_overrides
+    else:
+        resumed_reward_overrides = reward_weight_overrides_from_configuration(
+            resume_configuration
+        )
+        if requested_reward_overrides and requested_reward_overrides != resumed_reward_overrides:
+            raise ValueError("S0 resume cannot change reward weights")
+        reward_weight_overrides = resumed_reward_overrides
     defaults = DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
     fat2_weight = float(
         defaults["fat2_weight"] if args.fat2_weight is None else args.fat2_weight
@@ -135,13 +158,11 @@ def main() -> int:
             "seed": seed,
             "max_iterations": max_iterations,
             "num_envs": args.num_envs,
-            "static_hand_load_iterations": S0_GUIDE_PARAMETERS[
-                "static_hand_load_iterations"
-            ],
             "fat2_weight": fat2_weight,
             "latent_dim": latent_dim,
             "num_steps_per_env": rollout_steps,
             "save_interval": training_artifact_interval(rollout_steps),
+            REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
             "launcher_arguments": list(remaining),
         },
         actor_initialized_from_teacher=None,
@@ -159,6 +180,7 @@ def main() -> int:
         f"agent.num_steps_per_env={rollout_steps}",
         f"agent.save_interval={training_artifact_interval(rollout_steps)}",
         f"agent.actor.latent_dim={latent_dim}",
+        *reward_weight_hydra_overrides(reward_weight_overrides),
         f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
     ]
     experiment_arguments: list[str] = []

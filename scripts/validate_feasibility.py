@@ -467,7 +467,6 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     cfg.domain_randomization = replace(
         cfg.domain_randomization,
         enabled=False,
-        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
     cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
 

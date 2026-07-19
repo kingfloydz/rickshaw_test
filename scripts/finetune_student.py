@@ -14,6 +14,11 @@ from _isaaclab_wrappers import add_project_source_to_path, require_existing_file
 add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import atomic_torch_save  # noqa: E402
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    REWARD_WEIGHT_OVERRIDES_KEY,
+    reward_weight_hydra_overrides,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     CHECKPOINT_LINEAGE_KEY,
@@ -51,6 +56,20 @@ def _validate_resume_lineage(
         != context.resolve()
     ):
         raise ValueError("S2 resume checkpoint belongs to a different S0/S1 lineage")
+
+
+def _validate_resume_training_configuration(
+    resume_configuration: dict, source_configuration: dict
+) -> None:
+    if (
+        resume_configuration["training_parameters"]
+        != source_configuration["training_parameters"]
+    ):
+        raise ValueError("S2 resume cannot change FAT2, latent_dim, or rollout_steps")
+    if reward_weight_overrides_from_configuration(
+        resume_configuration
+    ) != reward_weight_overrides_from_configuration(source_configuration):
+        raise ValueError("S2 resume cannot change reward weights")
 
 
 def main() -> int:
@@ -95,6 +114,9 @@ def main() -> int:
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
     fat2_weight = float(training_parameters["fat2_weight"])
+    reward_weight_overrides = reward_weight_overrides_from_configuration(
+        s1_training_configuration
+    )
     resume_checkpoint_path: Path | None = None
     if args.resume_checkpoint is None:
         checkpoint = build_s2_bootstrap_checkpoint(teacher, context)
@@ -107,11 +129,10 @@ def main() -> int:
             resume_checkpoint_path,
             validate_runtime=True,
         )
-        if (
-            checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]["training_parameters"]
-            != training_parameters
-        ):
-            raise ValueError("S2 resume cannot change FAT2, latent_dim, or rollout_steps")
+        _validate_resume_training_configuration(
+            dict(checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]),
+            s1_training_configuration,
+        )
         _validate_resume_lineage(checkpoint, teacher, context)
     curriculum_iteration = checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY]
     lineage = checkpoint[CHECKPOINT_LINEAGE_KEY]
@@ -164,6 +185,7 @@ def main() -> int:
             "save_interval": training_artifact_interval(rollout_steps),
             "fat2_weight": fat2_weight,
             "latent_dim": latent_dim,
+            REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
             "launcher_arguments": list(remaining),
             "teacher_checkpoint": os.fspath(teacher.resolve()),
             "context_checkpoint": os.fspath(context.resolve()),
@@ -207,6 +229,7 @@ def main() -> int:
             f"agent.num_steps_per_env={rollout_steps}",
             f"agent.save_interval={training_artifact_interval(rollout_steps)}",
             f"agent.actor.latent_dim={latent_dim}",
+            *reward_weight_hydra_overrides(reward_weight_overrides),
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
             "env.observations.teacher_dynamic_history=null",
             "env.observations.teacher_static=null",

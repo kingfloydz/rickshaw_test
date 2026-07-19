@@ -5,6 +5,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import torch
 
 import g1_rickshaw_lab.training_contract as contract
 
@@ -40,16 +41,13 @@ class _FakeEnvironment:
         self.enabled = enabled
         self.global_reset_calls = initial_global_resets
         self.episode_reset_calls = 0
-        self.curriculum_iterations: list[int] = []
         self.domain_iterations: list[int] = []
         self.applied_epochs: list[int] = []
+        self.reset_inference_modes: list[bool] = []
 
     @property
     def unwrapped(self) -> _FakeEnvironment:
         return self
-
-    def set_curriculum_iteration(self, iteration: int) -> None:
-        self.curriculum_iterations.append(iteration)
 
     def set_domain_randomization_iteration(self, iteration: int) -> bool:
         self.domain_iterations.append(iteration)
@@ -63,6 +61,7 @@ class _FakeEnvironment:
         return True
 
     def reset(self) -> tuple[str, dict[str, Any]]:
+        self.reset_inference_modes.append(torch.is_inference_mode_enabled())
         self.global_reset_calls += 1
         return f"reset-observation-{self.global_reset_calls}", {}
 
@@ -177,22 +176,30 @@ def test_domain_refresh_occurs_once_at_the_200_baseline_iteration_boundary(
     runner.alg.update()
 
     assert runner._g1_curriculum_iteration == contract.TRAINING_ARTIFACT_INTERVAL
+    assert env.domain_iterations == [0]
+    assert env.applied_epochs == []
+    assert env.global_reset_calls == 1
+    assert runner._g1_pending_domain_refresh_iteration == (
+        contract.TRAINING_ARTIFACT_INTERVAL
+    )
+
+    with torch.inference_mode():
+        runner.alg.act("stale-rollout-observation")
+    runner.alg.act("next-live-observation")
     assert env.domain_iterations == [0, contract.TRAINING_ARTIFACT_INTERVAL]
     assert env.applied_epochs == [1]
     assert env.global_reset_calls == 2
-    assert runner._g1_pending_reset_observation == "reset-observation-2"
-
-    runner.alg.act("stale-rollout-observation")
-    runner.alg.act("next-live-observation")
+    assert env.reset_inference_modes == [True]
     assert runner.alg.act_observations == [
         "reset-observation-2",
         "next-live-observation",
     ]
+    assert runner._g1_pending_domain_refresh_iteration is None
     assert runner._g1_pending_reset_observation is None
 
 
 @pytest.mark.parametrize("rollout_steps", (24, 48, 64))
-def test_static_load_boundary_has_equal_policy_step_budget(
+def test_first_progressive_randomization_refresh_has_equal_policy_step_budget(
     monkeypatch: pytest.MonkeyPatch,
     rollout_steps: int,
 ) -> None:
@@ -201,16 +208,17 @@ def test_static_load_boundary_has_equal_policy_step_budget(
     )
     env = _FakeEnvironment(current_epoch=0)
     runner = runner_type(env)
-    boundary_updates = 2000 * contract.BASELINE_ROLLOUT_STEPS // rollout_steps
+    boundary_iteration = contract.TRAINING_ARTIFACT_INTERVAL
+    boundary_updates = boundary_iteration * contract.BASELINE_ROLLOUT_STEPS // rollout_steps
 
     for _ in range(boundary_updates - 1):
         runner.alg.update()
-    assert runner._g1_curriculum_iteration < 2000
+    assert runner._g1_curriculum_iteration < boundary_iteration
 
     runner.alg.update()
 
-    assert runner._g1_curriculum_iteration == 2000
-    assert runner._g1_stage_policy_steps == 2000 * contract.BASELINE_ROLLOUT_STEPS
+    assert runner._g1_curriculum_iteration == boundary_iteration
+    assert runner._g1_stage_policy_steps == boundary_iteration * contract.BASELINE_ROLLOUT_STEPS
 
 
 def test_episode_resets_do_not_request_domain_resampling(
@@ -246,9 +254,14 @@ def test_disabled_domain_does_not_reset_at_the_refresh_boundary(
     for _ in range(contract.TRAINING_ARTIFACT_INTERVAL):
         runner.alg.update()
 
+    assert env.domain_iterations == [0]
+    with torch.inference_mode():
+        runner.alg.act("live-observation")
+
     assert env.domain_iterations == [0, contract.TRAINING_ARTIFACT_INTERVAL]
     assert env.applied_epochs == []
     assert env.global_reset_calls == 1
+    assert runner.alg.act_observations == ["live-observation"]
     assert runner._g1_pending_reset_observation is None
 
 
@@ -320,6 +333,55 @@ def test_s2_resume_reconstructs_the_stage_start_from_completed_samples(
     )
 
 
+@pytest.mark.parametrize(
+    ("stage", "curriculum_start", "completed_updates", "curriculum_iteration"),
+    (
+        ("s0_teacher", 0, 300, 400),
+        ("s2_student_ppo", 600, 150, 800),
+    ),
+)
+def test_resume_refreshes_domain_on_first_inference_mode_action(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    curriculum_start: int,
+    completed_updates: int,
+    curriculum_iteration: int,
+) -> None:
+    rollout_steps = 64
+    runner_type = _install_fake_runner(
+        monkeypatch,
+        stage=stage,
+        rollout_steps=rollout_steps,
+        curriculum_start=curriculum_iteration,
+    )
+    initial_iteration = 0 if stage == "s0_teacher" else curriculum_iteration
+    env = _FakeEnvironment(
+        current_epoch=initial_iteration // contract.TRAINING_ARTIFACT_INTERVAL
+    )
+    runner = runner_type(env)
+    env.current_epoch = 0
+    checkpoint = {
+        contract.CHECKPOINT_STAGE_KEY: stage,
+        contract.CHECKPOINT_CURRICULUM_ITERATION_KEY: curriculum_iteration,
+        contract.TRAINING_CONFIGURATION_KEY: {},
+        "iter": completed_updates - 1,
+    }
+    _stub_checkpoint_validation(monkeypatch, checkpoint)
+
+    runner.load("resume.pt")
+
+    assert runner._g1_curriculum_start_iteration == curriculum_start
+    assert env.domain_iterations == [initial_iteration]
+    assert env.global_reset_calls == 1
+    with torch.inference_mode():
+        runner.alg.act("stale-observation")
+
+    assert env.domain_iterations == [initial_iteration, curriculum_iteration]
+    assert env.global_reset_calls == 2
+    assert env.reset_inference_modes == [True]
+    assert runner.alg.act_observations == ["reset-observation-2"]
+
+
 def _stub_checkpoint_validation(
     monkeypatch: pytest.MonkeyPatch, checkpoint: dict[str, Any]
 ) -> None:
@@ -333,4 +395,7 @@ def _stub_checkpoint_validation(
     )
     monkeypatch.setattr(
         contract, "validate_student_checkpoint_architecture", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        contract, "validate_teacher_checkpoint_architecture", lambda *args, **kwargs: None
     )

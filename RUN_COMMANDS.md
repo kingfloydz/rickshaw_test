@@ -32,22 +32,21 @@ export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
   --headless
 ```
 
-默认训练 6000 iterations。课程阶段为：
+默认训练 6000 iterations。真实 rickshaw、双 D6 和安全检查从 iteration 0 生效。每 200 个基准 iteration 重采样并做一次全环境 reset，普通 episode reset 不重采样：
 
-- `0..1999`：无真实 rickshaw，双手施加 reset 静力学恒定 wrench；
-- `>=2000`：启用真实 rickshaw 和 D6；
-- 19 个坡度始终均衡分配；
-- 域参数在训练开始前采样并固定，每 200 个基准 PPO iteration 全局重采样；
-- 普通 episode reset 不重采样。
+- `refresh_index = iteration // 200`；
+- 物理随机化幅度 `scale = min(0.6, refresh_index / 30.0)`；
+- 摩擦随机化使用上述幅度的 `0.5` 倍；
+- 控制/观测延迟按独立概率 `min(0.25, refresh_index / 60.0)` 采样。
 
 FAT2、latent 和 rollout 消融只在 S0 选择，S1/S2 从 checkpoint 自动继承。
 `fat2_weight` 支持 `0.0/0.1/0.2`，默认 `0.1`。Rollout 等预算如下：
 
-| rollout steps | 静载结束 update | S0 updates | S2 updates | save/domain 边界 updates |
+| rollout steps | 首次随机化刷新 update | S0 updates | S2 updates | save/domain 边界 updates |
 |---:|---:|---:|---:|---:|
-| 24 | 4000 | 12000 | 4000 | 400 |
-| 48 | 2000 | 6000 | 2000 | 200 |
-| 64 | 1500 | 4500 | 1500 | 150 |
+| 24 | 400 | 12000 | 4000 | 400 |
+| 48 | 200 | 6000 | 2000 | 200 |
+| 64 | 150 | 4500 | 1500 | 150 |
 
 三行的 `updates × rollout_steps` 相同。`latent_dim` 支持 `8/16/24/32`；每条
 S0 -> S1 -> S2 lineage 内 teacher encoder、student encoder 和 actor 输入使用同一维度。
@@ -116,29 +115,57 @@ S1 rollout 固定为 `4096 × 64 = 262,144` 条 transition，不随 PPO rollout
   --headless
 ```
 
-### 2.4 单节点 8 GPU 消融流水线
+### 2.4 单节点 8 GPU latent dim 消融
 
 该入口执行每组配置的 S0、S0 诊断、固定 rollout 采集、S1、S1 诊断、S2 和
 S2 诊断。诊断只记录结果，不阻止训练或选择模型。
 
+FAT2 与 ZMP 权重均为 0：
+
 ```bash
-cd "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1 copy"
+cd "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1"
 
 export ISAACLAB_PATH="$(cd ../IsaacLab && pwd)"
 export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
-export OUTPUT_DIR="$PWD/outputs/ablation_pipeline_v4_8gpu"
+export OUTPUT_DIR="$PWD/outputs/ablation_latent_fat2_zmp0"
 
 "$PYTHON" scripts/run_ablation_pipeline.py \
   --output-dir "$OUTPUT_DIR" \
   --runs \
-    baseline \
-    fat2_weight_0.0 \
-    fat2_weight_0.2 \
-    rollout_steps_24 \
-    rollout_steps_64 \
+    latent_dim_6 \
     latent_dim_8 \
-    latent_dim_24 \
-    latent_dim_32 \
+    latent_dim_10 \
+    latent_dim_12 \
+    latent_dim_14 \
+    latent_dim_16 \
+    latent_dim_18 \
+    latent_dim_20 \
+  --fat2-weight 0.0 \
+  --reward-weight zmp_margin_barrier=0.0 \
+  --gpus 0 1 2 3 4 5 6 7 \
+  --resume
+```
+
+采用代码默认 FAT2 与 ZMP 权重：
+
+```bash
+cd "/inspire/hdd/project/leverage-robot/ky26212/humanoid_rickshaw_1"
+
+export ISAACLAB_PATH="$(cd ../IsaacLab && pwd)"
+export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
+export OUTPUT_DIR="$PWD/outputs/ablation_latent_default"
+
+"$PYTHON" scripts/run_ablation_pipeline.py \
+  --output-dir "$OUTPUT_DIR" \
+  --runs \
+    latent_dim_6 \
+    latent_dim_8 \
+    latent_dim_10 \
+    latent_dim_12 \
+    latent_dim_14 \
+    latent_dim_16 \
+    latent_dim_18 \
+    latent_dim_20 \
   --gpus 0 1 2 3 4 5 6 7 \
   --resume
 ```
