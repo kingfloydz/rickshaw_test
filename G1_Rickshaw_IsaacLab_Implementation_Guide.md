@@ -17,7 +17,7 @@ Slope gradient                  -0.08, -0.07, ..., 0.10
 Terrain                         6 rows, 21 columns, 26 m x 6 m per patch
 Action filter                   first-order Butterworth, 4 Hz
 History                         61 x 96, causal TCN
-Context latent                  D in {6,8,10,12,14,16,18,20,24,32}; default 16
+Context latent                  D in {4,6,8,10,12,14,16,18,20,24,32}; default 16
 Actor / critic MLP              [512,256,128] / [256,128], ELU
 PPO rollout                     R in {24,48,64}; default 48
 ```

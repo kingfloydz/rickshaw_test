@@ -115,6 +115,15 @@ def test_stability_curriculum_matrix_covers_all_latent_dimensions() -> None:
     assert all(spec.stability_reward_curriculum for spec in specs)
 
 
+def test_latent_dim_4_is_registered() -> None:
+    spec = pipeline.RUNS_BY_NAME["latent_dim_4"]
+
+    assert spec.latent_dim == 4
+    assert spec.fat2_weight == 0.1
+    assert spec.rollout_steps == 48
+    assert spec.stability_reward_curriculum is False
+
+
 def test_stability_curriculum_teacher_command_enables_switch(
     tmp_path: Path,
 ) -> None:

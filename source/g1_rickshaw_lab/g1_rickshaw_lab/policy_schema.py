@@ -9,6 +9,7 @@ ACTOR_OBSERVATION_DIM: Final[int] = 96
 HISTORY_LENGTH: Final[int] = 61
 DEFAULT_CONTEXT_DIM: Final[int] = 16
 SUPPORTED_CONTEXT_DIMS: Final[tuple[int, ...]] = (
+    4,
     6,
     8,
     10,

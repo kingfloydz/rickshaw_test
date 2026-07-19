@@ -83,7 +83,7 @@ UNIQUE_RUNS = (
 )
 LATENT_DIM_RUNS = tuple(
     RunSpec(f"latent_dim_{latent_dim}", 0.1, 48, latent_dim)
-    for latent_dim in (6, 10, 12, 14, 16, 18, 20)
+    for latent_dim in (4, 6, 10, 12, 14, 16, 18, 20)
 )
 STABILITY_CURRICULUM_RUNS = tuple(
     RunSpec(

@@ -23,7 +23,7 @@ def test_policy_dimensions_are_shared_across_runtime_layers() -> None:
     assert context_encoder.OBSERVATION_DIM == policy_schema.ACTOR_OBSERVATION_DIM
     assert context_encoder.HISTORY_LENGTH == policy_schema.HISTORY_LENGTH
     assert policy_schema.DEFAULT_CONTEXT_DIM == 16
-    assert policy_schema.SUPPORTED_CONTEXT_DIMS == (6, 8, 10, 12, 14, 16, 18, 20, 24, 32)
+    assert policy_schema.SUPPORTED_CONTEXT_DIMS == (4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 32)
     assert actor_critic.CURRENT_OBSERVATION_DIM == policy_schema.ACTOR_OBSERVATION_DIM
     assert actor_critic.ACTION_DIM == policy_schema.ACTION_DIM
     assert actor_critic.CRITIC_PRIVILEGE_DIM == policy_schema.CRITIC_PRIVILEGED_DIM
