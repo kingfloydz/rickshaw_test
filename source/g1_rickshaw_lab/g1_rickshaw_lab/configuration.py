@@ -10,7 +10,7 @@ Canonical ``feasibility_envelope.yaml`` layout::
     slopes: [-0.08, ..., 0.0, ..., 0.10]
     joint_order: [29 exact G1 joint names]
     ranges:
-      payload.mass: {min: 0.0, max: 10.0}
+      payload.mass: {min: -3.0, max: 3.0}
       # all names in REQUIRED_FEASIBILITY_RANGES are required
     calibration:
       rickshaw.pitch_inertia_about_axle: 1.0
@@ -102,6 +102,7 @@ ARM_HARDWARE_EFFORT_LIMITS = (25.0, 25.0, 25.0, 25.0, 25.0, 13.4, 13.4) * 2
 
 # Marginal bounds produced by the feasibility scan for runtime domain parameters.
 REQUIRED_FEASIBILITY_RANGES = (
+    "torso.mass_delta",
     "payload.mass",
     "payload.com.x",
     "payload.com.y",
@@ -110,10 +111,6 @@ REQUIRED_FEASIBILITY_RANGES = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "motor.strength",
-    "joint.model_error",
-    "control.delay",
-    "observation.delay",
     "command.acceleration_limit",
     "command.jerk_limit",
 )
@@ -260,10 +257,11 @@ _NONNEGATIVE_RANGE_NAMES = frozenset(
     for name in REQUIRED_FEASIBILITY_RANGES
     if name
     not in {
+        "torso.mass_delta",
+        "payload.mass",
         "payload.com.x",
         "payload.com.y",
         "payload.com.z",
-        "joint.model_error",
     }
 )
 
@@ -335,9 +333,7 @@ def validate_joint_order(joint_order: Iterable[str], *, path: str = "joint_order
             if expected != actual
         )
         index, expected, actual = mismatch
-        raise ConfigurationContractError(
-            f"{path}[{index}] is {actual!r}; fixed checkpoint order requires {expected!r}"
-        )
+        raise ConfigurationContractError(f"{path}[{index}] is {actual!r}; fixed checkpoint order requires {expected!r}")
     return names
 
 
@@ -395,10 +391,7 @@ class NumericRange:
         if tolerance < 0.0 or not math.isfinite(tolerance):
             raise ValueError("tolerance must be finite and non-negative")
         candidate = value if isinstance(value, NumericRange) else NumericRange.from_value(value)
-        return (
-            candidate.minimum >= self.minimum - tolerance
-            and candidate.maximum <= self.maximum + tolerance
-        )
+        return candidate.minimum >= self.minimum - tolerance and candidate.maximum <= self.maximum + tolerance
 
     def assert_contains(
         self,
@@ -443,9 +436,7 @@ def _flatten_interval_mapping(
                 )
             result[name] = NumericRange.from_value(child, path=f"ranges.{name}")
         else:
-            result.update(
-                _flatten_interval_mapping(child, path=name, allow_scalars=allow_scalars)
-            )
+            result.update(_flatten_interval_mapping(child, path=name, allow_scalars=allow_scalars))
     return result
 
 
@@ -488,9 +479,7 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
                 raise ConfigurationContractError(
                     f"calibration.{name} must be a length-{bool_vector_length} bool sequence"
                 )
-            if len(value) != bool_vector_length or not all(
-                isinstance(component, bool) for component in value
-            ):
+            if len(value) != bool_vector_length or not all(isinstance(component, bool) for component in value):
                 raise ConfigurationContractError(
                     f"calibration.{name} must contain {bool_vector_length} explicit booleans"
                 )
@@ -516,12 +505,9 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
         if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
             raise ConfigurationContractError(f"calibration.{name} must be a length-{vector_length} sequence")
         if len(value) != vector_length:
-            raise ConfigurationContractError(
-                f"calibration.{name} must have length {vector_length}, got {len(value)}"
-            )
+            raise ConfigurationContractError(f"calibration.{name} must have length {vector_length}, got {len(value)}")
         vector = tuple(
-            _finite_float(component, f"calibration.{name}[{index}]")
-            for index, component in enumerate(value)
+            _finite_float(component, f"calibration.{name}[{index}]") for index, component in enumerate(value)
         )
         if name in {
             "fat.com_radius_bounds",
@@ -529,9 +515,7 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
             "safety.rickshaw_pitch_bounds",
         }:
             if vector[0] >= vector[1]:
-                raise ConfigurationContractError(
-                    f"calibration.{name} lower bound must be less than its upper bound"
-                )
+                raise ConfigurationContractError(f"calibration.{name} lower bound must be less than its upper bound")
         if name.endswith("grasp_center_frame"):
             quaternion_norm = math.sqrt(sum(component * component for component in vector[3:]))
             if not math.isclose(quaternion_norm, 1.0, rel_tol=0.0, abs_tol=1.0e-5):
@@ -545,22 +529,16 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
         strict=True,
     ):
         if free and driven:
-            raise ConfigurationContractError(
-                "a D6 rotation axis cannot be both physically free and driven"
-            )
+            raise ConfigurationContractError("a D6 rotation axis cannot be both physically free and driven")
     theta_max = validated["safety.theta_max"]
     if theta_max >= math.pi / 2.0:
         raise ConfigurationContractError("calibration.safety.theta_max must lie in (0, pi/2)")
     wrench_tolerance = validated["fat.wrench_consistency_relative_tolerance"]
     if not 0.0 <= wrench_tolerance <= 1.0:
-        raise ConfigurationContractError(
-            "calibration.fat.wrench_consistency_relative_tolerance must lie in [0,1]"
-        )
+        raise ConfigurationContractError("calibration.fat.wrench_consistency_relative_tolerance must lie in [0,1]")
     radius_min, radius_max = validated["fat.com_radius_bounds"]
     if radius_min <= 0.0 or not radius_min <= validated["fat.com_radius"] <= radius_max:
-        raise ConfigurationContractError(
-            "calibration.fat.com_radius must lie within positive fat.com_radius_bounds"
-        )
+        raise ConfigurationContractError("calibration.fat.com_radius must lie within positive fat.com_radius_bounds")
     return MappingProxyType(validated)
 
 
@@ -582,14 +560,12 @@ class FeasibilityEnvelope:
             or self.schema_version != FEASIBILITY_SCHEMA_VERSION
         ):
             raise ConfigurationContractError(
-                f"unsupported feasibility schema_version={self.schema_version!r}; "
-                f"expected {FEASIBILITY_SCHEMA_VERSION}"
+                f"unsupported feasibility schema_version={self.schema_version!r}; expected {FEASIBILITY_SCHEMA_VERSION}"
             )
         slopes = _validate_required_slopes(self.slopes)
         joint_order = validate_joint_order(self.joint_order)
         parsed_ranges = {
-            name: NumericRange.from_value(value, path=f"ranges.{name}")
-            for name, value in self.ranges.items()
+            name: NumericRange.from_value(value, path=f"ranges.{name}") for name, value in self.ranges.items()
         }
         _expect_exact_keys(parsed_ranges, set(REQUIRED_FEASIBILITY_RANGES), "ranges")
         for name in _NONNEGATIVE_RANGE_NAMES:
@@ -601,7 +577,6 @@ class FeasibilityEnvelope:
             "terrain.friction",
             "wheel.left_damping",
             "wheel.right_damping",
-            "motor.strength",
             "command.acceleration_limit",
             "command.jerk_limit",
         ):
@@ -632,9 +607,7 @@ class FeasibilityEnvelope:
             {"schema_version", "slopes", "joint_order", "ranges", "calibration"},
             "feasibility envelope",
         )
-        ranges = _flatten_interval_mapping(
-            _expect_mapping(data["ranges"], "ranges"), allow_scalars=False
-        )
+        ranges = _flatten_interval_mapping(_expect_mapping(data["ranges"], "ranges"), allow_scalars=False)
         calibration = _expect_mapping(data["calibration"], "calibration")
         return cls(
             schema_version=data["schema_version"],
@@ -652,8 +625,7 @@ class FeasibilityEnvelope:
             "joint_order": list(self.joint_order),
             "ranges": {name: self.ranges[name].to_mapping() for name in REQUIRED_FEASIBILITY_RANGES},
             "calibration": {
-                name: list(value) if isinstance(value, tuple) else value
-                for name, value in self.calibration.items()
+                name: list(value) if isinstance(value, tuple) else value for name, value in self.calibration.items()
             },
         }
 
@@ -681,9 +653,7 @@ class FeasibilityEnvelope:
         require_all: bool = True,
         tolerance: float = 1.0e-12,
     ) -> None:
-        parsed = _flatten_interval_mapping(
-            _expect_mapping(sampling_ranges, "training ranges"), allow_scalars=True
-        )
+        parsed = _flatten_interval_mapping(_expect_mapping(sampling_ranges, "training ranges"), allow_scalars=True)
         unknown = sorted(set(parsed) - set(self.ranges))
         missing = sorted(set(self.ranges) - set(parsed)) if require_all else []
         if unknown or missing:
@@ -694,9 +664,7 @@ class FeasibilityEnvelope:
                 details.append(f"unknown={unknown}")
             raise ConfigurationContractError("invalid training range fields: " + ", ".join(details))
         for name, candidate in parsed.items():
-            self.ranges[name].assert_contains(
-                candidate, name=f"training_ranges.{name}", tolerance=tolerance
-            )
+            self.ranges[name].assert_contains(candidate, name=f"training_ranges.{name}", tolerance=tolerance)
 
 
 def _require_yaml():
@@ -725,9 +693,7 @@ def _load_yaml_mapping(path: str | Path) -> Mapping[str, Any]:
             result[key] = loader.construct_object(value_node, deep=deep)
         return result
 
-    UniqueKeySafeLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping
-    )
+    UniqueKeySafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
     file_path = Path(path)
     try:
         with file_path.open("r", encoding="utf-8") as stream:
@@ -758,9 +724,7 @@ def assert_sampling_ranges_within_envelope(
     loaded = load_feasibility_envelope(envelope) if isinstance(envelope, (str, Path)) else envelope
     if not isinstance(loaded, FeasibilityEnvelope):
         raise TypeError("envelope must be a FeasibilityEnvelope or YAML path")
-    loaded.assert_sampling_ranges(
-        sampling_ranges, require_all=require_all, tolerance=tolerance
-    )
+    loaded.assert_sampling_ranges(sampling_ranges, require_all=require_all, tolerance=tolerance)
     return loaded
 
 
@@ -790,42 +754,24 @@ class ResetPose:
             raise ConfigurationContractError("pose.q_ref must be a sequence")
         if len(self.q_ref) != 29:
             raise ConfigurationContractError(f"pose.q_ref must have length 29, got {len(self.q_ref)}")
-        q_ref = tuple(
-            _finite_float(value, f"pose.q_ref[{index}]")
-            for index, value in enumerate(self.q_ref)
-        )
+        q_ref = tuple(_finite_float(value, f"pose.q_ref[{index}]") for index, value in enumerate(self.q_ref))
         if self.q_reset is None:
-            raise ConfigurationContractError(
-                "pose.q_reset is required by the static-reset contract"
-            )
+            raise ConfigurationContractError("pose.q_reset is required by the static-reset contract")
         raw_q_reset = self.q_reset
         if isinstance(raw_q_reset, (str, bytes)) or not isinstance(raw_q_reset, Sequence):
             raise ConfigurationContractError("pose.q_reset must be a sequence")
         if len(raw_q_reset) != 29:
-            raise ConfigurationContractError(
-                f"pose.q_reset must have length 29, got {len(raw_q_reset)}"
-            )
-        q_reset = tuple(
-            _finite_float(value, f"pose.q_reset[{index}]")
-            for index, value in enumerate(raw_q_reset)
-        )
+            raise ConfigurationContractError(f"pose.q_reset must have length 29, got {len(raw_q_reset)}")
+        q_reset = tuple(_finite_float(value, f"pose.q_reset[{index}]") for index, value in enumerate(raw_q_reset))
         raw_q_ref_unloaded = self.q_ref_unloaded
         if raw_q_ref_unloaded is None:
-            raise ConfigurationContractError(
-                "pose.q_ref_unloaded is required by the static-reset contract"
-            )
-        if isinstance(raw_q_ref_unloaded, (str, bytes)) or not isinstance(
-            raw_q_ref_unloaded, Sequence
-        ):
+            raise ConfigurationContractError("pose.q_ref_unloaded is required by the static-reset contract")
+        if isinstance(raw_q_ref_unloaded, (str, bytes)) or not isinstance(raw_q_ref_unloaded, Sequence):
             raise ConfigurationContractError("pose.q_ref_unloaded must be a sequence")
         if len(raw_q_ref_unloaded) != 29:
-            raise ConfigurationContractError(
-                "pose.q_ref_unloaded must have length 29, got "
-                f"{len(raw_q_ref_unloaded)}"
-            )
+            raise ConfigurationContractError(f"pose.q_ref_unloaded must have length 29, got {len(raw_q_ref_unloaded)}")
         q_ref_unloaded = tuple(
-            _finite_float(value, f"pose.q_ref_unloaded[{index}]")
-            for index, value in enumerate(raw_q_ref_unloaded)
+            _finite_float(value, f"pose.q_ref_unloaded[{index}]") for index, value in enumerate(raw_q_ref_unloaded)
         )
         torque_basis: dict[str, tuple[float, ...]] = {}
         for name in (
@@ -836,20 +782,13 @@ class ResetPose:
         ):
             raw_value = getattr(self, name)
             if raw_value is None:
-                raise ConfigurationContractError(
-                    f"pose.{name} is required by the payload-aware static-reset contract"
-                )
-            if isinstance(raw_value, (str, bytes)) or not isinstance(
-                raw_value, Sequence
-            ):
+                raise ConfigurationContractError(f"pose.{name} is required by the payload-aware static-reset contract")
+            if isinstance(raw_value, (str, bytes)) or not isinstance(raw_value, Sequence):
                 raise ConfigurationContractError(f"pose.{name} must be a sequence")
             if len(raw_value) != 29:
-                raise ConfigurationContractError(
-                    f"pose.{name} must have length 29, got {len(raw_value)}"
-                )
+                raise ConfigurationContractError(f"pose.{name} must have length 29, got {len(raw_value)}")
             torque_basis[name] = tuple(
-                _finite_float(value, f"pose.{name}[{index}]")
-                for index, value in enumerate(raw_value)
+                _finite_float(value, f"pose.{name}[{index}]") for index, value in enumerate(raw_value)
             )
         contact_solution: dict[str, tuple[tuple[float, ...], ...]] = {}
         for name, width in (
@@ -857,29 +796,18 @@ class ResetPose:
             ("wheel_contact_forces_sln", 3),
         ):
             raw_value = getattr(self, name)
-            if isinstance(raw_value, (str, bytes)) or not isinstance(
-                raw_value, Sequence
-            ) or len(raw_value) != 2:
+            if isinstance(raw_value, (str, bytes)) or not isinstance(raw_value, Sequence) or len(raw_value) != 2:
                 raise ConfigurationContractError(f"pose.{name} must have shape [2,{width}]")
             rows: list[tuple[float, ...]] = []
             for row_index, row in enumerate(raw_value):
-                if isinstance(row, (str, bytes)) or not isinstance(
-                    row, Sequence
-                ) or len(row) != width:
-                    raise ConfigurationContractError(
-                        f"pose.{name} must have shape [2,{width}]"
-                    )
+                if isinstance(row, (str, bytes)) or not isinstance(row, Sequence) or len(row) != width:
+                    raise ConfigurationContractError(f"pose.{name} must have shape [2,{width}]")
                 rows.append(
-                    tuple(
-                        _finite_float(value, f"pose.{name}[{row_index}][{index}]")
-                        for index, value in enumerate(row)
-                    )
+                    tuple(_finite_float(value, f"pose.{name}[{row_index}][{index}]") for index, value in enumerate(row))
                 )
             contact_solution[name] = tuple(rows)
         if any(row[2] <= 0.0 for row in contact_solution["wheel_contact_forces_sln"]):
-            raise ConfigurationContractError(
-                "pose.wheel_contact_forces_sln requires positive normal forces"
-            )
+            raise ConfigurationContractError("pose.wheel_contact_forces_sln requires positive normal forces")
         root_pitch = _finite_float(self.root_pitch, "pose.root_pitch")
         if abs(root_pitch) > 0.5:
             raise ConfigurationContractError("pose.root_pitch must lie in [-0.5, 0.5] rad")
@@ -909,9 +837,7 @@ class ResetPose:
             "tau_per_normal_force": list(self.tau_per_normal_force),
             "tau_per_tangent_difference": list(self.tau_per_tangent_difference),
             "handle_wrenches_sln": [list(row) for row in self.handle_wrenches_sln],
-            "wheel_contact_forces_sln": [
-                list(row) for row in self.wheel_contact_forces_sln
-            ],
+            "wheel_contact_forces_sln": [list(row) for row in self.wheel_contact_forces_sln],
             "q_ref": list(self.q_ref),
         }
 
@@ -930,21 +856,16 @@ class ResetPoseLibrary:
             or self.schema_version != RESET_POSE_SCHEMA_VERSION
         ):
             raise ConfigurationContractError(
-                f"unsupported reset-pose schema_version={self.schema_version!r}; "
-                f"expected {RESET_POSE_SCHEMA_VERSION}"
+                f"unsupported reset-pose schema_version={self.schema_version!r}; expected {RESET_POSE_SCHEMA_VERSION}"
             )
         joint_order = validate_joint_order(self.joint_order)
         try:
-            poses = tuple(
-                pose if isinstance(pose, ResetPose) else ResetPose(**pose)
-                for pose in self.poses
-            )
+            poses = tuple(pose if isinstance(pose, ResetPose) else ResetPose(**pose) for pose in self.poses)
         except TypeError as exc:
             raise ConfigurationContractError("each pose must contain gradient and q_ref") from exc
         if len(poses) != len(RESET_POSE_GRADIENTS):
             raise ConfigurationContractError(
-                f"reset pose library must contain exactly {len(RESET_POSE_GRADIENTS)} poses, "
-                f"got {len(poses)}"
+                f"reset pose library must contain exactly {len(RESET_POSE_GRADIENTS)} poses, got {len(poses)}"
             )
         ordered: list[ResetPose] = []
         for expected in RESET_POSE_GRADIENTS:
@@ -955,8 +876,7 @@ class ResetPoseLibrary:
             ]
             if len(matches) != 1:
                 raise ConfigurationContractError(
-                    f"reset pose library requires exactly one pose for gradient {expected}; "
-                    f"found {len(matches)}"
+                    f"reset pose library requires exactly one pose for gradient {expected}; found {len(matches)}"
                 )
             ordered.append(poses[matches[0]])
         object.__setattr__(self, "poses", tuple(ordered))
@@ -965,17 +885,14 @@ class ResetPoseLibrary:
             object.__setattr__(self, "source_path", Path(self.source_path))
 
     @classmethod
-    def from_mapping(
-        cls, mapping: Mapping[str, Any], *, source_path: str | Path | None = None
-    ) -> "ResetPoseLibrary":
+    def from_mapping(cls, mapping: Mapping[str, Any], *, source_path: str | Path | None = None) -> "ResetPoseLibrary":
         data = _expect_mapping(mapping, "reset pose library")
         _expect_exact_keys(data, {"schema_version", "joint_order", "poses"}, "reset pose library")
         pose_values = data["poses"]
         poses: list[ResetPose] = []
         if isinstance(pose_values, Mapping):
             raise ConfigurationContractError(
-                "schema v4 reset poses must use the canonical list form with "
-                "explicit static endpoints and torque bases"
+                "schema v4 reset poses must use the canonical list form with explicit static endpoints and torque bases"
             )
         elif isinstance(pose_values, Sequence) and not isinstance(pose_values, (str, bytes)):
             for index, value in enumerate(pose_values):
@@ -1002,9 +919,7 @@ class ResetPoseLibrary:
                         details.append(f"missing={sorted(missing)}")
                     if unknown:
                         details.append(f"unknown={sorted(unknown)}")
-                    raise ConfigurationContractError(
-                        f"poses[{index}] fields differ: " + ", ".join(details)
-                    )
+                    raise ConfigurationContractError(f"poses[{index}] fields differ: " + ", ".join(details))
                 poses.append(
                     ResetPose(
                         gradient=pose["gradient"],
@@ -1034,11 +949,7 @@ class ResetPoseLibrary:
         value = _finite_float(gradient, "gradient")
         if not math.isfinite(tolerance) or tolerance < 0.0:
             raise ValueError("tolerance must be finite and non-negative")
-        matches = [
-            pose
-            for pose in self.poses
-            if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=tolerance)
-        ]
+        matches = [pose for pose in self.poses if math.isclose(pose.gradient, value, rel_tol=0.0, abs_tol=tolerance)]
         if len(matches) != 1:
             raise ConfigurationContractError(
                 f"gradient {value} is outside the reset-pose library coverage {RESET_POSE_GRADIENTS}"
@@ -1128,10 +1039,7 @@ def static_preload_hardware_ratios(
     arm_ratios: list[float] = []
     for gradient in RESET_POSE_GRADIENTS:
         pose = library.pose_for_gradient(gradient)
-        offsets = tuple(
-            abs(reference - reset)
-            for reference, reset in zip(pose.q_ref, pose.q_reset, strict=True)
-        )
+        offsets = tuple(abs(reference - reset) for reference, reset in zip(pose.q_ref, pose.q_reset, strict=True))
         lower_ratios.append(
             max(
                 offset * stiffness / effort
@@ -1166,10 +1074,7 @@ def static_waist_preload_hardware_ratios(
     for gradient in RESET_POSE_GRADIENTS:
         pose = library.pose_for_gradient(gradient)
         offsets = tuple(
-            abs(reference - reset)
-            for reference, reset in zip(
-                pose.q_ref[12:15], pose.q_reset[12:15], strict=True
-            )
+            abs(reference - reset) for reference, reset in zip(pose.q_ref[12:15], pose.q_reset[12:15], strict=True)
         )
         ratios.append(
             max(

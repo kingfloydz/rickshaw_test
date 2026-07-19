@@ -9,7 +9,11 @@ import os
 from pathlib import Path
 import re
 
-from _isaaclab_wrappers import add_project_source_to_path, require_existing_file, run_isaaclab_rsl_rl
+from _isaaclab_wrappers import (
+    add_project_source_to_path,
+    require_existing_file,
+    run_isaaclab_rsl_rl,
+)
 
 add_project_source_to_path()
 
@@ -46,14 +50,11 @@ STUDENT_AGENT_KEY = "rsl_rl_student_cfg_entry_point"
 S2_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s2_student_ppo"]
 
 
-def _validate_resume_lineage(
-    checkpoint: dict, teacher: Path, context: Path
-) -> None:
+def _validate_resume_lineage(checkpoint: dict, teacher: Path, context: Path) -> None:
     lineage = checkpoint.get(CHECKPOINT_LINEAGE_KEY)
     if not isinstance(lineage, dict) or (
         Path(str(lineage.get("teacher_checkpoint"))).resolve() != teacher.resolve()
-        or Path(str(lineage.get("context_checkpoint"))).resolve()
-        != context.resolve()
+        or Path(str(lineage.get("context_checkpoint"))).resolve() != context.resolve()
     ):
         raise ValueError("S2 resume checkpoint belongs to a different S0/S1 lineage")
 
@@ -114,6 +115,9 @@ def main() -> int:
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
     fat2_weight = float(training_parameters["fat2_weight"])
+    stability_reward_curriculum = bool(
+        training_parameters["stability_reward_curriculum"]
+    )
     reward_weight_overrides = reward_weight_overrides_from_configuration(
         s1_training_configuration
     )
@@ -152,9 +156,7 @@ def main() -> int:
     os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
     os.environ["G1_RICKSHAW_TASK"] = args.task
     os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s2_student_ppo"
-    os.environ["G1_RICKSHAW_CURRICULUM_START_ITERATION"] = str(
-        curriculum_iteration
-    )
+    os.environ["G1_RICKSHAW_CURRICULUM_START_ITERATION"] = str(curriculum_iteration)
     os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = json.dumps(lineage, sort_keys=True)
     seed = cli_value(
         remaining,
@@ -185,6 +187,7 @@ def main() -> int:
             "save_interval": training_artifact_interval(rollout_steps),
             "fat2_weight": fat2_weight,
             "latent_dim": latent_dim,
+            "stability_reward_curriculum": stability_reward_curriculum,
             REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
             "launcher_arguments": list(remaining),
             "teacher_checkpoint": os.fspath(teacher.resolve()),
@@ -197,6 +200,7 @@ def main() -> int:
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
         rollout_steps=rollout_steps,
+        stability_reward_curriculum=stability_reward_curriculum,
     )
     validate_guide_training_configuration(
         training_configuration,

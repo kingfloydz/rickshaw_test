@@ -10,7 +10,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -107,10 +106,7 @@ def _configured_path(env_var: str, default: Path) -> Path:
 
 
 def _range_pairs(envelope) -> dict[str, tuple[float, float]]:
-    return {
-        name: (interval.minimum, interval.maximum)
-        for name, interval in envelope.ranges.items()
-    }
+    return {name: (interval.minimum, interval.maximum) for name, interval in envelope.ranges.items()}
 
 
 def _range_upper(envelope, name: str) -> float:
@@ -260,10 +256,9 @@ class ObservationsCfg:
 class EventCfg:
     """Startup, reset, and global policy-rate events."""
 
+    randomize_slopes = EventTerm(func=mdp.randomize_startup_slopes, mode="startup")
     initialize_mdp = EventTerm(func=mdp.initialize_mdp_state, mode="startup", params={})
-    initialize_domain = EventTerm(
-        func=mdp.initialize_domain_randomization, mode="startup", params={}
-    )
+    initialize_domain = EventTerm(func=mdp.initialize_domain_randomization, mode="startup", params={})
     reset_closed_chain = EventTerm(func=mdp.reset_closed_chain, mode="reset", params={})
     policy_interval = EventTerm(
         func=mdp.advance_policy_interval,
@@ -307,18 +302,14 @@ class RewardsCfg:
         func=mdp.feet_landing,
         weight=mdp.REWARD_WEIGHTS["feet_landing"],
         params={
-            "sensor_cfg": SceneEntityCfg(
-                "robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True
-            ),
+            "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
         },
     )
     feet_air_time_excess_l2 = RewTerm(
         func=mdp.feet_air_time_excess_l2,
         weight=mdp.REWARD_WEIGHTS["feet_air_time_excess_l2"],
         params={
-            "sensor_cfg": SceneEntityCfg(
-                "robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True
-            ),
+            "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
         },
     )
     feet_slide = RewTerm(
@@ -350,9 +341,7 @@ class RewardsCfg:
         func=mdp.pelvis_height_limits_l2,
         weight=mdp.REWARD_WEIGHTS["pelvis_height_limits_l2"],
         params={
-            "asset_cfg": SceneEntityCfg(
-                "robot", body_names=[PELVIS_BODY_NAME], preserve_order=True
-            ),
+            "asset_cfg": SceneEntityCfg("robot", body_names=[PELVIS_BODY_NAME], preserve_order=True),
             "bounds": mdp.PELVIS_HEIGHT_BOUNDS_M,
             "scale": mdp.PELVIS_HEIGHT_ERROR_SCALE_M,
         },
@@ -376,18 +365,11 @@ class TerminationsCfg:
 
 
 @configclass
-class CurriculumCfg:
-    """Directional-slope terrain curriculum."""
-
-    terrain_levels = CurrTerm(func=mdp.terrain_level_curriculum)
-
-
-@configclass
 class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
     """Training configuration for the registered G1 rickshaw task."""
 
     scene: G1RickshawSceneCfg = G1RickshawSceneCfg(
-        num_envs=4096,
+        num_envs=8192,
         env_spacing=6.0,
         replicate_physics=True,
         # ContactSensor reporter discovery currently requires USD-visible clones.
@@ -399,10 +381,12 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    curriculum: CurriculumCfg | None = CurriculumCfg()
+    curriculum = None
+    observation_noise_enabled: bool = True
 
     feasibility_path: str = os.fspath(DEFAULT_FEASIBILITY_PATH)
     reset_pose_path: str = os.fspath(DEFAULT_RESET_POSES_PATH)
+
     @property
     def reset_pose_library(self):
         """Validated runtime pose data, intentionally excluded from Hydra serialization."""
@@ -414,9 +398,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.__dict__["__reset_pose_library"] = value
 
     def __post_init__(self):
-        feasibility_path = _configured_path(
-            "G1_RICKSHAW_FEASIBILITY_ENVELOPE", Path(self.feasibility_path)
-        )
+        feasibility_path = _configured_path("G1_RICKSHAW_FEASIBILITY_ENVELOPE", Path(self.feasibility_path))
         reset_pose_path = _configured_path("G1_RICKSHAW_RESET_POSES", Path(self.reset_pose_path))
         envelope = load_feasibility_envelope(feasibility_path)
         reset_library = load_reset_pose_library(reset_pose_path)
@@ -428,24 +410,18 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.__dict__["__reset_pose_library"] = reset_library
         self.domain_randomization = mdp.DomainRandomizationCfg(
             enabled=True,
-            refresh_interval_iterations=200,
             calibration=calibration,
             ranges={name: ranges[name] for name in mdp.DOMAIN_PARAMETER_NAMES},
             nominal={
+                "torso.mass_delta": 0.0,
                 "payload.mass": 0.0,
                 "payload.com.x": 0.5 * sum(ranges["payload.com.x"]),
                 "payload.com.y": 0.0,
                 "payload.com.z": 0.5 * sum(ranges["payload.com.z"]),
-                "rolling_resistance.c_rr": _cal(
-                    calibration, "rolling_resistance.c_rr_nominal"
-                ),
+                "rolling_resistance.c_rr": _cal(calibration, "rolling_resistance.c_rr_nominal"),
                 "terrain.friction": _cal(calibration, "terrain.friction_nominal"),
                 "wheel.left_damping": RICKSHAW_URDF_SPEC.wheel_joint_damping,
                 "wheel.right_damping": RICKSHAW_URDF_SPEC.wheel_joint_damping,
-                "motor.strength": 1.0,
-                "joint.model_error": 0.0,
-                "control.delay": 0.0,
-                "observation.delay": 0.0,
             },
         )
         self.handle_constraint = mdp.HandleConstraintCfg(
@@ -480,18 +456,12 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.rickshaw_pose = mdp.RickshawPoseTargetCfg(
             hitch_height_target=_cal(calibration, "rickshaw_pose.hitch_height_target"),
             hitch_height_tolerance=_cal(calibration, "rickshaw_pose.hitch_height_tolerance"),
-            hitch_vertical_speed_tolerance=_cal(
-                calibration, "rickshaw_pose.hitch_vertical_speed_tolerance"
-            ),
+            hitch_vertical_speed_tolerance=_cal(calibration, "rickshaw_pose.hitch_vertical_speed_tolerance"),
         )
         self.rolling_resistance = mdp.RollingResistanceCfg(enabled=True)
         self.reset_validation = mdp.ResetValidationCfg(
-            hand_position_tolerance=_cal(
-                calibration, "reset.hand_position_tolerance"
-            ),
-            minimum_wheel_normal_force=_cal(
-                calibration, "safety.minimum_wheel_normal_force"
-            ),
+            hand_position_tolerance=_cal(calibration, "reset.hand_position_tolerance"),
+            minimum_wheel_normal_force=_cal(calibration, "safety.minimum_wheel_normal_force"),
         )
         self.task_entity_names = mdp.TaskEntityNamesCfg(
             policy_joint_names=G1_JOINT_ORDER,
@@ -505,30 +475,14 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.robot_mass = _cal(calibration, "fat.robot_mass")
         self.dex_q_grasp = tuple(_cal(calibration, "dex.q_grasp"))
 
-        self.scene.robot.actuators["legs"].stiffness = _cal(
-            calibration, "control.leg_stiffness"
-        )
-        self.scene.robot.actuators["legs"].damping = _cal(
-            calibration, "control.leg_damping"
-        )
-        self.scene.robot.actuators["feet"].stiffness = _cal(
-            calibration, "control.foot_stiffness"
-        )
-        self.scene.robot.actuators["feet"].damping = _cal(
-            calibration, "control.foot_damping"
-        )
-        self.scene.robot.actuators["waist"].stiffness = _cal(
-            calibration, "control.waist_stiffness"
-        )
-        self.scene.robot.actuators["waist"].damping = _cal(
-            calibration, "control.waist_damping"
-        )
-        self.scene.robot.actuators["arms"].stiffness = _cal(
-            calibration, "control.arm_stiffness"
-        )
-        self.scene.robot.actuators["arms"].damping = _cal(
-            calibration, "control.arm_damping"
-        )
+        self.scene.robot.actuators["legs"].stiffness = _cal(calibration, "control.leg_stiffness")
+        self.scene.robot.actuators["legs"].damping = _cal(calibration, "control.leg_damping")
+        self.scene.robot.actuators["feet"].stiffness = _cal(calibration, "control.foot_stiffness")
+        self.scene.robot.actuators["feet"].damping = _cal(calibration, "control.foot_damping")
+        self.scene.robot.actuators["waist"].stiffness = _cal(calibration, "control.waist_stiffness")
+        self.scene.robot.actuators["waist"].damping = _cal(calibration, "control.waist_damping")
+        self.scene.robot.actuators["arms"].stiffness = _cal(calibration, "control.arm_stiffness")
+        self.scene.robot.actuators["arms"].damping = _cal(calibration, "control.arm_damping")
 
         support = mdp.SupportPolygonCfg(
             foot_half_length=_cal(calibration, "support.foot_half_length"),
@@ -543,15 +497,9 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
             com_radius=_cal(calibration, "fat.com_radius"),
             com_radius_bounds=tuple(_cal(calibration, "fat.com_radius_bounds")),
             theta_max=_cal(calibration, "safety.theta_max"),
-            wrench_consistency_relative_tolerance=_cal(
-                calibration, "fat.wrench_consistency_relative_tolerance"
-            ),
-            wrench_consistency_absolute_floor_n=_cal(
-                calibration, "fat.wrench_consistency_absolute_floor_n"
-            ),
-            wrench_consistency_window_steps=_cal(
-                calibration, "fat.wrench_consistency_window_steps"
-            ),
+            wrench_consistency_relative_tolerance=_cal(calibration, "fat.wrench_consistency_relative_tolerance"),
+            wrench_consistency_absolute_floor_n=_cal(calibration, "fat.wrench_consistency_absolute_floor_n"),
+            wrench_consistency_window_steps=_cal(calibration, "fat.wrench_consistency_window_steps"),
         )
         zmp = mdp.ZMPCfg(min_ground_reaction=_cal(calibration, "safety.min_ground_reaction"))
         speed = mdp.SpeedReferenceCfg(
@@ -589,12 +537,8 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.terminations.refresh_policy_state.params = {"cfg": policy_update}
         self.terminations.immediate_safety.params = {
             "cfg": mdp.ImmediateSafetyCfg(
-                illegal_contact_force_threshold=_cal(
-                    calibration, "safety.illegal_contact_force_threshold"
-                ),
-                wheel_lift_normal_force_threshold=_cal(
-                    calibration, "safety.minimum_wheel_normal_force"
-                ),
+                illegal_contact_force_threshold=_cal(calibration, "safety.illegal_contact_force_threshold"),
+                wheel_lift_normal_force_threshold=_cal(calibration, "safety.minimum_wheel_normal_force"),
                 d6_residual_limit=_cal(calibration, "safety.d6_residual_limit"),
                 d6_impulse_limit=_cal(calibration, "safety.d6_impulse_limit"),
             ),
@@ -603,9 +547,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 body_names=list(ILLEGAL_CONTACT_BODY_NAMES),
                 preserve_order=True,
             ),
-            "robot_asset_cfg": SceneEntityCfg(
-                "robot", joint_names=list(G1_JOINT_ORDER), preserve_order=True
-            ),
+            "robot_asset_cfg": SceneEntityCfg("robot", joint_names=list(G1_JOINT_ORDER), preserve_order=True),
         }
         self.terminations.persistent_safety.params = {
             "cfg": mdp.PersistentSafetyCfg(
@@ -631,8 +573,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.rickshaw.spawn.activate_contact_sensors = True
         self.scene.robot_contacts.update_period = self.sim.dt
         self.scene.wheel_contacts.update_period = self.sim.dt
-        # This flag controls deterministic row/column generation, not whether
-        # the runtime terrain-level CurriculumTerm is enabled.
+        # Keep canonical slope rows in the generated mesh; runtime curriculum is disabled.
         self.scene.terrain.terrain_generator.curriculum = True
 
 
@@ -643,8 +584,8 @@ class G1RickshawDirectionalSlopePlayEnvCfg(G1RickshawDirectionalSlopeEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 64
-        self.curriculum = None
         self.domain_randomization.enabled = False
+        self.observation_noise_enabled = False
 
 
 def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) -> None:

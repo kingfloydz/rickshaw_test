@@ -55,7 +55,7 @@ def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
     counts = torch.bincount(
         assignment["slope_index"], minlength=len(SIGNED_SLOPES)
     )
-    assert counts.tolist() == [216] * 11 + [215] * 8
+    assert counts.tolist() == [432] * 3 + [431] * 16
     torch.testing.assert_close(
         torch.unique(assignment["slope"], sorted=True),
         torch.tensor(SIGNED_SLOPES),

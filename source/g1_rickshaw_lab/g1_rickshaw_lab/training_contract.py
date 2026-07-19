@@ -18,7 +18,6 @@ import tempfile
 from typing import Any
 
 from .slope_contract import (
-    FORMAL_EVALUATION_NUM_ENVS,
     SLOPE_GRADIENTS,
     SLOPE_LABELS,
     balanced_slope_counts,
@@ -60,6 +59,7 @@ CHECKPOINT_SCHEMA_VERSION = 1
 CHECKPOINT_STAGE_KEY = "g1_rickshaw_stage"
 CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
+CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY = "g1_rickshaw_stability_rewards_active"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
 TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
 EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
@@ -68,7 +68,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_FEASIBILITY_PATH = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
 DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
 GUIDE_TRAINING_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
-GUIDE_TRAINING_NUM_ENVS = 4096
+GUIDE_TRAINING_NUM_ENVS = 8192
 TRAINING_ARTIFACT_INTERVAL = 200
 S1_DETERMINISTIC_ALGORITHMS = False
 
@@ -82,11 +82,13 @@ TRAINING_PARAMETER_KEYS = (
     "fat2_weight",
     "rollout_steps",
     "latent_dim",
+    "stability_reward_curriculum",
 )
 DEFAULT_TRAINING_PARAMETERS = {
     "fat2_weight": 0.1,
     "rollout_steps": 48,
     "latent_dim": DEFAULT_CONTEXT_DIM,
+    "stability_reward_curriculum": False,
 }
 SUPPORTED_FAT2_WEIGHTS = (0.0, 0.1, 0.2)
 SUPPORTED_ROLLOUT_STEPS = (24, 48, 64)
@@ -105,12 +107,9 @@ TRAINING_CONFIGURATION_FIELDS = {
 }
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
-        "domain_randomization_refresh_interval": 200,
-        "domain_randomization_max_scale": 0.6,
-        "domain_randomization_ramp_refreshes": 30,
-        "domain_randomization_friction_scale": 0.5,
-        "delay_randomization_max_probability": 0.25,
-        "delay_randomization_ramp_refreshes": 60,
+        "domain_randomization": "startup_fixed",
+        "terrain_slopes": "startup_balanced_fixed",
+        "observation_noise": "unitree_g1_uniform",
     },
     "s1_context_distillation": {
         "context_learning_rate": 3.0e-4,
@@ -132,37 +131,27 @@ GUIDE_TRAINING_PARAMETERS = {
     },
 }
 GUIDE_MAX_ITERATIONS = {
-    "s0_teacher": 6000,
-    "s1_context_distillation": 4000,
+    "s0_teacher": 4000,
+    "s1_context_distillation": 3000,
     "s2_student_ppo": 2000,
 }
 BASELINE_ROLLOUT_STEPS = DEFAULT_TRAINING_PARAMETERS["rollout_steps"]
 
 
-def rollout_scaled_iterations(
-    baseline_iterations: int, rollout_steps: int
-) -> int:
+def rollout_scaled_iterations(baseline_iterations: int, rollout_steps: int) -> int:
     """Preserve the baseline per-environment transition budget."""
 
-    if (
-        isinstance(baseline_iterations, bool)
-        or not isinstance(baseline_iterations, int)
-        or baseline_iterations <= 0
-    ):
+    if isinstance(baseline_iterations, bool) or not isinstance(baseline_iterations, int) or baseline_iterations <= 0:
         raise ValueError("baseline_iterations must be a positive integer")
     if type(rollout_steps) is not int or rollout_steps not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
-    iterations, remainder = divmod(
-        baseline_iterations * BASELINE_ROLLOUT_STEPS, rollout_steps
-    )
+    iterations, remainder = divmod(baseline_iterations * BASELINE_ROLLOUT_STEPS, rollout_steps)
     if remainder:
         raise ValueError("rollout length does not divide the baseline transition budget")
     return iterations
 
 
-def guide_max_iterations(
-    stage: str, rollout_steps: int = BASELINE_ROLLOUT_STEPS
-) -> int:
+def guide_max_iterations(stage: str, rollout_steps: int = BASELINE_ROLLOUT_STEPS) -> int:
     """Return the stage cap with equal PPO transition budgets."""
 
     try:
@@ -203,23 +192,15 @@ def validate_training_configuration(
 ) -> dict[str, Any]:
     """Validate the replayable CLI/Hydra configuration in a checkpoint."""
 
-    if (
-        not isinstance(value, Mapping)
-        or value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "training configuration requires "
-            f"schema_version: {TRAINING_CONFIGURATION_SCHEMA_VERSION}"
-        )
+    if not isinstance(value, Mapping) or value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
+        raise ValueError(f"training configuration requires schema_version: {TRAINING_CONFIGURATION_SCHEMA_VERSION}")
     if set(value) != TRAINING_CONFIGURATION_FIELDS:
         raise ValueError("training configuration has missing or unknown fields")
     stage = value.get("stage")
     if not isinstance(stage, str) or not stage:
         raise ValueError("training configuration is missing its stage")
     if expected_stage is not None and stage != expected_stage:
-        raise ValueError(
-            f"training configuration stage {stage!r} differs from {expected_stage!r}"
-        )
+        raise ValueError(f"training configuration stage {stage!r} differs from {expected_stage!r}")
     seed = value.get("seed")
     iterations = value.get("max_iterations")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
@@ -229,9 +210,7 @@ def validate_training_configuration(
     if not isinstance(value.get("task"), str) or not value["task"]:
         raise ValueError("training configuration task must be non-empty")
     num_envs = value.get("num_envs")
-    if num_envs is not None and (
-        isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0
-    ):
+    if num_envs is not None and (isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0):
         raise ValueError("training configuration num_envs must be a positive integer or null")
     if not isinstance(value.get("guide_parameters"), Mapping):
         raise ValueError("training configuration requires guide_parameters")
@@ -244,31 +223,25 @@ def validate_training_configuration(
     if stage_coverage is not None and not isinstance(stage_coverage, Mapping):
         raise ValueError("training configuration stage_coverage must be a mapping or null")
     training_parameters = value.get("training_parameters")
-    if not isinstance(training_parameters, Mapping) or set(training_parameters) != set(
-        TRAINING_PARAMETER_KEYS
-    ):
-        raise ValueError(
-            "training configuration training_parameters must contain exactly "
-            f"{TRAINING_PARAMETER_KEYS}"
-        )
+    if not isinstance(training_parameters, Mapping) or set(training_parameters) != set(TRAINING_PARAMETER_KEYS):
+        raise ValueError(f"training configuration training_parameters must contain exactly {TRAINING_PARAMETER_KEYS}")
     if type(training_parameters["rollout_steps"]) is not int:
         raise ValueError("rollout_steps must be an integer")
     if type(training_parameters["latent_dim"]) is not int:
         raise ValueError("latent_dim must be an integer")
+    if type(training_parameters["stability_reward_curriculum"]) is not bool:
+        raise ValueError("stability_reward_curriculum must be boolean")
     raw_fat2_weight = training_parameters["fat2_weight"]
-    if isinstance(raw_fat2_weight, bool) or not isinstance(
-        raw_fat2_weight, (int, float)
-    ):
+    if isinstance(raw_fat2_weight, bool) or not isinstance(raw_fat2_weight, (int, float)):
         raise ValueError("fat2_weight must be numeric")
     normalized_parameters = {
         "fat2_weight": float(raw_fat2_weight),
         "rollout_steps": int(training_parameters["rollout_steps"]),
         "latent_dim": int(training_parameters["latent_dim"]),
+        "stability_reward_curriculum": training_parameters["stability_reward_curriculum"],
     }
     if normalized_parameters["fat2_weight"] not in SUPPORTED_FAT2_WEIGHTS:
-        raise ValueError(
-            f"fat2_weight must be one of {SUPPORTED_FAT2_WEIGHTS}"
-        )
+        raise ValueError(f"fat2_weight must be one of {SUPPORTED_FAT2_WEIGHTS}")
     if normalized_parameters["rollout_steps"] not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
     validate_context_dim(normalized_parameters["latent_dim"])
@@ -288,9 +261,7 @@ def validate_guide_training_configuration(
     if expected_stage not in GUIDE_TRAINING_PARAMETERS:
         raise ValueError(f"no Guide training contract exists for stage {expected_stage!r}")
     if result["guide_parameters"] != GUIDE_TRAINING_PARAMETERS[expected_stage]:
-        raise ValueError(
-            f"training configuration guide parameters differ for stage {expected_stage!r}"
-        )
+        raise ValueError(f"training configuration guide parameters differ for stage {expected_stage!r}")
     return result
 
 
@@ -356,17 +327,9 @@ def validate_student_checkpoint_architecture(
         "actor.network.0.weight",
         "policy.network.0.weight",
     )
-    if (
-        latent_weight is None
-        or latent_weight.ndim != 2
-        or latent_weight.shape[0] != latent_dim
-    ):
+    if latent_weight is None or latent_weight.ndim != 2 or latent_weight.shape[0] != latent_dim:
         raise ValueError("checkpoint context encoder differs from its recorded latent width")
-    if (
-        policy_weight is None
-        or policy_weight.ndim != 2
-        or policy_weight.shape[1] != ACTOR_OBSERVATION_DIM + latent_dim
-    ):
+    if policy_weight is None or policy_weight.ndim != 2 or policy_weight.shape[1] != ACTOR_OBSERVATION_DIM + latent_dim:
         raise ValueError("student actor input differs from its recorded latent width")
 
 
@@ -382,11 +345,7 @@ def validate_teacher_checkpoint_architecture(
         raise ValueError("teacher checkpoint has no actor state_dict")
     encoder_weight = state.get("encoder.context.weight")
     policy_weight = state.get("policy.network.0.weight")
-    if (
-        not torch.is_tensor(encoder_weight)
-        or encoder_weight.ndim != 2
-        or encoder_weight.shape[0] != latent_dim
-    ):
+    if not torch.is_tensor(encoder_weight) or encoder_weight.ndim != 2 or encoder_weight.shape[0] != latent_dim:
         raise ValueError("teacher encoder differs from its recorded latent width")
     if (
         not torch.is_tensor(policy_weight)
@@ -400,10 +359,7 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
     """Validate the single reset-separated TRAINING rollout segment."""
 
     if manifest.get("schema_version") != ROLLOUT_MANIFEST_SCHEMA_VERSION:
-        raise ValueError(
-            "rollout manifest requires schema_version "
-            f"{ROLLOUT_MANIFEST_SCHEMA_VERSION}"
-        )
+        raise ValueError(f"rollout manifest requires schema_version {ROLLOUT_MANIFEST_SCHEMA_VERSION}")
     segments = manifest.get("stage_segments")
     if not isinstance(segments, list) or len(segments) != 1:
         raise ValueError("rollout manifest requires exactly one TRAINING segment")
@@ -420,9 +376,7 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
         )
     expected_slopes = list(SLOPE_GRADIENTS)
     if manifest.get("signed_slopes") != expected_slopes:
-        raise ValueError(
-            f"rollout manifest must contain exactly all {len(SLOPE_GRADIENTS)} slopes"
-        )
+        raise ValueError(f"rollout manifest must contain exactly all {len(SLOPE_GRADIENTS)} slopes")
     expected_samples = num_envs * num_steps
     if (
         segment.get("valid_samples") != expected_samples
@@ -440,9 +394,7 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
             strict=True,
         )
     }
-    expected_slope_samples = {
-        label: count * num_steps for label, count in expected_environments.items()
-    }
+    expected_slope_samples = {label: count * num_steps for label, count in expected_environments.items()}
     if segment.get("slope_environment_distribution") != expected_environments:
         raise ValueError("TRAINING rollout lacks the balanced slope allocation")
     if segment.get("slope_sample_distribution") != expected_slope_samples:
@@ -451,14 +403,9 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
     if (
         not isinstance(episodes, Mapping)
         or set(episodes) != set(SIGNED_SLOPE_LABELS)
-        or any(
-            isinstance(count, bool) or not isinstance(count, int) or count <= 0
-            for count in episodes.values()
-        )
+        or any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in episodes.values())
     ):
-        raise ValueError(
-            f"TRAINING rollout lacks episode evidence for all {len(SLOPE_GRADIENTS)} slopes"
-        )
+        raise ValueError(f"TRAINING rollout lacks episode evidence for all {len(SLOPE_GRADIENTS)} slopes")
 
     environment_stages = segment.get("per_environment_stage_distribution")
     sample_stages = segment.get("valid_sample_stage_distribution")
@@ -483,9 +430,7 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
 def feasibility_config_path() -> Path:
     """Resolve and publish the canonical feasibility-envelope path."""
 
-    resolved = Path(
-        os.environ.get("G1_RICKSHAW_FEASIBILITY_ENVELOPE", DEFAULT_FEASIBILITY_PATH)
-    ).resolve()
+    resolved = Path(os.environ.get("G1_RICKSHAW_FEASIBILITY_ENVELOPE", DEFAULT_FEASIBILITY_PATH)).resolve()
     os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(resolved)
     return resolved
 
@@ -511,9 +456,7 @@ def require_pinned_rsl_rl() -> str:
         from rsl_rl.models import MLPModel  # noqa: F401
         from rsl_rl.runners import OnPolicyRunner
     except (ImportError, ModuleNotFoundError) as exc:
-        raise RuntimeError(
-            "the installed rsl-rl-lib does not expose the pinned 5.0.1 actor/critic API"
-        ) from exc
+        raise RuntimeError("the installed rsl-rl-lib does not expose the pinned 5.0.1 actor/critic API") from exc
     load_parameters = inspect.signature(OnPolicyRunner.load).parameters
     if "load_cfg" not in load_parameters or "strict" not in load_parameters:
         raise RuntimeError("RSL-RL OnPolicyRunner.load does not match the pinned 5.0.1 ABI")
@@ -567,11 +510,7 @@ def load_stage_checkpoint(
     checkpoint = dict(load_checkpoint_with_validation(path, **kwargs))
     loaded_stage = checkpoint_stage(checkpoint, expected_stage)
     curriculum_iteration = checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
-    if (
-        isinstance(curriculum_iteration, bool)
-        or not isinstance(curriculum_iteration, int)
-        or curriculum_iteration < 0
-    ):
+    if isinstance(curriculum_iteration, bool) or not isinstance(curriculum_iteration, int) or curriculum_iteration < 0:
         raise ValueError("checkpoint is missing a non-negative curriculum iteration")
     if loaded_stage in {"s0_teacher", "s2_student_ppo"}:
         iteration = checkpoint.get("iter")
@@ -659,11 +598,7 @@ def extract_gaussian_actor_state(checkpoint: Mapping[str, Any]) -> dict[str, tor
     candidate = _select_prefix(state, "policy.")
     if not required_suffixes.issubset(candidate):
         raise ValueError("S0 checkpoint does not contain the fixed Gaussian actor")
-    return {
-        key: value
-        for key, value in candidate.items()
-        if key.startswith("network.") or key == "log_std"
-    }
+    return {key: value for key, value in candidate.items() if key.startswith("network.") or key == "log_std"}
 
 
 def extract_student_rsl_actor_state(checkpoint: Mapping[str, Any]) -> dict[str, torch.Tensor]:
@@ -698,12 +633,8 @@ def build_s2_bootstrap_checkpoint(
     training_parameters = dict(context_training_configuration["training_parameters"])
     if teacher_training_configuration["training_parameters"] != training_parameters:
         raise ValueError("S0 and S1 training parameters differ")
-    teacher_reward_overrides = reward_weight_overrides_from_configuration(
-        teacher_training_configuration
-    )
-    context_reward_overrides = reward_weight_overrides_from_configuration(
-        context_training_configuration
-    )
+    teacher_reward_overrides = reward_weight_overrides_from_configuration(teacher_training_configuration)
+    context_reward_overrides = reward_weight_overrides_from_configuration(context_training_configuration)
     if teacher_reward_overrides != context_reward_overrides:
         raise ValueError("S0 and S1 reward profiles differ")
     teacher_metadata = extract_checkpoint_metadata(teacher)
@@ -732,26 +663,26 @@ def build_s2_bootstrap_checkpoint(
         "critic_state_dict": dict(critic_state),
         "iter": 0,
         "infos": {"load_optimizer": False, "load_iteration": False},
-        TRAINING_CONFIGURATION_KEY: finalize_training_configuration({
-            "schema_version": TRAINING_CONFIGURATION_SCHEMA_VERSION,
-            "stage": "s2_bootstrap",
-            "task": GUIDE_TRAINING_TASK,
-            "num_envs": GUIDE_TRAINING_NUM_ENVS,
-            "seed": context_training_configuration["seed"],
-            "max_iterations": guide_max_iterations(
-                "s2_student_ppo", int(training_parameters["rollout_steps"])
-            ),
-            "guide_parameters": {
-                "source_stage": "s1_context_distillation",
-                "source_checkpoint": os.fspath(context_file),
-            },
-            "resolved_parameters": {
-                REWARD_WEIGHT_OVERRIDES_KEY: context_reward_overrides,
-            },
-            "actor_initialized_from_teacher": True,
-            "stage_coverage": context_training_configuration["stage_coverage"],
-            "training_parameters": training_parameters,
-        }),
+        TRAINING_CONFIGURATION_KEY: finalize_training_configuration(
+            {
+                "schema_version": TRAINING_CONFIGURATION_SCHEMA_VERSION,
+                "stage": "s2_bootstrap",
+                "task": GUIDE_TRAINING_TASK,
+                "num_envs": GUIDE_TRAINING_NUM_ENVS,
+                "seed": context_training_configuration["seed"],
+                "max_iterations": guide_max_iterations("s2_student_ppo", int(training_parameters["rollout_steps"])),
+                "guide_parameters": {
+                    "source_stage": "s1_context_distillation",
+                    "source_checkpoint": os.fspath(context_file),
+                },
+                "resolved_parameters": {
+                    REWARD_WEIGHT_OVERRIDES_KEY: context_reward_overrides,
+                },
+                "actor_initialized_from_teacher": True,
+                "stage_coverage": context_training_configuration["stage_coverage"],
+                "training_parameters": training_parameters,
+            }
+        ),
         CHECKPOINT_LINEAGE_KEY: {
             "teacher_checkpoint": os.fspath(teacher_file),
             "context_checkpoint": os.fspath(context_file),
@@ -791,9 +722,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "r", encoding="utf-8"
     ) as stream:
         reset = yaml.safe_load(stream)
-    with feasibility_config_path().open(
-        "r", encoding="utf-8"
-    ) as stream:
+    with feasibility_config_path().open("r", encoding="utf-8") as stream:
         feasibility = yaml.safe_load(stream)
     calibration = feasibility["calibration"]
     ranges = feasibility["ranges"]
@@ -862,9 +791,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "action": {
             "joint_order": list(FIXED_G1_JOINT_ORDER),
             "scale_rad_per_normalized_action": list(ACTION_SCALE),
-            "q_ref_by_gradient": [
-                {"gradient": pose["gradient"], "q_ref": pose["q_ref"]} for pose in reset["poses"]
-            ],
+            "q_ref_by_gradient": [{"gradient": pose["gradient"], "q_ref": pose["q_ref"]} for pose in reset["poses"]],
             "butterworth": {
                 "sample_rate_hz": 50.0,
                 "cutoff_hz": 4.0,
@@ -893,9 +820,7 @@ def write_deployment_manifest(export_dir: str | Path, checkpoint_path: str | Pat
         "manifest.json",
     }
     unexpected = sorted(
-        path.name
-        for path in export_path.iterdir()
-        if path.is_file() and path.name not in allowed_files
+        path.name for path in export_path.iterdir() if path.is_file() and path.name not in allowed_files
     )
     if unexpected:
         raise RuntimeError(f"deployment directory contains non-deployable artifacts: {unexpected}")
@@ -903,8 +828,7 @@ def write_deployment_manifest(export_dir: str | Path, checkpoint_path: str | Pat
     missing = sorted(name for name in required_files if not (export_path / name).is_file())
     if missing:
         raise RuntimeError(
-            "deployment directory is missing required controller/policy artifacts: "
-            + ", ".join(missing)
+            "deployment directory is missing required controller/policy artifacts: " + ", ".join(missing)
         )
     manifest = _deployment_contract(checkpoint)
     manifest["source_checkpoint"] = os.fspath(Path(checkpoint_path).resolve())
@@ -927,19 +851,8 @@ def _unwrap_env(env: Any) -> Any:
     return env
 
 
-def reset_runner_environment_after_domain_refresh(env: Any) -> Any:
-    """Full-reset all environments and return the resulting real observation."""
-
-    result = env.reset()
-    if isinstance(result, tuple):
-        if not result:
-            raise RuntimeError("environment reset returned an empty tuple")
-        return result[0]
-    return result
-
-
 def install_runner_hooks_from_environment() -> None:
-    """Install provenance and domain-refresh hooks into pinned RSL's runner."""
+    """Install provenance and training-state hooks into pinned RSL's runner."""
 
     if os.environ.get("G1_RICKSHAW_RUNNER_HOOK") != "1":
         return
@@ -966,9 +879,7 @@ def install_runner_hooks_from_environment() -> None:
                 expected_stage=stage,
             )
         except ValueError as exc:
-            raise RuntimeError(
-                "G1_RICKSHAW_TRAINING_CONFIGURATION is not a valid audited configuration"
-            ) from exc
+            raise RuntimeError("G1_RICKSHAW_TRAINING_CONFIGURATION is not a valid audited configuration") from exc
 
     original_init = OnPolicyRunner.__init__
     original_learn = OnPolicyRunner.learn
@@ -976,22 +887,26 @@ def install_runner_hooks_from_environment() -> None:
     original_export_jit = OnPolicyRunner.export_policy_to_jit
     original_export_onnx = OnPolicyRunner.export_policy_to_onnx
 
-    def refresh_domain_randomization(runner: Any, iteration: int) -> bool:
+    def set_stability_rewards(runner: Any, active: bool) -> None:
         env = _unwrap_env(runner.env)
-        callback = getattr(env, "set_domain_randomization_iteration", None)
-        if not callable(callback):
-            raise RuntimeError(
-                "environment does not expose set_domain_randomization_iteration"
-            )
-        if callback(int(iteration)) is not True:
-            return False
-        runner._g1_pending_reset_observation = reset_runner_environment_after_domain_refresh(
-            runner.env
-        )
-        return True
+        for name, default_weight in runner._g1_stability_reward_weights.items():
+            env.reward_manager.get_term_cfg(name).weight = default_weight if active else 0.0
+        runner._g1_stability_rewards_active = active
 
     def hooked_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
+        self._g1_stability_reward_curriculum = bool(
+            training_configuration and training_configuration["training_parameters"]["stability_reward_curriculum"]
+        )
+        if self._g1_stability_reward_curriculum:
+            env = _unwrap_env(self.env)
+            self._g1_stability_reward_weights = {
+                name: float(env.reward_manager.get_term_cfg(name).weight)
+                for name in ("fat2_prior_exp", "zmp_margin_barrier")
+            }
+            set_stability_rewards(self, False)
+        else:
+            self._g1_stability_rewards_active = True
         if training_configuration is not None:
             parameters = training_configuration["training_parameters"]
             configured_steps = parameters["rollout_steps"]
@@ -1003,15 +918,9 @@ def install_runner_hooks_from_environment() -> None:
                 )
             actual_latent_dim = int(self.alg.actor.latent_dim)
             if actual_latent_dim != parameters["latent_dim"]:
-                raise RuntimeError(
-                    "actor latent width differs from the published configuration"
-                )
-            if int(self.cfg["save_interval"]) != training_artifact_interval(
-                configured_steps
-            ):
-                raise RuntimeError(
-                    "checkpoint interval differs from the fixed transition cadence"
-                )
+                raise RuntimeError("actor latent width differs from the published configuration")
+            if int(self.cfg["save_interval"]) != training_artifact_interval(configured_steps):
+                raise RuntimeError("checkpoint interval differs from the fixed transition cadence")
         self._g1_training_iterations = 0
         if stage == "s2_student_ppo":
             raw_start = os.environ.get("G1_RICKSHAW_CURRICULUM_START_ITERATION")
@@ -1026,49 +935,29 @@ def install_runner_hooks_from_environment() -> None:
             self._g1_curriculum_start_iteration = 0
         self._g1_stage_policy_steps = 0
         self._g1_curriculum_iteration = self._g1_curriculum_start_iteration
-        self._g1_pending_domain_refresh_iteration = None
-        self._g1_pending_reset_observation = None
-        refresh_domain_randomization(self, self._g1_curriculum_iteration)
-        original_act = self.alg.act
-
-        def act_after_boundary_reset(observation, *act_args, **act_kwargs):
-            refresh_iteration = self._g1_pending_domain_refresh_iteration
-            if refresh_iteration is not None:
-                refresh_domain_randomization(self, refresh_iteration)
-                self._g1_pending_domain_refresh_iteration = None
-            pending = self._g1_pending_reset_observation
-            if pending is not None:
-                observation = pending
-                self._g1_pending_reset_observation = None
-            return original_act(observation, *act_args, **act_kwargs)
-
-        self.alg.act = act_after_boundary_reset
         original_update = self.alg.update
 
-        def update_with_domain_randomization(*update_args, **update_kwargs):
+        def update_training_state(*update_args, **update_kwargs):
             result = original_update(*update_args, **update_kwargs)
-            previous_iteration = self._g1_curriculum_iteration
             self._g1_training_iterations += 1
             self._g1_stage_policy_steps += int(self.cfg["num_steps_per_env"])
             self._g1_curriculum_iteration = self._g1_curriculum_start_iteration + (
                 self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
             )
             if (
-                self._g1_curriculum_iteration // TRAINING_ARTIFACT_INTERVAL
-                != previous_iteration // TRAINING_ARTIFACT_INTERVAL
+                self._g1_stability_reward_curriculum
+                and not self._g1_stability_rewards_active
+                and self.logger.lenbuffer
+                and sum(self.logger.lenbuffer) / len(self.logger.lenbuffer) > 500.0
             ):
-                self._g1_pending_domain_refresh_iteration = (
-                    self._g1_curriculum_iteration
-                )
+                set_stability_rewards(self, True)
+                print("[INFO] FAT2 and ZMP rewards enabled at mean episode length > 500")
             return result
 
-        self.alg.update = update_with_domain_randomization
+        self.alg.update = update_training_state
 
     def hooked_learn(self, *args, **kwargs):
-        if (
-            stage in {"s0_teacher", "s2_student_ppo"}
-            and training_configuration is not None
-        ):
+        if stage in {"s0_teacher", "s2_student_ppo"} and training_configuration is not None:
             call_args = list(args)
             call_kwargs = dict(kwargs)
             if call_args:
@@ -1102,9 +991,7 @@ def install_runner_hooks_from_environment() -> None:
 
     def hooked_save(self, path: str, infos: dict | None = None):
         if training_configuration is None:
-            raise RuntimeError(
-                "training checkpoint save requires G1_RICKSHAW_TRAINING_CONFIGURATION"
-            )
+            raise RuntimeError("training checkpoint save requires G1_RICKSHAW_TRAINING_CONFIGURATION")
         saved = self.alg.save()
         if not isinstance(saved, Mapping):
             raise RuntimeError("RSL algorithm save payload must be a mapping")
@@ -1114,6 +1001,7 @@ def install_runner_hooks_from_environment() -> None:
         checkpoint["schema_version"] = CHECKPOINT_SCHEMA_VERSION
         checkpoint[CHECKPOINT_STAGE_KEY] = stage
         checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY] = int(self._g1_curriculum_iteration)
+        checkpoint[CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY] = bool(self._g1_stability_rewards_active)
         checkpoint[TRAINING_CONFIGURATION_KEY] = dict(training_configuration)
         checkpoint[CHECKPOINT_LINEAGE_KEY] = dict(lineage)
         attach_checkpoint_metadata(checkpoint, metadata, replace=True)
@@ -1140,22 +1028,13 @@ def install_runner_hooks_from_environment() -> None:
             )
         if (
             training_configuration is not None
-            and loaded_training_configuration["training_parameters"]
-            != training_configuration["training_parameters"]
+            and loaded_training_configuration["training_parameters"] != training_configuration["training_parameters"]
         ):
-            raise RuntimeError(
-                "loaded checkpoint training parameters differ from the active run"
-            )
-        if (
-            training_configuration is not None
-            and reward_weight_overrides_from_configuration(
-                loaded_training_configuration
-            )
-            != reward_weight_overrides_from_configuration(training_configuration)
-        ):
-            raise RuntimeError(
-                "loaded checkpoint reward weights differ from the active run"
-            )
+            raise RuntimeError("loaded checkpoint training parameters differ from the active run")
+        if training_configuration is not None and reward_weight_overrides_from_configuration(
+            loaded_training_configuration
+        ) != reward_weight_overrides_from_configuration(training_configuration):
+            raise RuntimeError("loaded checkpoint reward weights differ from the active run")
         if loaded_stage in {"s2_bootstrap", "s2_student_ppo"}:
             validate_student_checkpoint_architecture(
                 checkpoint,
@@ -1166,13 +1045,9 @@ def install_runner_hooks_from_environment() -> None:
                 checkpoint,
                 loaded_training_configuration,
             )
-        allowed_load_stages = (
-            {"s0_teacher"} if stage == "s0_teacher" else {"s2_bootstrap", "s2_student_ppo"}
-        )
+        allowed_load_stages = {"s0_teacher"} if stage == "s0_teacher" else {"s2_bootstrap", "s2_student_ppo"}
         if loaded_stage not in allowed_load_stages:
-            raise RuntimeError(
-                f"runner stage {stage!r} cannot load checkpoint stage {loaded_stage!r}"
-            )
+            raise RuntimeError(f"runner stage {stage!r} cannot load checkpoint stage {loaded_stage!r}")
         if loaded_stage == "s2_bootstrap":
             load_cfg = {"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": False}
             strict = True
@@ -1184,29 +1059,20 @@ def install_runner_hooks_from_environment() -> None:
         self._g1_curriculum_iteration = curriculum_iteration
         if loaded_stage in {"s0_teacher", "s2_student_ppo"}:
             saved_iteration = checkpoint.get("iter")
-            if (
-                isinstance(saved_iteration, bool)
-                or not isinstance(saved_iteration, int)
-                or saved_iteration < 0
-            ):
+            if isinstance(saved_iteration, bool) or not isinstance(saved_iteration, int) or saved_iteration < 0:
                 raise RuntimeError("loaded PPO checkpoint has no valid iteration")
             self._g1_training_iterations = saved_iteration + 1
-            self._g1_stage_policy_steps = (
-                self._g1_training_iterations * int(self.cfg["num_steps_per_env"])
-            )
-            completed_curriculum_iterations = (
-                self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
-            )
-            self._g1_curriculum_start_iteration = (
-                curriculum_iteration - completed_curriculum_iterations
-            )
+            self._g1_stage_policy_steps = self._g1_training_iterations * int(self.cfg["num_steps_per_env"])
+            completed_curriculum_iterations = self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
+            self._g1_curriculum_start_iteration = curriculum_iteration - completed_curriculum_iterations
             if self._g1_curriculum_start_iteration < 0:
-                raise RuntimeError(
-                    "loaded checkpoint curriculum precedes its completed sample budget"
-                )
+                raise RuntimeError("loaded checkpoint curriculum precedes its completed sample budget")
             self.current_learning_iteration = self._g1_training_iterations
-        self._g1_pending_reset_observation = None
-        self._g1_pending_domain_refresh_iteration = self._g1_curriculum_iteration
+        if self._g1_stability_reward_curriculum:
+            set_stability_rewards(
+                self,
+                bool(checkpoint.get(CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY, False)),
+            )
         return result
 
     def hooked_export_jit(self, path: str, filename: str = "policy.pt"):
@@ -1255,6 +1121,7 @@ __all__ = [
     "SUPPORTED_FAT2_WEIGHTS",
     "SUPPORTED_ROLLOUT_STEPS",
     "CHECKPOINT_CURRICULUM_ITERATION_KEY",
+    "CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY",
     "CHECKPOINT_LINEAGE_KEY",
     "CHECKPOINT_SCHEMA_VERSION",
     "CHECKPOINT_STAGE_KEY",
@@ -1276,7 +1143,6 @@ __all__ = [
     "load_stage_checkpoint",
     "normalize_rsl_rl_runner_configuration",
     "require_pinned_rsl_rl",
-    "reset_runner_environment_after_domain_refresh",
     "rollout_scaled_iterations",
     "s0_remaining_learning_iterations",
     "s2_remaining_learning_iterations",

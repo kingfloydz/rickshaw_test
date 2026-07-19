@@ -1,14 +1,12 @@
-"""Pure regression tests for domain randomization, physics, and safety contracts."""
+"""CPU regressions for startup randomization, commands, and safety."""
 
 from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
 
-import pytest
 import torch
 
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actuation import (
     actuator_effort_limits,
 )
@@ -17,9 +15,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     DOMAIN_PARAMETER_NAMES,
     DomainRandomizationCfg,
     SpeedCommandSamplingCfg,
-    _write_actuator_parameters,
     advance_speed_command_resampling,
-    domain_epoch_seed,
     initialize_domain_randomization,
     sample_domain_parameters,
 )
@@ -35,27 +31,20 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations impo
 )
 
 
-def test_startup_event_signature_accepts_event_manager_env_ids() -> None:
-    parameters = tuple(inspect.signature(initialize_domain_randomization).parameters)
-    assert parameters[:3] == ("env", "env_ids", "cfg")
-
-
 def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
     ranges = {
-        "payload.mass": (0.0, 1.0),
+        "torso.mass_delta": (-1.0, 3.0),
+        "payload.mass": (-3.0, 3.0),
         "payload.com.x": (0.3, 0.9),
         "payload.com.y": (-0.15, 0.15),
         "payload.com.z": (0.45, 0.95),
         "rolling_resistance.c_rr": (0.01, 0.03),
-        "terrain.friction": (0.6, 1.2),
+        "terrain.friction": (0.6, 1.1),
         "wheel.left_damping": (0.015, 0.025),
         "wheel.right_damping": (0.015, 0.025),
-        "motor.strength": (0.9, 1.1),
-        "control.delay": (0.0, 0.04),
-        "observation.delay": (0.0, 0.04),
-        "joint.model_error": (-0.05, 0.05),
     }
     nominal = {
+        "torso.mass_delta": 0.0,
         "payload.mass": 0.0,
         "payload.com.x": 0.6,
         "payload.com.y": 0.0,
@@ -64,172 +53,41 @@ def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
         "terrain.friction": 1.0,
         "wheel.left_damping": 0.02,
         "wheel.right_damping": 0.02,
-        "motor.strength": 1.0,
-        "control.delay": 0.0,
-        "observation.delay": 0.0,
-        "joint.model_error": 0.0,
     }
     return DomainRandomizationCfg(
-        enabled=enabled,
-        ranges=ranges,
-        nominal=nominal,
-        calibration={},
+        enabled=enabled, ranges=ranges, nominal=nominal, calibration={}
     )
 
 
-def test_domain_schema_is_11_scalars_plus_per_joint_error() -> None:
+def test_startup_event_signature_accepts_event_manager_env_ids() -> None:
+    parameters = tuple(inspect.signature(initialize_domain_randomization).parameters)
+    assert parameters[:3] == ("env", "env_ids", "cfg")
+
+
+def test_domain_schema_contains_only_startup_randomized_physics() -> None:
     cfg = _domain_cfg()
-    cfg.validate()
-    assert set(cfg.ranges) == set(DOMAIN_PARAMETER_NAMES)
-    assert not any(name.startswith("d6.") for name in cfg.ranges)
-    generator = torch.Generator().manual_seed(domain_epoch_seed(7, 3))
-    values, joint_error = sample_domain_parameters(cfg, 8, generator=generator)
-    assert len(values) == 11
-    assert joint_error.shape == (8, 29)
-    assert torch.any(joint_error[:, 0] != joint_error[:, 1])
+    values = sample_domain_parameters(
+        cfg, 8192, generator=torch.Generator().manual_seed(7)
+    )
+
+    assert set(values) == set(DOMAIN_PARAMETER_NAMES)
+    assert len(values) == 9
+    assert torch.min(values["terrain.friction"]) >= 0.6
+    assert torch.max(values["terrain.friction"]) <= 1.1
+    assert torch.min(values["torso.mass_delta"]) >= -1.0
+    assert torch.max(values["torso.mass_delta"]) <= 3.0
+    assert torch.min(values["payload.mass"]) >= -3.0
+    assert torch.max(values["payload.mass"]) <= 3.0
 
 
-def test_disabled_domain_uses_nominal_values_and_never_changes_by_epoch() -> None:
+def test_disabled_domain_uses_nominal_values() -> None:
     cfg = _domain_cfg(enabled=False)
-    first, first_error = sample_domain_parameters(cfg, 3)
-    second, second_error = sample_domain_parameters(cfg, 3)
+    first = sample_domain_parameters(cfg, 3)
+    second = sample_domain_parameters(cfg, 3)
+
     for name in first:
         torch.testing.assert_close(first[name], second[name])
         assert torch.all(first[name] == cfg.nominal[name])
-    assert torch.all(first_error == 0.0)
-    torch.testing.assert_close(first_error, second_error)
-
-
-def test_domain_scale_keeps_nominal_center_and_shrinks_full_ranges() -> None:
-    cfg = _domain_cfg()
-    nominal, nominal_error = sample_domain_parameters(cfg, 32, scale=0.0)
-    for name, values in nominal.items():
-        torch.testing.assert_close(values, torch.full_like(values, cfg.nominal[name]))
-    assert torch.count_nonzero(nominal_error) == 0
-
-    narrow, _ = sample_domain_parameters(
-        cfg,
-        32,
-        generator=torch.Generator().manual_seed(11),
-        scale=0.5,
-    )
-    for name, values in narrow.items():
-        low, high = cfg.ranges[name]
-        nominal_value = cfg.nominal[name]
-        assert torch.all(values >= nominal_value + 0.5 * (low - nominal_value))
-        assert torch.all(values <= nominal_value + 0.5 * (high - nominal_value))
-
-
-def test_domain_epoch_seed_supports_resume_without_sampling_prior_epochs() -> None:
-    cfg = _domain_cfg()
-    direct = torch.Generator().manual_seed(domain_epoch_seed(123, 4))
-    resumed = torch.Generator().manual_seed(domain_epoch_seed(123, 4))
-    direct_values, direct_error = sample_domain_parameters(cfg, 5, generator=direct)
-    resumed_values, resumed_error = sample_domain_parameters(cfg, 5, generator=resumed)
-    for name in direct_values:
-        torch.testing.assert_close(direct_values[name], resumed_values[name])
-    torch.testing.assert_close(direct_error, resumed_error)
-
-
-def test_domain_iteration_refreshes_once_per_epoch_and_supports_direct_resume(
-    monkeypatch,
-) -> None:
-    cfg = _domain_cfg()
-    calls: list[tuple[int, float]] = []
-
-    def apply_epoch(env, _cfg, epoch: int, *, scale: float) -> None:
-        calls.append((epoch, scale))
-        env.domain_randomization_epoch = epoch
-
-    monkeypatch.setattr(events_module, "_apply_domain_epoch", apply_epoch)
-    env = SimpleNamespace(
-        num_envs=4,
-        device="cpu",
-        step_dt=0.02,
-        slope=torch.zeros(4),
-        cfg=SimpleNamespace(seed=17),
-        scene=SimpleNamespace(
-            terrain=SimpleNamespace(terrain_types=torch.arange(4, dtype=torch.long))
-        ),
-    )
-    initialize_domain_randomization(env, None, cfg)
-
-    assert calls == [(0, 0.0)]
-    assert env.set_domain_randomization_iteration(1999) is False
-    assert calls == [(0, 0.0)]
-    assert env.set_domain_randomization_iteration(2000) is True
-    assert calls == [(0, 0.0), (10, 0.5)]
-    assert env.set_domain_randomization_iteration(2000) is False
-    assert env.set_domain_randomization_iteration(3999) is True
-    assert calls == [(0, 0.0), (10, 0.5), (19, 0.5)]
-    assert env.set_domain_randomization_iteration(4000) is True
-    assert calls == [(0, 0.0), (10, 0.5), (19, 0.5), (20, 1.0)]
-
-
-def test_nominal_actuator_domain_preserves_configured_gains_and_binds_limits() -> None:
-    class FakeRobot:
-        def __init__(self) -> None:
-            self.num_joints = 2
-            self.data = SimpleNamespace(
-                joint_stiffness=torch.tensor([[0.0, 20.0], [0.0, 20.0]]),
-                joint_damping=torch.tensor([[0.0, 2.0], [0.0, 2.0]]),
-                joint_effort_limits=torch.tensor([[1.0e9, 40.0], [1.0e9, 40.0]]),
-            )
-            self.actuators = {
-                "explicit": SimpleNamespace(
-                    joint_indices=torch.tensor([0]),
-                    stiffness=torch.full((2, 1), 100.0),
-                    damping=torch.full((2, 1), 10.0),
-                    effort_limit=torch.full((2, 1), 50.0),
-                    _saturation_effort=torch.full((2, 1), 80.0),
-                ),
-                "implicit": SimpleNamespace(
-                    joint_indices=torch.tensor([1]),
-                    stiffness=torch.full((2, 1), 20.0),
-                    damping=torch.full((2, 1), 2.0),
-                    effort_limit=torch.full((2, 1), 40.0),
-                ),
-            }
-
-        def _write(self, name, value, joint_ids, env_ids) -> None:
-            getattr(self.data, name)[env_ids[:, None], joint_ids] = value
-
-        def write_joint_stiffness_to_sim(self, value, *, joint_ids, env_ids) -> None:
-            self._write("joint_stiffness", value, joint_ids, env_ids)
-
-        def write_joint_damping_to_sim(self, value, *, joint_ids, env_ids) -> None:
-            self._write("joint_damping", value, joint_ids, env_ids)
-
-        def write_joint_effort_limit_to_sim(self, value, *, joint_ids, env_ids) -> None:
-            self._write("joint_effort_limits", value, joint_ids, env_ids)
-
-    robot = FakeRobot()
-    env = SimpleNamespace(
-        scene={"robot": robot},
-        policy_joint_ids=[0, 1],
-        num_envs=2,
-        device="cpu",
-    )
-    env_ids = torch.tensor([0, 1], dtype=torch.long)
-    _write_actuator_parameters(
-        env,
-        env_ids,
-        torch.ones(2),
-        torch.zeros((2, 2)),
-    )
-
-    assert torch.all(robot.data.joint_stiffness[:, 0] == 0.0)
-    assert torch.all(robot.data.joint_stiffness[:, 1] == 20.0)
-    assert torch.all(robot.actuators["explicit"].stiffness[:, 0] == 100.0)
-    assert torch.all(robot.actuators["explicit"]._saturation_effort[:, 0] == 80.0)
-    assert torch.allclose(
-        robot.data.joint_effort_limits,
-        torch.tensor([[50.0, 40.0], [50.0, 40.0]]),
-    )
-    assert torch.allclose(
-        actuator_effort_limits(robot, [0, 1]),
-        robot.data.joint_effort_limits,
-    )
 
 
 def test_actuator_effort_limits_never_uses_permissive_physx_limit() -> None:

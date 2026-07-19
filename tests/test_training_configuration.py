@@ -49,7 +49,7 @@ def test_training_configuration_has_one_canonical_validator() -> None:
     assert validate_launcher_training_configuration(configuration) == normalized
 
 
-def test_s0_configuration_binds_the_domain_randomization_schedule() -> None:
+def test_s0_configuration_binds_startup_randomization() -> None:
     configuration = _configuration()
     configuration["guide_parameters"] = dict(GUIDE_TRAINING_PARAMETERS["s0_teacher"])
 
@@ -58,12 +58,9 @@ def test_s0_configuration_binds_the_domain_randomization_schedule() -> None:
     )
 
     assert validated["guide_parameters"] == {
-        "domain_randomization_refresh_interval": 200,
-        "domain_randomization_max_scale": 0.6,
-        "domain_randomization_ramp_refreshes": 30,
-        "domain_randomization_friction_scale": 0.5,
-        "delay_randomization_max_probability": 0.25,
-        "delay_randomization_ramp_refreshes": 60,
+        "domain_randomization": "startup_fixed",
+        "terrain_slopes": "startup_balanced_fixed",
+        "observation_noise": "unitree_g1_uniform",
     }
     configuration["guide_parameters"] = {}
     with pytest.raises(ValueError, match="guide parameters differ"):

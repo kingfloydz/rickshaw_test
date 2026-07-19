@@ -44,9 +44,7 @@ class TestRickshawRLModels(unittest.TestCase):
     def test_actor_and_critic_architectures(self) -> None:
         actor = GaussianActor()
         actor_shapes = [
-            (layer.in_features, layer.out_features)
-            for layer in actor.network
-            if isinstance(layer, nn.Linear)
+            (layer.in_features, layer.out_features) for layer in actor.network if isinstance(layer, nn.Linear)
         ]
         self.assertEqual(
             actor_shapes,
@@ -61,20 +59,16 @@ class TestRickshawRLModels(unittest.TestCase):
         actor.log_std.data.fill_(-10.0)
         self.assertGreaterEqual(float(actor.std.min().detach()), 0.049999)
         distribution = actor.distribution(torch.zeros(2, 96), torch.zeros(2, 16))
-        self.assertLessEqual(
-            float(distribution.base_dist.scale[:, :12].max().detach()), 0.050001
-        )
+        self.assertLessEqual(float(distribution.base_dist.scale[:, :12].max().detach()), 0.050001)
         self.assertGreaterEqual(float(distribution.base_dist.scale.min().detach()), 0.049999)
 
         critic = PrivilegedCritic()
         critic_shapes = [
-            (layer.in_features, layer.out_features)
-            for layer in critic.network
-            if isinstance(layer, nn.Linear)
+            (layer.in_features, layer.out_features) for layer in critic.network if isinstance(layer, nn.Linear)
         ]
-        self.assertEqual(critic_shapes, [(160, 256), (256, 128), (128, 1)])
+        self.assertEqual(critic_shapes, [(130, 256), (256, 128), (128, 1)])
         self.assertEqual(
-            critic(torch.randn(3, 96), torch.randn(3, 64)).shape,
+            critic(torch.randn(3, 96), torch.randn(3, 34)).shape,
             (3, 1),
         )
 
@@ -86,9 +80,7 @@ class TestRickshawRLModels(unittest.TestCase):
         static = torch.randn(batch, STATIC_PRIVILEGE_DIM)
 
         teacher = G1RickshawTeacherActor()
-        teacher_distribution, z_star = teacher.forward_with_context(
-            current, history, dynamic, static
-        )
+        teacher_distribution, z_star = teacher.forward_with_context(current, history, dynamic, static)
         student = G1RickshawStudentActor()
         student_distribution, z_hat = student.forward_with_context(current, history)
 
@@ -96,20 +88,14 @@ class TestRickshawRLModels(unittest.TestCase):
         self.assertEqual(student_distribution.mean.shape, (batch, 29))
         self.assertEqual(z_star.shape, (batch, 16))
         self.assertEqual(z_hat.shape, (batch, 16))
-        self.assertEqual(
-            set(teacher.actor.state_dict()), set(student.actor.state_dict())
-        )
+        self.assertEqual(set(teacher.actor.state_dict()), set(student.actor.state_dict()))
 
         for latent_dim in (8, 16, 24, 32):
             with self.subTest(latent_dim=latent_dim):
                 teacher = G1RickshawTeacherActor(latent_dim)
                 student = G1RickshawStudentActor(latent_dim)
-                teacher_distribution, z_star = teacher.forward_with_context(
-                    current, history, dynamic, static
-                )
-                student_distribution, z_hat = student.forward_with_context(
-                    current, history
-                )
+                teacher_distribution, z_star = teacher.forward_with_context(current, history, dynamic, static)
+                student_distribution, z_hat = student.forward_with_context(current, history)
                 self.assertEqual(z_star.shape, (batch, latent_dim))
                 self.assertEqual(z_hat.shape, (batch, latent_dim))
                 self.assertEqual(
@@ -139,9 +125,7 @@ class TestRickshawRLModels(unittest.TestCase):
         )
         student_distribution, z_hat = student.forward_with_context(current, history)
 
-        loss, metrics = StudentDistillationLoss()(
-            teacher_distribution, student_distribution, z_hat, z_star
-        )
+        loss, metrics = StudentDistillationLoss()(teacher_distribution, student_distribution, z_hat, z_star)
         self.assertEqual(set(metrics), {"loss", "action_kl", "latent_smooth_l1"})
         loss.backward()
         self.assertIsNotNone(student.context_encoder.input.weight.grad)

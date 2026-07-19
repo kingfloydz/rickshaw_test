@@ -199,7 +199,7 @@ def test_reward_worker_combines_physical_isolation_with_logical_device(
     calibration.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
     checkpoint = tmp_path / "teacher.pt"
     checkpoint.write_bytes(b"checkpoint")
-    record = pipeline.multi_gpu.CheckpointRecord(checkpoint, 6000, True)
+    record = pipeline.multi_gpu.CheckpointRecord(checkpoint, 4000, True)
     checkpoint_calls = 0
 
     def find_checkpoint(*_args, **_kwargs):

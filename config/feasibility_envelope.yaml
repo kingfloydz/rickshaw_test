@@ -35,18 +35,15 @@ joint_order:
   - right_wrist_pitch_joint
   - right_wrist_yaw_joint
 ranges:
-  payload.mass: {min: 0.0, max: 1.0}
+  torso.mass_delta: {min: -1.0, max: 3.0}
+  payload.mass: {min: -3.0, max: 3.0}
   payload.com.x: {min: 0.3, max: 0.9}
   payload.com.y: {min: -0.15, max: 0.15}
   payload.com.z: {min: 0.45, max: 0.95}
   rolling_resistance.c_rr: {min: 0.01, max: 0.03}
-  terrain.friction: {min: 0.6, max: 1.2}
+  terrain.friction: {min: 0.6, max: 1.1}
   wheel.left_damping: {min: 0.015, max: 0.025}
   wheel.right_damping: {min: 0.015, max: 0.025}
-  motor.strength: {min: 0.9, max: 1.1}
-  joint.model_error: {min: -0.05, max: 0.05}
-  control.delay: {min: 0.0, max: 0.04}
-  observation.delay: {min: 0.0, max: 0.04}
   command.acceleration_limit: {min: 0.12, max: 0.12}
   command.jerk_limit: {min: 0.6, max: 0.6}
 calibration:

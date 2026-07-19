@@ -1,11 +1,11 @@
 schema_version: 1
 task: Isaac-G1-Rickshaw-Directional-Slope-v0
 fixed:
-  num_envs: 4096
+  num_envs: 8192
   rollout_steps: 48
   latent_dim: 16
   fat2_weight: 0.1
-  max_iterations: 6000
+  max_iterations: 4000
 factors:
   zmp:
     term: zmp_margin_barrier

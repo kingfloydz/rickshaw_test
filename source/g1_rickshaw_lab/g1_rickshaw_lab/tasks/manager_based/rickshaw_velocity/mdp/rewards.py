@@ -46,6 +46,7 @@ FEET_LANDING_TARGET_AIR_TIME_S = 0.30
 FEET_LANDING_SIGMA_S = 0.12
 FEET_MAX_AIR_TIME_S = 0.50
 FEET_AIR_TIME_EXCESS_SCALE_S = 0.20
+FEET_LANDING_TRACKING_ERROR_MPS = 0.30
 FEET_SLIDE_NORMALIZER_MPS = 1.0
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
@@ -226,7 +227,7 @@ def feet_landing_value(
 
     contact = first_contact.to(last_air_time.dtype)
     single_landing = torch.sum(first_contact, dim=-1) == 1
-    tracking = (v_robot_s > 0.1) & (torch.abs(v_ref - v_robot_s) < 0.5)
+    tracking = (v_robot_s > 0.1) & (torch.abs(v_ref - v_robot_s) < FEET_LANDING_TRACKING_ERROR_MPS)
     landing_kernel = torch.exp(
         -torch.square(
             (last_air_time - FEET_LANDING_TARGET_AIR_TIME_S) / FEET_LANDING_SIGMA_S

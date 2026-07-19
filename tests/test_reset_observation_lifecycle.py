@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import torch
 
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import SpeedReferenceCfg
+from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import (
+    SpeedReferenceCfg,
+)
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     CommandState,
     SpeedCommandSamplingCfg,
@@ -18,7 +20,6 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations impo
     HISTORY_LENGTH,
     TEACHER_DYNAMIC_DIM,
     ObservationHistoryState,
-    ObservationDelayState,
 )
 
 
@@ -56,9 +57,7 @@ def _fake_env() -> SimpleNamespace:
         data=SimpleNamespace(
             root_ang_vel_b=torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
             root_lin_vel_w=torch.tensor([[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]]),
-            projected_gravity_b=torch.tensor(
-                [[0.0, 0.0, -1.0], [0.1, 0.0, -0.995]]
-            ),
+            projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0], [0.1, 0.0, -0.995]]),
             joint_pos=torch.stack(
                 (torch.zeros(joint_count), torch.linspace(-0.2, 0.2, joint_count))
             ),
@@ -70,6 +69,7 @@ def _fake_env() -> SimpleNamespace:
     return SimpleNamespace(
         num_envs=num_envs,
         device="cpu",
+        cfg=SimpleNamespace(observation_noise_enabled=False),
         step_dt=0.02,
         scene={
             "robot": robot,
@@ -104,8 +104,6 @@ def _fake_env() -> SimpleNamespace:
         ),
         observation_history_state=history,
         teacher_dynamic_history_state=dynamic_history,
-        observation_delay_state=ObservationDelayState.zeros(num_envs, 2),
-        observation_delay_steps=torch.tensor([2, 2], dtype=torch.long),
         all_env_ids=torch.arange(num_envs),
         all_env_mask=torch.ones(num_envs, dtype=torch.bool),
     )
@@ -127,7 +125,9 @@ def test_explicit_reset_bootstrap_matches_automatic_reset_frame() -> None:
         dim=-1,
     )[0].clone()
     retained_history = explicit_env.observation_history_state.history[0].clone()
-    retained_dynamic_history = explicit_env.teacher_dynamic_history_state.history[0].clone()
+    retained_dynamic_history = explicit_env.teacher_dynamic_history_state.history[
+        0
+    ].clone()
     bootstrap_reset_observation(explicit_env, reset_ids, cfg)
     advance_policy_interval(automatic_env, None, cfg)
 

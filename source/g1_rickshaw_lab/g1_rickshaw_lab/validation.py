@@ -23,6 +23,7 @@ VALIDATION_SIGNED_SLOPES = SLOPE_GRADIENTS
 MAX_WRENCH_RELATIVE_TOLERANCE = 0.35
 WRENCH_ABSOLUTE_FLOOR_N = 12.0
 GUIDE_SCAN_RANGE_ORDER = (
+    "torso.mass_delta",
     "payload.mass",
     "payload.com.x",
     "payload.com.y",
@@ -31,31 +32,15 @@ GUIDE_SCAN_RANGE_ORDER = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "motor.strength",
-    "joint.model_error",
-    "control.delay",
-    "observation.delay",
 )
 FEASIBILITY_MEASUREMENT_SOURCES = MappingProxyType(
     {
-        "wheel_normal_force": (
-            "PhysX wheel ContactSensor net force projected onto the slope normal"
-        ),
-        "foot_friction_cone": (
-            "PhysX foot ContactSensor net force resolved in the slope frame"
-        ),
-        "zmp_margin": (
-            "whole-robot CoM dynamics, cart momentum-balance hand force, and measured foot support polygon"
-        ),
-        "arm_leg_torque_ratio": (
-            "robot.data.applied_torque / current actuator.effort_limit"
-        ),
-        "waist_torque_ratio": (
-            "robot.data.applied_torque / current actuator.effort_limit"
-        ),
-        "d6_force_torque_ratio": (
-            "retained-hitch incoming-joint constraint proxy / configured D6 limit"
-        ),
+        "wheel_normal_force": ("PhysX wheel ContactSensor net force projected onto the slope normal"),
+        "foot_friction_cone": ("PhysX foot ContactSensor net force resolved in the slope frame"),
+        "zmp_margin": ("whole-robot CoM dynamics, cart momentum-balance hand force, and measured foot support polygon"),
+        "arm_leg_torque_ratio": ("robot.data.applied_torque / current actuator.effort_limit"),
+        "waist_torque_ratio": ("robot.data.applied_torque / current actuator.effort_limit"),
+        "d6_force_torque_ratio": ("retained-hitch incoming-joint constraint proxy / configured D6 limit"),
         "joint_limit_margin": "q_ref / PhysX hard joint position limits",
     }
 )
@@ -142,13 +127,9 @@ class SafetyThresholdAuthority:
             "path": str(self.source_path),
             "authority_id": self.authority_id,
             "method": self.method,
-            "source_files": {
-                name: {"path": str(source.path)}
-                for name, source in self.sources.items()
-            },
+            "source_files": {name: {"path": str(source.path)} for name, source in self.sources.items()},
             "thresholds": {
-                name: list(value) if isinstance(value, tuple) else value
-                for name, value in self.thresholds.items()
+                name: list(value) if isinstance(value, tuple) else value for name, value in self.thresholds.items()
             },
             "threshold_provenance": {
                 name: {
@@ -182,9 +163,7 @@ def _load_unique_yaml_mapping(path: str | Path) -> Mapping[str, Any]:
             result[key] = loader.construct_object(value_node, deep=deep)
         return result
 
-    UniqueKeySafeLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping
-    )
+    UniqueKeySafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
     try:
         with file_path.open("r", encoding="utf-8") as stream:
             value = yaml.load(stream, Loader=UniqueKeySafeLoader)
@@ -195,29 +174,20 @@ def _load_unique_yaml_mapping(path: str | Path) -> Mapping[str, Any]:
     return value
 
 
-def _expect_exact_authority_keys(
-    value: Mapping[str, Any], expected: set[str], label: str
-) -> None:
+def _expect_exact_authority_keys(value: Mapping[str, Any], expected: set[str], label: str) -> None:
     actual = set(value)
     if actual != expected:
-        raise ValueError(
-            f"{label} fields must be exactly {sorted(expected)}, got {sorted(actual)}"
-        )
+        raise ValueError(f"{label} fields must be exactly {sorted(expected)}, got {sorted(actual)}")
 
 
-def _authority_threshold_value(
-    name: str, value: Any
-) -> float | tuple[float, ...]:
+def _authority_threshold_value(name: str, value: Any) -> float | tuple[float, ...]:
     vector_length = _SAFETY_VECTOR_LENGTHS.get(name)
     if vector_length is not None:
         if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
             raise ValueError(f"thresholds.{name}.value must be a length-{vector_length} sequence")
         if len(value) != vector_length:
             raise ValueError(f"thresholds.{name}.value must have length {vector_length}")
-        if any(
-            isinstance(component, bool) or not isinstance(component, (int, float))
-            for component in value
-        ):
+        if any(isinstance(component, bool) or not isinstance(component, (int, float)) for component in value):
             raise ValueError(f"thresholds.{name}.value must contain explicit numbers")
         parsed = tuple(float(component) for component in value)
         if not all(math.isfinite(component) for component in parsed):
@@ -261,10 +231,7 @@ def load_safety_threshold_authority(
         or not isinstance(mapping["schema_version"], int)
         or mapping["schema_version"] != SAFETY_AUTHORITY_SCHEMA_VERSION
     ):
-        raise ValueError(
-            "safety authority schema_version must be "
-            f"{SAFETY_AUTHORITY_SCHEMA_VERSION}"
-        )
+        raise ValueError(f"safety authority schema_version must be {SAFETY_AUTHORITY_SCHEMA_VERSION}")
     authority_id = mapping["authority_id"]
     if not isinstance(authority_id, str) or not authority_id.strip():
         raise ValueError("safety authority authority_id must be a non-empty string")
@@ -312,9 +279,7 @@ def load_safety_threshold_authority(
     threshold_records = mapping["thresholds"]
     if not isinstance(threshold_records, Mapping):
         raise ValueError("safety authority thresholds must be a mapping")
-    _expect_exact_authority_keys(
-        threshold_records, set(SAFETY_THRESHOLD_FIELDS), "safety authority thresholds"
-    )
+    _expect_exact_authority_keys(threshold_records, set(SAFETY_THRESHOLD_FIELDS), "safety authority thresholds")
     thresholds: dict[str, float | tuple[float, ...]] = {}
     threshold_sources: dict[str, tuple[str, ...]] = {}
     rationales: dict[str, str] = {}
@@ -322,13 +287,9 @@ def load_safety_threshold_authority(
         record = threshold_records[name]
         if not isinstance(record, Mapping):
             raise ValueError(f"thresholds.{name} must be a mapping")
-        _expect_exact_authority_keys(
-            record, {"value", "sources", "rationale"}, f"thresholds.{name}"
-        )
+        _expect_exact_authority_keys(record, {"value", "sources", "rationale"}, f"thresholds.{name}")
         record_sources = record["sources"]
-        if isinstance(record_sources, (str, bytes)) or not isinstance(
-            record_sources, Sequence
-        ):
+        if isinstance(record_sources, (str, bytes)) or not isinstance(record_sources, Sequence):
             raise ValueError(f"thresholds.{name}.sources must be a non-empty string list")
         parsed_sources = tuple(record_sources)
         if (
@@ -337,9 +298,7 @@ def load_safety_threshold_authority(
             or len(set(parsed_sources)) != len(parsed_sources)
             or any(source not in sources for source in parsed_sources)
         ):
-            raise ValueError(
-                f"thresholds.{name}.sources must contain unique source_files names"
-            )
+            raise ValueError(f"thresholds.{name}.sources must contain unique source_files names")
         rationale = record["rationale"]
         if not isinstance(rationale, str) or not rationale.strip():
             raise ValueError(f"thresholds.{name}.rationale must be a non-empty string")
@@ -395,10 +354,7 @@ def assert_safety_thresholds_match(
             not math.isclose(left, right, rel_tol=0.0, abs_tol=1.0e-12)
             for left, right in zip(actual_values, expected_values, strict=True)
         ):
-            raise ValueError(
-                f"{label}.{name}={actual!r} does not match independent authority "
-                f"value {expected!r}"
-            )
+            raise ValueError(f"{label}.{name}={actual!r} does not match independent authority value {expected!r}")
 
 
 def utc_timestamp() -> str:
@@ -537,8 +493,7 @@ def derive_feasibility_envelope_mapping(
         for name in SAFETY_THRESHOLD_FIELDS:
             if name not in mutable_calibration:
                 raise ValueError(
-                    "canonical candidate calibration must use dotted safety keys before "
-                    f"authoring; missing {name!r}"
+                    f"canonical candidate calibration must use dotted safety keys before authoring; missing {name!r}"
                 )
             value = _authority_threshold_value(name, safety_thresholds[name])
             mutable_calibration[name] = list(value) if isinstance(value, tuple) else value
@@ -617,19 +572,11 @@ def validation_runtime_sources(
     )
     candidates = list(required_files)
     candidates.extend(sorted((package / "assets").glob("*.py")))
-    candidates.extend(
-        sorted(
-            (package / "tasks" / "manager_based" / "rickshaw_velocity").rglob("*.py")
-        )
-    )
+    candidates.extend(sorted((package / "tasks" / "manager_based" / "rickshaw_velocity").rglob("*.py")))
     missing = [path for path in required_files if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing validation runtime sources: {missing}")
-    result = {
-        path.relative_to(root).as_posix(): path
-        for path in candidates
-        if path.is_file()
-    }
+    result = {path.relative_to(root).as_posix(): path for path in candidates if path.is_file()}
     return result
 
 
@@ -708,10 +655,7 @@ def build_report(
         "inputs": {
             "feasibility_path": str(Path(feasibility_path).resolve()),
             "reset_pose_path": str(Path(reset_pose_path).resolve()),
-            "assets": {
-                name: str(Path(input_path).resolve())
-                for name, input_path in sorted(assets.items())
-            },
+            "assets": {name: str(Path(input_path).resolve()) for name, input_path in sorted(assets.items())},
             "runtime_sources": {
                 name: str(Path(input_path).resolve())
                 for name, input_path in sorted(
@@ -719,8 +663,7 @@ def build_report(
                 )
             },
             "additional_inputs": {
-                name: str(Path(input_path).resolve())
-                for name, input_path in sorted((additional_inputs or {}).items())
+                name: str(Path(input_path).resolve()) for name, input_path in sorted((additional_inputs or {}).items())
             },
         },
         "metrics": dict(metrics),
@@ -772,29 +715,20 @@ def validate_safety_authority_source_evidence(
 
     reset_source = authority.sources["reset_pose_library"]
     if reset_source.path != Path(reset_pose_path).resolve():
-        raise ValidationReportError(
-            "safety authority reset-pose source is not the report reset-pose library"
-        )
+        raise ValidationReportError("safety authority reset-pose source is not the report reset-pose library")
 
     reset_report = _load_json_evidence(
         authority.sources["reset_alignment"].path,
         "safety authority reset_alignment source",
     )
-    reset_inputs = _require_mapping(
-        reset_report.get("inputs"), "reset_alignment.inputs"
-    )
-    if (
-        reset_inputs.get("feasibility_path") != str(Path(feasibility_path).resolve())
-        or reset_inputs.get("reset_pose_path") != str(Path(reset_pose_path).resolve())
-    ):
-        raise ValidationReportError(
-            "safety authority reset alignment references different feasibility/reset inputs"
-        )
+    reset_inputs = _require_mapping(reset_report.get("inputs"), "reset_alignment.inputs")
+    if reset_inputs.get("feasibility_path") != str(Path(feasibility_path).resolve()) or reset_inputs.get(
+        "reset_pose_path"
+    ) != str(Path(reset_pose_path).resolve()):
+        raise ValidationReportError("safety authority reset alignment references different feasibility/reset inputs")
     reset_slopes = tuple(
         _finite_number(value, "reset_alignment.slopes")
-        for value in _require_sequence(
-            reset_report.get("slopes"), "reset_alignment.slopes"
-        )
+        for value in _require_sequence(reset_report.get("slopes"), "reset_alignment.slopes")
     )
     if (
         reset_report.get("schema_version") != 2
@@ -812,20 +746,14 @@ def validate_safety_authority_source_evidence(
             "safety authority reset alignment must cover this task, nominal 1000-step "
             f"continuous standing, and all {len(VALIDATION_SIGNED_SLOPES)} slopes"
         )
-    summary = _require_mapping(
-        reset_report.get("summary"), "reset_alignment.summary"
-    )
+    summary = _require_mapping(reset_report.get("summary"), "reset_alignment.summary")
     torque_contract = _require_mapping(
         reset_report.get("torque_measurement_contract"),
         "reset_alignment.torque_measurement_contract",
     )
     if dict(torque_contract) != dict(RESET_ALIGNMENT_TORQUE_MEASUREMENT_CONTRACT):
-        raise ValidationReportError(
-            "safety authority reset alignment does not use physical actuator torque limits"
-        )
-    reset_thresholds = _require_mapping(
-        reset_report.get("safety_thresholds"), "reset_alignment.safety_thresholds"
-    )
+        raise ValidationReportError("safety authority reset alignment does not use physical actuator torque limits")
+    reset_thresholds = _require_mapping(reset_report.get("safety_thresholds"), "reset_alignment.safety_thresholds")
     for report_name, authority_name in (
         ("arm_torque_ratio", "safety.arm_torque_limit"),
         ("d6_residual_m_or_rad", "safety.d6_residual_limit"),
@@ -846,9 +774,7 @@ def validate_safety_authority_source_evidence(
             RESET_TORQUE_LIMIT_FRACTION,
             f"reset_alignment.safety_thresholds.{report_name}",
         )
-    checks = _require_mapping(
-        summary.get("checks"), "reset_alignment.summary.checks"
-    )
+    checks = _require_mapping(summary.get("checks"), "reset_alignment.summary.checks")
     if not checks or any(value is not True for value in checks.values()):
         raise ValidationReportError("safety authority reset alignment contains failed checks")
     observed_limits = (
@@ -867,14 +793,11 @@ def validate_safety_authority_source_evidence(
         ),
     )
     for metric_name, threshold_name in observed_limits:
-        observed = _finite_number(
-            summary.get(metric_name), f"reset_alignment.summary.{metric_name}"
-        )
+        observed = _finite_number(summary.get(metric_name), f"reset_alignment.summary.{metric_name}")
         threshold = float(authority.thresholds[threshold_name])
         if observed < 0.0 or observed > threshold:
             raise ValidationReportError(
-                f"reset alignment {metric_name}={observed} exceeds authority "
-                f"{threshold_name}={threshold}"
+                f"reset alignment {metric_name}={observed} exceeds authority {threshold_name}={threshold}"
             )
 
 
@@ -890,16 +813,12 @@ def load_report(path: str | Path, *, expected_tool: str | None = None) -> Mappin
         raise ValidationReportError(f"invalid validation report {report_path}: {exc}") from exc
     report = _require_mapping(value, str(report_path))
     if report.get("schema_version") != VALIDATION_REPORT_SCHEMA_VERSION:
-        raise ValidationReportError(
-            f"unsupported validation schema in {report_path}: {report.get('schema_version')!r}"
-        )
+        raise ValidationReportError(f"unsupported validation schema in {report_path}: {report.get('schema_version')!r}")
     tool = report.get("tool")
     if tool not in VALIDATION_TOOLS:
         raise ValidationReportError(f"invalid validation tool in {report_path}: {tool!r}")
     if expected_tool is not None and tool != expected_tool:
-        raise ValidationReportError(
-            f"{report_path} was produced by {tool!r}, expected {expected_tool!r}"
-        )
+        raise ValidationReportError(f"{report_path} was produced by {tool!r}, expected {expected_tool!r}")
     if report.get("status") not in {"passed", "failed"}:
         raise ValidationReportError(f"invalid validation status in {report_path}")
     inputs = _require_mapping(report.get("inputs"), f"{report_path}.inputs")
@@ -914,18 +833,10 @@ def load_report(path: str | Path, *, expected_tool: str | None = None) -> Mappin
     runtime_sources = _require_mapping(inputs.get("runtime_sources"), "inputs.runtime_sources")
     if not runtime_sources:
         raise ValidationReportError("inputs.runtime_sources cannot be empty")
-    if not all(
-        isinstance(name, str) and isinstance(value, str)
-        for name, value in runtime_sources.items()
-    ):
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in runtime_sources.items()):
         raise ValidationReportError("inputs.runtime_sources must map names to paths")
-    additional_inputs = _require_mapping(
-        inputs.get("additional_inputs", {}), "inputs.additional_inputs"
-    )
-    if not all(
-        isinstance(name, str) and isinstance(value, str)
-        for name, value in additional_inputs.items()
-    ):
+    additional_inputs = _require_mapping(inputs.get("additional_inputs", {}), "inputs.additional_inputs")
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in additional_inputs.items()):
         raise ValidationReportError("inputs.additional_inputs must map names to paths")
     metrics = _require_mapping(report.get("metrics"), f"{report_path}.metrics")
     metadata = _require_mapping(report.get("metadata"), f"{report_path}.metadata")
@@ -975,16 +886,11 @@ def evaluate_coast_down(
         raise ValueError("mass, normal force, and c_rr must be positive")
     if relative_tolerance < 0.0 or minimum_deceleration_delta_mps2 <= 0.0:
         raise ValueError("coast-down tolerances are invalid")
-    measured_force = mass_kg * (
-        acceleration_without_rr_mps2 - acceleration_with_rr_mps2
-    )
+    measured_force = mass_kg * (acceleration_without_rr_mps2 - acceleration_with_rr_mps2)
     expected_force = c_rr * mean_normal_force_n
     relative_error = abs(measured_force - expected_force) / expected_force
     deceleration_delta = acceleration_without_rr_mps2 - acceleration_with_rr_mps2
-    passed = (
-        deceleration_delta >= minimum_deceleration_delta_mps2
-        and relative_error <= relative_tolerance
-    )
+    passed = deceleration_delta >= minimum_deceleration_delta_mps2 and relative_error <= relative_tolerance
     return CoastDownResult(
         measured_force_n=measured_force,
         expected_force_n=expected_force,

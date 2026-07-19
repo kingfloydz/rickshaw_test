@@ -11,7 +11,9 @@ import torch
 from g1_rickshaw_lab.assets.rickshaw import HITCH_X, HITCH_Z, WHEEL_RADIUS
 from g1_rickshaw_lab.static_equilibrium import fixed_contact_static_components
 
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import dynamics as dynamics_module
+from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import (
+    dynamics as dynamics_module,
+)
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import (
     ACTION_DIM,
     ACTION_GROUP_DIMS,
@@ -63,7 +65,9 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     recover_d6_wrench_on_robot,
     spatial_wrenches_sln_to_world,
 )
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
+from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import (
+    events as events_module,
+)
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations import (
     d6_safety_violation,
 )
@@ -112,7 +116,9 @@ class _FakePhysxView:
     def set_inertias(self, values: torch.Tensor, env_ids: torch.Tensor) -> None:
         self.inertias[env_ids] = values[env_ids]
 
-    def set_material_properties(self, values: torch.Tensor, env_ids: torch.Tensor) -> None:
+    def set_material_properties(
+        self, values: torch.Tensor, env_ids: torch.Tensor
+    ) -> None:
         self.materials[env_ids] = values[env_ids]
 
 
@@ -134,7 +140,9 @@ def _run_reference(start: float, target: float) -> tuple[torch.Tensor, torch.Ten
     for _ in range(1_000):
         previous_acceleration = state.a_ref.clone()
         update_speed_reference(state, sample, DT, SPEED_CFG)
-        assert torch.all(torch.abs(state.a_ref) <= SPEED_CFG.acceleration_limit + 1.0e-12)
+        assert torch.all(
+            torch.abs(state.a_ref) <= SPEED_CFG.acceleration_limit + 1.0e-12
+        )
         step_jerk = torch.abs((state.a_ref - previous_acceleration) / DT)
         assert torch.all(step_jerk <= SPEED_CFG.jerk_limit + 1.0e-12)
         velocities.append(state.v_ref.clone())
@@ -177,9 +185,15 @@ def test_command_reset_clears_sample_reference_and_acceleration() -> None:
     state.a_ref[:] = torch.tensor([0.2, -0.2, 0.1], dtype=torch.float64)
     state.reset(torch.tensor([0, 2]))
 
-    torch.testing.assert_close(state.v_sample, torch.tensor([0.0, 0.4, 0.0], dtype=torch.float64))
-    torch.testing.assert_close(state.v_ref, torch.tensor([0.0, 0.3, 0.0], dtype=torch.float64))
-    torch.testing.assert_close(state.a_ref, torch.tensor([0.0, -0.2, 0.0], dtype=torch.float64))
+    torch.testing.assert_close(
+        state.v_sample, torch.tensor([0.0, 0.4, 0.0], dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        state.v_ref, torch.tensor([0.0, 0.3, 0.0], dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        state.a_ref, torch.tensor([0.0, -0.2, 0.0], dtype=torch.float64)
+    )
 
 
 def test_d6_wrench_recovery_uses_physx_parent_on_child_sign() -> None:
@@ -217,7 +231,10 @@ def test_d6_spatial_impulse_keeps_linear_and_angular_safety_channels() -> None:
         channels, torch.tensor([[5.0, 12.0], [2.0, 8.0]], dtype=torch.float64)
     )
     violation = d6_safety_violation(
-        torch.zeros(2, dtype=torch.float64), channels, residual_limit=0.1, impulse_limit=10.0
+        torch.zeros(2, dtype=torch.float64),
+        channels,
+        residual_limit=0.1,
+        impulse_limit=10.0,
     )
     torch.testing.assert_close(violation, torch.tensor([True, False]))
 
@@ -267,7 +284,9 @@ def test_cart_interaction_preserves_complete_per_side_d6_wrench(
     torch.testing.assert_close(runtime_state.hand_torque_w, torch.zeros((1, 3)))
     torch.testing.assert_close(runtime_state.d6_truth_wrench_w, d6_wrench)
     torch.testing.assert_close(runtime_state.d6_wrench_w, d6_wrench)
-    assert not torch.equal(runtime_state.d6_wrench_w[:, 0], runtime_state.d6_wrench_w[:, 1])
+    assert not torch.equal(
+        runtime_state.d6_wrench_w[:, 0], runtime_state.d6_wrench_w[:, 1]
+    )
     assert torch.all(runtime_state.d6_wrench_w[..., 3:] != 0.0)
 
 
@@ -362,9 +381,7 @@ def test_wrench_consistency_handles_transient_signed_force_cancellation() -> Non
 
 
 def test_fat2_sagittal_com_radius_excludes_lateral_offset() -> None:
-    robot_com = torch.tensor(
-        [[0.6, 4.0, 0.3], [0.3, -7.0, 0.4]], dtype=torch.float64
-    )
+    robot_com = torch.tensor([[0.6, 4.0, 0.3], [0.3, -7.0, 0.4]], dtype=torch.float64)
     support_center = torch.zeros_like(robot_com)
     tangent = torch.tensor([[1.0, 0.0, 0.0]] * 2, dtype=torch.float64)
     normal = torch.tensor([[0.0, 0.0, 1.0]] * 2, dtype=torch.float64)
@@ -378,9 +395,7 @@ def test_fat2_sagittal_com_radius_excludes_lateral_offset() -> None:
 
 def test_fat2_com_radius_window_holds_invalid_samples_and_resets() -> None:
     reference = 0.715092420262594
-    state = FAT2ComRadiusState.initialized(
-        2, 3, reference, dtype=torch.float64
-    )
+    state = FAT2ComRadiusState.initialized(2, 3, reference, dtype=torch.float64)
     valid = torch.tensor([True, True])
 
     first = state.update(
@@ -482,9 +497,7 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     cleared: list[torch.Tensor] = []
     command_samples: list[torch.Tensor] = []
     action_resets: list[torch.Tensor] = []
-    action_term = SimpleNamespace(
-        reset=lambda ids: action_resets.append(ids.clone())
-    )
+    action_term = SimpleNamespace(reset=lambda ids: action_resets.append(ids.clone()))
     env = SimpleNamespace(
         device="cpu",
         action_manager=SimpleNamespace(_terms={"lower": action_term}),
@@ -510,7 +523,9 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     torch.testing.assert_close(action_resets[0], env_ids)
 
 
-def test_fixed_contact_allocator_preserves_torch_batch_for_scalar_free_axis_torque() -> None:
+def test_fixed_contact_allocator_preserves_torch_batch_for_scalar_free_axis_torque() -> (
+    None
+):
     values = torch.tensor([100.0, 120.0], dtype=torch.float64)
 
     hand_rows, wheel_rows = fixed_contact_static_components(
@@ -552,11 +567,9 @@ def test_runtime_static_target_uses_compiled_tables() -> None:
     torch.testing.assert_close(env.action_state.q_ref, q_ref)
 
 
-def test_runtime_static_target_compensates_effective_actuator_gain() -> None:
+def test_runtime_static_target_uses_the_calibrated_nominal_reference() -> None:
     q_reset = torch.ones((1, ACTION_DIM))
     nominal_q_ref = torch.full_like(q_reset, 3.0)
-    joint_error = torch.linspace(-0.2, 0.2, ACTION_DIM).unsqueeze(0)
-    motor_strength = torch.tensor([1.1])
     env = SimpleNamespace(
         device="cpu",
         slope=torch.zeros(1),
@@ -565,16 +578,12 @@ def test_runtime_static_target_compensates_effective_actuator_gain() -> None:
         reset_q_reset_table=q_reset,
         reset_q_ref_table=nominal_q_ref,
         action_state=SimpleNamespace(q_ref=torch.zeros_like(q_reset)),
-        motor_strength=motor_strength,
-        joint_model_error=joint_error,
         reset_policy_joint_pos=torch.zeros_like(q_reset),
     )
 
     install_q_ref_from_reset_library(env, torch.tensor([0]))
 
-    effective_gain = motor_strength[:, None] * (1.0 + joint_error)
-    expected = q_reset + (nominal_q_ref - q_reset) / effective_gain
-    torch.testing.assert_close(env.action_state.q_ref, expected)
+    torch.testing.assert_close(env.action_state.q_ref, nominal_q_ref)
 
 
 def test_stage_b_pose_batch_uses_one_fixed_pose_per_environment() -> None:
@@ -628,8 +637,12 @@ def test_static_wrench_rotation_and_two_point_cart_fit_are_per_side() -> None:
     lateral = torch.tensor([[-1.0, 0.0, 0.0]])
     normal = torch.tensor([[0.0, 0.0, 1.0]])
     world = spatial_wrenches_sln_to_world(wrenches_sln, tangent, lateral, normal)
-    torch.testing.assert_close(world[0, 0], torch.tensor([-2.0, 1.0, 3.0, -5.0, 4.0, 6.0]))
-    torch.testing.assert_close(world[0, 1], torch.tensor([-8.0, 7.0, 9.0, -11.0, 10.0, 12.0]))
+    torch.testing.assert_close(
+        world[0, 0], torch.tensor([-2.0, 1.0, 3.0, -5.0, 4.0, 6.0])
+    )
+    torch.testing.assert_close(
+        world[0, 1], torch.tensor([-8.0, 7.0, 9.0, -11.0, 10.0, 12.0])
+    )
 
     cfg = RickshawPoseTargetCfg(
         hitch_height_target=0.85,
@@ -637,10 +650,16 @@ def test_static_wrench_rotation_and_two_point_cart_fit_are_per_side() -> None:
         hitch_vertical_speed_tolerance=0.02,
     )
     angle = torch.tensor(0.02)
-    quaternion = torch.tensor([[torch.cos(0.5 * angle), 0.0, 0.0, torch.sin(0.5 * angle)]])
+    quaternion = torch.tensor(
+        [[torch.cos(0.5 * angle), 0.0, 0.0, torch.sin(0.5 * angle)]]
+    )
     local = torch.tensor(
-        [[[cfg.hitch_x, cfg.hitch_half_width, cfg.hitch_z],
-          [cfg.hitch_x, -cfg.hitch_half_width, cfg.hitch_z]]]
+        [
+            [
+                [cfg.hitch_x, cfg.hitch_half_width, cfg.hitch_z],
+                [cfg.hitch_x, -cfg.hitch_half_width, cfg.hitch_z],
+            ]
+        ]
     )
     translation = torch.tensor([[2.0, -0.4, 0.2]])
     targets = translation[:, None, :] + events_module.quat_apply_wxyz(
@@ -697,7 +716,9 @@ def test_canonicalize_action_scale_accepts_isaaclab_environment_batch() -> None:
 def test_butterworth_frequency_response_and_reset_to_q_ref() -> None:
     q_ref = torch.linspace(-0.6, 0.6, ACTION_DIM, dtype=torch.float64).unsqueeze(0)
     state = ButterworthActionState.create(q_ref)
-    zero_target = state.process(torch.zeros_like(q_ref), action_scale_vector(dtype=torch.float64))
+    zero_target = state.process(
+        torch.zeros_like(q_ref), action_scale_vector(dtype=torch.float64)
+    )
     torch.testing.assert_close(zero_target, q_ref, rtol=0.0, atol=3.0e-8)
 
     state.process(torch.ones_like(q_ref), action_scale_vector(dtype=torch.float64))
@@ -706,11 +727,15 @@ def test_butterworth_frequency_response_and_reset_to_q_ref() -> None:
     torch.testing.assert_close(state.x_prev, replacement)
     torch.testing.assert_close(state.y_prev, replacement)
     torch.testing.assert_close(state.target, replacement)
-    after_reset = state.process(torch.zeros_like(q_ref), action_scale_vector(dtype=torch.float64))
+    after_reset = state.process(
+        torch.zeros_like(q_ref), action_scale_vector(dtype=torch.float64)
+    )
     torch.testing.assert_close(after_reset, replacement, rtol=0.0, atol=3.0e-8)
 
     # Exercise the recurrence, not only the closed-form response helper.
-    sine_state = ButterworthActionState.create(torch.zeros((1, ACTION_DIM), dtype=torch.float64))
+    sine_state = ButterworthActionState.create(
+        torch.zeros((1, ACTION_DIM), dtype=torch.float64)
+    )
     inputs: list[float] = []
     outputs: list[float] = []
     for step in range(500):
@@ -723,7 +748,10 @@ def test_butterworth_frequency_response_and_reset_to_q_ref() -> None:
     input_rms = torch.tensor(inputs[100:], dtype=torch.float64).square().mean().sqrt()
     output_rms = torch.tensor(outputs[100:], dtype=torch.float64).square().mean().sqrt()
     assert math.isclose(
-        (output_rms / input_rms).item(), 1.0 / math.sqrt(2.0), rel_tol=0.0, abs_tol=2.0e-6
+        (output_rms / input_rms).item(),
+        1.0 / math.sqrt(2.0),
+        rel_tol=0.0,
+        abs_tol=2.0e-6,
     )
 
 
@@ -760,7 +788,9 @@ def test_rolling_resistance_opposes_each_wheel_and_has_correct_magnitude() -> No
     torch.testing.assert_close(filtered_normal, normal_force)
     torch.testing.assert_close(measured_speed, wheel_speed)
     torch.testing.assert_close(force_s, expected)
-    torch.testing.assert_close(force_n, torch.zeros_like(force_n), rtol=0.0, atol=1.0e-12)
+    torch.testing.assert_close(
+        force_n, torch.zeros_like(force_n), rtol=0.0, atol=1.0e-12
+    )
     assert torch.all(force_s * wheel_speed < 0.0)
     torch.testing.assert_close(
         torch.sum(torch.abs(force_s), dim=-1),
@@ -831,7 +861,9 @@ def test_analytic_force_adapter_uses_sampled_rolling_coefficient(monkeypatch) ->
     def _capture_update(*args, **_kwargs) -> None:
         captured["c_rr"] = args[4]
 
-    monkeypatch.setattr(dynamics_module, "update_analytic_handle_force_state", _capture_update)
+    monkeypatch.setattr(
+        dynamics_module, "update_analytic_handle_force_state", _capture_update
+    )
 
     update_analytic_rickshaw_force(
         env,
@@ -866,9 +898,7 @@ class _RollingResistanceCart:
 
 def _rolling_resistance_adapter_env() -> SimpleNamespace:
     dtype = torch.float64
-    wheel_velocity = torch.tensor(
-        [[[1.0, 0.0, 0.0], [0.7, 0.0, 0.0]]], dtype=dtype
-    )
+    wheel_velocity = torch.tensor([[[1.0, 0.0, 0.0], [0.7, 0.0, 0.0]]], dtype=dtype)
     wheel_contact_force = torch.tensor(
         [[[0.0, 0.0, 300.0], [0.0, 0.0, 320.0]]], dtype=dtype
     )
@@ -892,7 +922,9 @@ def _rolling_resistance_adapter_env() -> SimpleNamespace:
     )
 
 
-def test_rolling_resistance_enabled_controls_physx_force_but_not_normal_filter() -> None:
+def test_rolling_resistance_enabled_controls_physx_force_but_not_normal_filter() -> (
+    None
+):
     enabled_env = _rolling_resistance_adapter_env()
     disabled_env = _rolling_resistance_adapter_env()
     enabled_cfg = RollingResistanceCfg(enabled=True)
@@ -935,20 +967,32 @@ def test_whole_articulation_com_is_mass_weighted_not_root_body_only() -> None:
     )
     masses = torch.tensor([[10.0, 20.0, 5.0]], dtype=torch.float64)
 
-    com, velocity, total_mass = articulation_center_of_mass(positions, velocities, masses)
+    com, velocity, total_mass = articulation_center_of_mass(
+        positions, velocities, masses
+    )
 
-    torch.testing.assert_close(com, torch.tensor([[0.5, 0.0, 0.9285714285714286]], dtype=torch.float64))
-    torch.testing.assert_close(velocity, torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64))
+    torch.testing.assert_close(
+        com, torch.tensor([[0.5, 0.0, 0.9285714285714286]], dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        velocity, torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
+    )
     torch.testing.assert_close(total_mass, torch.tensor([35.0], dtype=torch.float64))
     assert not torch.allclose(com, positions[:, 0])
 
 
-def _fake_asset(num_envs: int, body_names: tuple[str, ...], num_shapes: int) -> SimpleNamespace:
+def _fake_asset(
+    num_envs: int, body_names: tuple[str, ...], num_shapes: int
+) -> SimpleNamespace:
     num_bodies = len(body_names)
     masses = torch.ones((num_envs, num_bodies), dtype=torch.float64)
     coms = torch.zeros((num_envs, num_bodies, 7), dtype=torch.float64)
     coms[..., 6] = 1.0
-    inertias = torch.eye(3, dtype=torch.float64).reshape(1, 1, 9).repeat(num_envs, num_bodies, 1)
+    inertias = (
+        torch.eye(3, dtype=torch.float64)
+        .reshape(1, 1, 9)
+        .repeat(num_envs, num_bodies, 1)
+    )
     materials = torch.zeros((num_envs, num_shapes, 3), dtype=torch.float64)
     return SimpleNamespace(
         body_names=body_names,
@@ -970,7 +1014,9 @@ def test_payload_write_updates_physx_mass_com_and_inertia_from_default() -> None
     )
     view = cart.root_physx_view
     view.masses[:] = torch.tensor([36.0, 2.0, 2.0, 0.02, 0.02], dtype=torch.float64)
-    base_com = torch.tensor([0.7227393855133334, 0.0, 0.7026899513333335], dtype=torch.float64)
+    base_com = torch.tensor(
+        [0.7227393855133334, 0.0, 0.7026899513333335], dtype=torch.float64
+    )
     view.coms[:, 0, :3] = base_com
     view.inertias[:, 0] = torch.diag(
         torch.tensor([7.393572, 22.277208, 17.829456], dtype=torch.float64)
@@ -1032,7 +1078,8 @@ def test_per_environment_terrain_friction_is_written_to_both_contact_assets() ->
             torch.full_like(asset.root_physx_view.materials[1, :, :2], 0.73),
         )
         torch.testing.assert_close(
-            asset.root_physx_view.materials[0], torch.zeros_like(asset.root_physx_view.materials[0])
+            asset.root_physx_view.materials[0],
+            torch.zeros_like(asset.root_physx_view.materials[0]),
         )
     torch.testing.assert_close(env.terrain_friction, torch.tensor([1.0, 0.73]))
 
@@ -1078,7 +1125,9 @@ def test_foot_support_polygon_uses_urdf_collision_center_offset() -> None:
     torch.testing.assert_close(
         torch.amax(points[..., 0]), torch.tensor(0.12, dtype=torch.float64)
     )
-    torch.testing.assert_close(center, torch.tensor([[0.035, 0.0, 0.0]], dtype=torch.float64))
+    torch.testing.assert_close(
+        center, torch.tensor([[0.035, 0.0, 0.0]], dtype=torch.float64)
+    )
     assert torch.all(mask)
 
 
@@ -1244,9 +1293,7 @@ def test_torso_safety_tilt_detects_roll_and_pitch_but_not_yaw() -> None:
     )
 
     gamma = math.atan(0.06)
-    slope_normal = torch.tensor(
-        [[-math.sin(gamma), 0.0, math.cos(gamma)]], dtype=dtype
-    )
+    slope_normal = torch.tensor([[-math.sin(gamma), 0.0, math.cos(gamma)]], dtype=dtype)
     slope_aligned = torch.tensor(
         [[math.cos(0.5 * gamma), 0.0, -math.sin(0.5 * gamma), 0.0]],
         dtype=dtype,

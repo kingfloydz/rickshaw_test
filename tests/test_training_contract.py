@@ -24,22 +24,19 @@ from g1_rickshaw_lab.training_contract import (
 
 def test_mainline_has_fixed_stage_budgets_and_19_slopes() -> None:
     assert GUIDE_MAX_ITERATIONS == {
-        "s0_teacher": 6000,
-        "s1_context_distillation": 4000,
+        "s0_teacher": 4000,
+        "s1_context_distillation": 3000,
         "s2_student_ppo": 2000,
     }
     assert ROLLOUT_STAGE_SEQUENCE == ("TRAINING",)
     assert SIGNED_SLOPE_LABELS == tuple(
         f"{value / 100:+.2f}" for value in range(-8, 11)
     )
-    assert guide_max_iterations("s0_teacher") == 6000
+    assert guide_max_iterations("s0_teacher") == 4000
     assert GUIDE_TRAINING_PARAMETERS["s0_teacher"] == {
-        "domain_randomization_refresh_interval": 200,
-        "domain_randomization_max_scale": 0.6,
-        "domain_randomization_ramp_refreshes": 30,
-        "domain_randomization_friction_scale": 0.5,
-        "delay_randomization_max_probability": 0.25,
-        "delay_randomization_ramp_refreshes": 60,
+        "domain_randomization": "startup_fixed",
+        "terrain_slopes": "startup_balanced_fixed",
+        "observation_noise": "unitree_g1_uniform",
     }
     with pytest.raises(ValueError, match="unknown training stage"):
         guide_max_iterations("legacy")
@@ -48,9 +45,9 @@ def test_mainline_has_fixed_stage_budgets_and_19_slopes() -> None:
 @pytest.mark.parametrize(
     ("rollout_steps", "s0_iterations", "s2_iterations", "artifact_interval"),
     (
-        (24, 12000, 4000, 400),
-        (48, 6000, 2000, 200),
-        (64, 4500, 1500, 150),
+        (24, 8000, 4000, 400),
+        (48, 4000, 2000, 200),
+        (64, 3000, 1500, 150),
     ),
 )
 def test_rollout_variants_preserve_transition_and_artifact_budgets(
@@ -61,9 +58,9 @@ def test_rollout_variants_preserve_transition_and_artifact_budgets(
 ) -> None:
     assert guide_max_iterations("s0_teacher", rollout_steps) == s0_iterations
     assert guide_max_iterations("s2_student_ppo", rollout_steps) == s2_iterations
-    assert rollout_scaled_iterations(6000, rollout_steps) == s0_iterations
+    assert rollout_scaled_iterations(4000, rollout_steps) == s0_iterations
     assert training_artifact_interval(rollout_steps) == artifact_interval
-    assert s0_iterations * rollout_steps == 6000 * 48
+    assert s0_iterations * rollout_steps == 4000 * 48
     assert s2_iterations * rollout_steps == 2000 * 48
     assert artifact_interval * rollout_steps == 200 * 48
 
@@ -89,8 +86,7 @@ def test_single_training_rollout_manifest_is_accepted() -> None:
     num_steps = DISTILLATION_ROLLOUT_STEPS
     base, extra = divmod(num_envs, len(SIGNED_SLOPE_LABELS))
     environments = {
-        label: base + (index < extra)
-        for index, label in enumerate(SIGNED_SLOPE_LABELS)
+        label: base + (index < extra) for index, label in enumerate(SIGNED_SLOPE_LABELS)
     }
     samples = {label: count * num_steps for label, count in environments.items()}
     episodes = dict(environments)
@@ -150,12 +146,8 @@ def test_checkpoint_tensor_widths_match_the_recorded_latent(latent_dim: int) -> 
     validate_student_checkpoint_architecture(student, configuration)
     validate_teacher_checkpoint_architecture(teacher, configuration)
 
-    student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(
-        512, 112
-    )
+    student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(512, 112)
     if latent_dim == 16:
-        student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(
-            512, 111
-        )
+        student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(512, 111)
     with pytest.raises(ValueError, match="recorded latent width"):
         validate_student_checkpoint_architecture(student, configuration)

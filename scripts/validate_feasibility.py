@@ -50,9 +50,7 @@ FORCE_DIRECTIONS = (-1.0, 1.0)
 
 def _base_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--task", default="Isaac-G1-Rickshaw-Directional-Slope-Play-v0"
-    )
+    parser.add_argument("--task", default="Isaac-G1-Rickshaw-Directional-Slope-Play-v0")
     parser.add_argument(
         "--input",
         type=Path,
@@ -137,7 +135,10 @@ def _load_candidate_config(path: Path) -> tuple[tuple[float, ...], tuple[float, 
     try:
         import yaml
     except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("PyYAML is required to load command scan candidates") from exc
+        raise RuntimeError(
+            "PyYAML is required to load command scan candidates"
+        ) from exc
+
     class UniqueKeySafeLoader(yaml.SafeLoader):
         pass
 
@@ -166,9 +167,11 @@ def _load_candidate_config(path: Path) -> tuple[tuple[float, ...], tuple[float, 
         raise ValueError(
             f"candidate config fields must be exactly {sorted(expected)}, got {sorted(mapping)}"
         )
-    if not isinstance(mapping["schema_version"], int) or isinstance(
-        mapping["schema_version"], bool
-    ) or mapping["schema_version"] != 1:
+    if (
+        not isinstance(mapping["schema_version"], int)
+        or isinstance(mapping["schema_version"], bool)
+        or mapping["schema_version"] != 1
+    ):
         raise ValueError("candidate config schema_version must be 1")
     return (
         _validate_candidate_values(
@@ -267,7 +270,11 @@ def _write_failed_report(
 
 
 def _verify_recorded_outcome(args: argparse.Namespace, exit_code: Any) -> int:
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code not in {0, 1}:
+    if (
+        isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or exit_code not in {0, 1}
+    ):
         raise RuntimeError(f"scan returned invalid exit code {exit_code!r}")
     try:
         report = json.loads(args.output.read_text(encoding="utf-8"))
@@ -334,7 +341,12 @@ def _run_scan(
     isaaclab_path = Path(
         os.environ.get("ISAACLAB_PATH", REPOSITORY_ROOT.parent / "IsaacLab")
     ).resolve()
-    for package_name in ("isaaclab", "isaaclab_assets", "isaaclab_tasks", "isaaclab_rl"):
+    for package_name in (
+        "isaaclab",
+        "isaaclab_assets",
+        "isaaclab_tasks",
+        "isaaclab_rl",
+    ):
         package_path = isaaclab_path / "source" / package_name
         if package_path.is_dir() and str(package_path) not in sys.path:
             sys.path.insert(0, str(package_path))
@@ -403,8 +415,12 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     import torch
     from g1_rickshaw_lab.assets.rickshaw import BASE_LINK_NAME
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import (
-        G1RickshawDirectionalSlopePlayEnvCfg, mdp)
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as mdp_events
+        G1RickshawDirectionalSlopePlayEnvCfg,
+        mdp,
+    )
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import (
+        events as mdp_events,
+    )
 
     candidate_path = args.input.resolve()
     reset_pose_path = args.reset_poses.resolve()
@@ -477,15 +493,11 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     acceleration_rows: list[dict[str, Any]] = []
     jerk_rows: list[dict[str, Any]] = []
     failures: list[str] = []
-    safety_cfg = base.termination_manager.get_term_cfg("immediate_safety").params[
-        "cfg"
-    ]
+    safety_cfg = base.termination_manager.get_term_cfg("immediate_safety").params["cfg"]
     minimum_wheel_force = float(
         safety_authority.thresholds["safety.minimum_wheel_normal_force"]
     )
-    d6_impulse_limit = float(
-        safety_authority.thresholds["safety.d6_impulse_limit"]
-    )
+    d6_impulse_limit = float(safety_authority.thresholds["safety.d6_impulse_limit"])
     if not math.isclose(
         float(safety_cfg.wheel_lift_normal_force_threshold),
         minimum_wheel_force,
@@ -514,7 +526,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     def configure_physical_point(point: Any) -> None:
         point_values = {name: float(value) for name, value in point.values.items()}
         if set(point_values) != set(mdp.DOMAIN_PARAMETER_NAMES):
-            raise RuntimeError("feasibility point does not cover the current domain schema")
+            raise RuntimeError(
+                "feasibility point does not cover the current domain schema"
+            )
         point_domain = replace(
             cfg.domain_randomization,
             enabled=False,
@@ -522,8 +536,8 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
         )
         point_domain.validate()
         base.cfg.domain_randomization = point_domain
-        base.domain_randomization_cfg = point_domain
-        mdp_events._apply_domain_epoch(base, point_domain, 0)
+        generator = torch.Generator(device=base.device).manual_seed(0)
+        mdp_events._apply_domain_randomization(base, point_domain, generator)
         mdp.reset_closed_chain(base, all_ids)
         base.episode_length_buf[all_ids] = 0
         base.command_state.v_sample[all_ids] = 0.0
@@ -611,10 +625,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             cart.data.root_lin_vel_w * base.path_tangent_w, dim=-1
         ).clone()
         peak_force_w = (
-            direction
-            * cart_masses[:, None]
-            * target_acceleration
-            * base.path_tangent_w
+            direction * cart_masses[:, None] * target_acceleration * base.path_tangent_w
         )
 
         for step in range(args.steps_per_point):
@@ -661,7 +672,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
 
             wheel = base.rickshaw_state.wheel_normal_force
             minimum_left[active] = torch.minimum(minimum_left[active], wheel[active, 0])
-            minimum_right[active] = torch.minimum(minimum_right[active], wheel[active, 1])
+            minimum_right[active] = torch.minimum(
+                minimum_right[active], wheel[active, 1]
+            )
             foot_force = base.scene["robot_contacts"].data.net_forces_w[
                 :, base.foot_sensor_ids
             ]
@@ -669,7 +682,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 torch.sum(foot_force * base.path_normal_w[:, None, :], dim=-1),
                 min=0.0,
             )
-            tangent_force = foot_force - normal_force[..., None] * base.path_normal_w[:, None, :]
+            tangent_force = (
+                foot_force - normal_force[..., None] * base.path_normal_w[:, None, :]
+            )
             friction = base.terrain_friction
             friction_margin = torch.amin(
                 friction[:, None] * normal_force
@@ -686,7 +701,8 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             )
             minimum_zmp[active] = torch.minimum(minimum_zmp[active], zmp[active])
             arm_ratio = torch.amax(
-                torch.abs(robot.data.applied_torque[:, base.arm_joint_ids]) / arm_limits,
+                torch.abs(robot.data.applied_torque[:, base.arm_joint_ids])
+                / arm_limits,
                 dim=-1,
             )
             leg_ratio = torch.amax(
@@ -714,12 +730,10 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 raise RuntimeError(
                     "feasibility scan requires the retained-hitch incoming D6 proxy"
                 )
-            d6_force = torch.linalg.vector_norm(
-                d6_wrench[..., :3], dim=-1
-            ).amax(dim=-1)
-            d6_torque = torch.linalg.vector_norm(
-                d6_wrench[..., 3:], dim=-1
-            ).amax(dim=-1)
+            d6_force = torch.linalg.vector_norm(d6_wrench[..., :3], dim=-1).amax(dim=-1)
+            d6_torque = torch.linalg.vector_norm(d6_wrench[..., 3:], dim=-1).amax(
+                dim=-1
+            )
             handle_cfg = base.d6_constraint_manager.cfg
             max_force = torch.full_like(d6_force, float(handle_cfg.max_force))
             max_torque = torch.full_like(d6_torque, float(handle_cfg.max_torque))
@@ -748,7 +762,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 robot.data.joint_pos,
                 robot.data.joint_vel,
                 cart.data.root_state_w,
-                d6_proxy_wrench,
+                d6_wrench,
                 base.rickshaw_state.d6_residual,
                 base.rickshaw_state.d6_impulse,
                 base.stability_state.zmp_margin,
@@ -811,14 +825,15 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             dynamic_evidence = {
                 "cart_mass_kg": float(cart_masses[env_index]),
                 "target_equivalent_acceleration_mps2": target_acceleration,
-                "applied_force_peak_n": float(cart_masses[env_index] * target_acceleration),
+                "applied_force_peak_n": float(
+                    cart_masses[env_index] * target_acceleration
+                ),
                 "applied_force_peak_w_n": [
                     float(value) for value in peak_force_w[env_index].tolist()
                 ],
                 "force_body": BASE_LINK_NAME,
                 "force_api": (
-                    "Articulation.permanent_wrench_composer."
-                    "set_forces_and_torques"
+                    "Articulation.permanent_wrench_composer.set_forces_and_torques"
                 ),
                 "arm_actuator_effort_limit_nm": {
                     "minimum": float(torch.amin(arm_limits[env_index])),
@@ -858,9 +873,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                     "parameters": dict(point.values),
                     "metrics": {
                         name: (
-                            value
-                            if isinstance(value, bool)
-                            else _serial_float(value)
+                            value if isinstance(value, bool) else _serial_float(value)
                         )
                         for name, value in raw_metrics.items()
                     },
@@ -953,7 +966,11 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
 
         generated_path: Path | None = None
         derived_mapping: dict[str, Any] | None = None
-        if not failures and acceleration_selection is not None and jerk_selection is not None:
+        if (
+            not failures
+            and acceleration_selection is not None
+            and jerk_selection is not None
+        ):
             # A long scan cannot authorize output if its independent thresholds or
             # provenance changed while PhysX was running.
             current_authority = load_safety_threshold_authority(
@@ -1035,7 +1052,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
                 },
                 "coverage": jerk_coverage,
                 "maximum_fully_feasible_mps3": (
-                    jerk_selection.maximum_feasible if jerk_selection is not None else None
+                    jerk_selection.maximum_feasible
+                    if jerk_selection is not None
+                    else None
                 ),
                 "derived_limit_mps3": (
                     jerk_selection.derived_limit if jerk_selection is not None else None
@@ -1068,7 +1087,9 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
             },
             "measurement_sources": dict(FEASIBILITY_MEASUREMENT_SOURCES),
         }
-        report_feasibility = generated_path if generated_path is not None else candidate_path
+        report_feasibility = (
+            generated_path if generated_path is not None else candidate_path
+        )
         report = build_report(
             tool="validate_feasibility",
             task=args.task,

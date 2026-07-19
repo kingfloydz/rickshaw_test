@@ -8,7 +8,9 @@ from importlib.util import find_spec
 import pytest
 
 
-ISAACLAB_RUNTIME_AVAILABLE = find_spec("isaaclab") is not None and find_spec("isaacsim") is not None
+ISAACLAB_RUNTIME_AVAILABLE = (
+    find_spec("isaaclab") is not None and find_spec("isaacsim") is not None
+)
 
 
 if ISAACLAB_RUNTIME_AVAILABLE:
@@ -22,7 +24,6 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
 
 HYDRA_EMBEDDED_CFG_TYPES = (
-    mdp.DomainRandomizationScheduleCfg,
     mdp.SpeedReferenceCfg,
     mdp.RollingResistanceCfg,
     mdp.AnalyticForceCfg,
@@ -50,7 +51,10 @@ if ISAACLAB_RUNTIME_AVAILABLE:
     from omegaconf import OmegaConf
 
     import g1_rickshaw_lab  # noqa: F401  # registers the two Gym tasks after Kit starts
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import PLAY_TASK_ID, TRAIN_TASK_ID
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import (
+        PLAY_TASK_ID,
+        TRAIN_TASK_ID,
+    )
 else:
     PLAY_TASK_ID = "Isaac-G1-Rickshaw-Directional-Slope-Play-v0"
     TRAIN_TASK_ID = "Isaac-G1-Rickshaw-Directional-Slope-v0"
@@ -72,15 +76,21 @@ def _hydra_round_trip(task_id: str, overrides: list[str]):
 def _assert_manager_cfg_bindings(env_cfg) -> None:
     initialize_params = env_cfg.events.initialize_mdp.params
 
-    assert env_cfg.scene.closed_chain.spawn.handle_constraint is env_cfg.handle_constraint
+    assert (
+        env_cfg.scene.closed_chain.spawn.handle_constraint is env_cfg.handle_constraint
+    )
     assert initialize_params["handle_constraint_cfg"] is env_cfg.handle_constraint
     assert initialize_params["rolling_resistance_cfg"] is env_cfg.rolling_resistance
     assert initialize_params["entity_names_cfg"] is env_cfg.task_entity_names
     assert initialize_params["rickshaw_pose_cfg"] is env_cfg.rickshaw_pose
 
-    assert env_cfg.events.initialize_domain.params["cfg"] is env_cfg.domain_randomization
+    assert (
+        env_cfg.events.initialize_domain.params["cfg"] is env_cfg.domain_randomization
+    )
     assert env_cfg.events.policy_interval.params["cfg"] is env_cfg.policy_update
-    assert env_cfg.terminations.refresh_policy_state.params["cfg"] is env_cfg.policy_update
+    assert (
+        env_cfg.terminations.refresh_policy_state.params["cfg"] is env_cfg.policy_update
+    )
 
 
 def test_hydra_embedded_cfg_dataclasses_are_mutable() -> None:
@@ -90,12 +100,14 @@ def test_hydra_embedded_cfg_dataclasses_are_mutable() -> None:
 
 
 def test_privileged_observation_dimensions_are_fixed() -> None:
-    assert mdp.TEACHER_STATIC_DIM == 40
+    assert mdp.TEACHER_STATIC_DIM == 10
     assert mdp.TEACHER_DYNAMIC_DIM == 21
-    assert mdp.CRITIC_PRIVILEGED_DIM == 64
+    assert mdp.CRITIC_PRIVILEGED_DIM == 34
 
 
-@pytest.mark.skipif(not ISAACLAB_RUNTIME_AVAILABLE, reason="IsaacLab runtime is not installed")
+@pytest.mark.skipif(
+    not ISAACLAB_RUNTIME_AVAILABLE, reason="IsaacLab runtime is not installed"
+)
 @pytest.mark.parametrize("task_id", (TRAIN_TASK_ID, PLAY_TASK_ID))
 def test_manager_env_cfg_survives_full_hydra_round_trip(task_id: str) -> None:
     env_cfg = _hydra_round_trip(
@@ -120,11 +132,18 @@ def test_manager_env_cfg_survives_full_hydra_round_trip(task_id: str) -> None:
     assert hasattr(env_cfg.observations, "teacher_static")
     assert not hasattr(env_cfg.observations, "teacher_extrinsics")
     assert env_cfg.handle_constraint.max_force == pytest.approx(1234.5)
-    assert env_cfg.scene.closed_chain.spawn.handle_constraint.max_force == pytest.approx(1234.5)
-    assert env_cfg.rolling_resistance.enabled is False
-    assert env_cfg.events.initialize_mdp.params["rolling_resistance_cfg"].enabled is False
-    assert env_cfg.events.policy_interval.params["cfg"].speed_reference.response_time == pytest.approx(0.4)
-    assert env_cfg.terminations.refresh_policy_state.params["cfg"].speed_reference.response_time == pytest.approx(
-        0.4
+    assert (
+        env_cfg.scene.closed_chain.spawn.handle_constraint.max_force
+        == pytest.approx(1234.5)
     )
+    assert env_cfg.rolling_resistance.enabled is False
+    assert (
+        env_cfg.events.initialize_mdp.params["rolling_resistance_cfg"].enabled is False
+    )
+    assert env_cfg.events.policy_interval.params[
+        "cfg"
+    ].speed_reference.response_time == pytest.approx(0.4)
+    assert env_cfg.terminations.refresh_policy_state.params[
+        "cfg"
+    ].speed_reference.response_time == pytest.approx(0.4)
     _assert_manager_cfg_bindings(env_cfg)

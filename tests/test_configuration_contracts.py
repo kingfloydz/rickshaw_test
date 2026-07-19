@@ -91,7 +91,9 @@ def _valid_reset_pose_mapping() -> dict:
                 "root_pitch": 0.5 * gradient,
                 "root_height": 0.74 + gradient,
                 "q_reset": [gradient + 0.02 * index for index in range(29)],
-                "q_ref_unloaded": [2.0 * gradient + 0.015 * index for index in range(29)],
+                "q_ref_unloaded": [
+                    2.0 * gradient + 0.015 * index for index in range(29)
+                ],
                 **torque_basis,
                 "q_ref": [3.0 * gradient + 0.01 * index for index in range(29)],
             }
@@ -110,7 +112,7 @@ def test_feasibility_envelope_requires_exact_schema_fields() -> None:
     assert set(envelope.calibration) == set(REQUIRED_CALIBRATION_FIELDS)
 
     missing = _valid_feasibility_mapping()
-    del missing["ranges"]["motor.strength"]
+    del missing["ranges"]["torso.mass_delta"]
     with pytest.raises(ConfigurationContractError, match="missing"):
         FeasibilityEnvelope.from_mapping(missing)
 

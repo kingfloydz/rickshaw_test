@@ -59,13 +59,15 @@ class RunSpec:
     fat2_weight: float
     rollout_steps: int
     latent_dim: int
+    stability_reward_curriculum: bool = False
 
     @property
-    def training_parameters(self) -> dict[str, int | float]:
+    def training_parameters(self) -> dict[str, int | float | bool]:
         return {
             "fat2_weight": self.fat2_weight,
             "rollout_steps": self.rollout_steps,
             "latent_dim": self.latent_dim,
+            "stability_reward_curriculum": self.stability_reward_curriculum,
         }
 
 
@@ -83,7 +85,20 @@ LATENT_DIM_RUNS = tuple(
     RunSpec(f"latent_dim_{latent_dim}", 0.1, 48, latent_dim)
     for latent_dim in (6, 10, 12, 14, 16, 18, 20)
 )
-RUNS_BY_NAME = {spec.name: spec for spec in (*UNIQUE_RUNS, *LATENT_DIM_RUNS)}
+STABILITY_CURRICULUM_RUNS = tuple(
+    RunSpec(
+        f"latent_dim_{latent_dim}_stability_curriculum",
+        0.1,
+        48,
+        latent_dim,
+        True,
+    )
+    for latent_dim in (6, 8, 10, 12, 14, 16, 18, 20)
+)
+RUNS_BY_NAME = {
+    spec.name: spec
+    for spec in (*UNIQUE_RUNS, *LATENT_DIM_RUNS, *STABILITY_CURRICULUM_RUNS)
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,13 +204,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> list[RunSpec]:
-    args.reward_weight_overrides = parse_reward_weight_arguments(
-        args.reward_weight
-    )
+    args.reward_weight_overrides = parse_reward_weight_arguments(args.reward_weight)
     run_names = (
-        [spec.name for spec in UNIQUE_RUNS]
-        if args.runs is None
-        else list(args.runs)
+        [spec.name for spec in UNIQUE_RUNS] if args.runs is None else list(args.runs)
     )
     if len(run_names) != len(set(run_names)):
         raise ValueError("--runs must not contain duplicates")
@@ -546,8 +557,7 @@ def _valid_diagnostic(
             or not isinstance(evaluation, Mapping)
             or evaluation.get("deterministic_actions") is not True
             or evaluation.get("num_envs") != evaluation_num_envs
-            or evaluation.get("episodes_per_slope_per_stage")
-            != episodes_per_slope
+            or evaluation.get("episodes_per_slope_per_stage") != episodes_per_slope
             or evaluation.get("fixed_seeds") != list(evaluation_seeds)
             or evaluation.get("curriculum_stages") != ["training"]
             or (
@@ -612,8 +622,7 @@ def _rollout_manifest_matches(
             not isinstance(shards, list)
             or not shards
             or any(
-                not isinstance(name, str) or Path(name).name != name
-                for name in shards
+                not isinstance(name, str) or Path(name).name != name for name in shards
             )
             or len(shards) != len(set(shards))
             or set(shards) != actual_shards
@@ -662,16 +671,20 @@ def _teacher_command(
         "--seed",
         str(args.seed),
     ]
+    if spec.stability_reward_curriculum:
+        command.append("--stability-reward-curriculum")
     for name, weight in getattr(args, "reward_weight_overrides", {}).items():
         command.extend(("--reward-weight", f"{name}={weight!r}"))
-    command.extend([
-        "--run_name",
-        f"{spec.name}-s0",
-        "--device",
-        LOGICAL_CUDA_DEVICE,
-        "--headless",
-        f"hydra.run.dir={run_dir / 'hydra' / 's0'}",
-    ])
+    command.extend(
+        [
+            "--run_name",
+            f"{spec.name}-s0",
+            "--device",
+            LOGICAL_CUDA_DEVICE,
+            "--headless",
+            f"hydra.run.dir={run_dir / 'hydra' / 's0'}",
+        ]
+    )
     if resume is None:
         command.extend(("--experiment-dir", os.fspath(run_dir / "s0")))
     else:
@@ -773,9 +786,7 @@ def _run_one_pipeline(
         log_path=logs / "02_s0_diagnostic.log",
         label=label,
         stage="S0",
-        is_current=lambda: _valid_diagnostic(
-            s0_report, teacher, **diagnostic_identity
-        ),
+        is_current=lambda: _valid_diagnostic(s0_report, teacher, **diagnostic_identity),
         registry=registry,
         stop_event=stop_event,
     )
@@ -788,9 +799,7 @@ def _run_one_pipeline(
         ):
             collect_command = [
                 sys.executable,
-                os.fspath(
-                    REPOSITORY_ROOT / "scripts" / "collect_teacher_rollouts.py"
-                ),
+                os.fspath(REPOSITORY_ROOT / "scripts" / "collect_teacher_rollouts.py"),
                 "--task",
                 args.task,
                 "--teacher",
@@ -1045,7 +1054,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         details = "\n".join(f"- {name}: {message}" for name, message in failures)
         raise RuntimeError(f"ablation pipeline failed:\n{details}")
     if len(results) != len(specs):
-        raise RuntimeError("ablation pipeline stopped before every requested run completed")
+        raise RuntimeError(
+            "ablation pipeline stopped before every requested run completed"
+        )
     ordered_results = [results[spec.name] for spec in specs]
     summary = {"schema_version": 1, "plan": plan, "runs": ordered_results}
     write_json_atomic(args.output_dir / "summary.json", summary)

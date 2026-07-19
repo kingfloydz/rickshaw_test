@@ -32,6 +32,10 @@ RUN_NAMES = [
     "latent_dim_24",
     "latent_dim_32",
 ]
+STABILITY_RUN_NAMES = [
+    f"latent_dim_{latent_dim}_stability_curriculum"
+    for latent_dim in (6, 8, 10, 12, 14, 16, 18, 20)
+]
 
 
 def _exact_arguments(output_dir: Path, *, plan_only: bool = False) -> list[str]:
@@ -52,15 +56,77 @@ def _exact_arguments(output_dir: Path, *, plan_only: bool = False) -> list[str]:
 def test_unique_runs_are_the_requested_controlled_matrix() -> None:
     assert [spec.name for spec in pipeline.UNIQUE_RUNS] == RUN_NAMES
     assert [spec.training_parameters for spec in pipeline.UNIQUE_RUNS] == [
-        {"fat2_weight": 0.1, "rollout_steps": 48, "latent_dim": 16},
-        {"fat2_weight": 0.0, "rollout_steps": 48, "latent_dim": 16},
-        {"fat2_weight": 0.2, "rollout_steps": 48, "latent_dim": 16},
-        {"fat2_weight": 0.1, "rollout_steps": 24, "latent_dim": 16},
-        {"fat2_weight": 0.1, "rollout_steps": 64, "latent_dim": 16},
-        {"fat2_weight": 0.1, "rollout_steps": 48, "latent_dim": 8},
-        {"fat2_weight": 0.1, "rollout_steps": 48, "latent_dim": 24},
-        {"fat2_weight": 0.1, "rollout_steps": 48, "latent_dim": 32},
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 48,
+            "latent_dim": 16,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.0,
+            "rollout_steps": 48,
+            "latent_dim": 16,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.2,
+            "rollout_steps": 48,
+            "latent_dim": 16,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 24,
+            "latent_dim": 16,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 64,
+            "latent_dim": 16,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 48,
+            "latent_dim": 8,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 48,
+            "latent_dim": 24,
+            "stability_reward_curriculum": False,
+        },
+        {
+            "fat2_weight": 0.1,
+            "rollout_steps": 48,
+            "latent_dim": 32,
+            "stability_reward_curriculum": False,
+        },
     ]
+
+
+def test_stability_curriculum_matrix_covers_all_latent_dimensions() -> None:
+    specs = [pipeline.RUNS_BY_NAME[name] for name in STABILITY_RUN_NAMES]
+
+    assert [spec.latent_dim for spec in specs] == [6, 8, 10, 12, 14, 16, 18, 20]
+    assert all(spec.fat2_weight == 0.1 for spec in specs)
+    assert all(spec.stability_reward_curriculum for spec in specs)
+
+
+def test_stability_curriculum_teacher_command_enables_switch(
+    tmp_path: Path,
+) -> None:
+    args = argparse.Namespace(task="task", num_envs=4096, seed=42)
+    command = pipeline._teacher_command(
+        pipeline.RUNS_BY_NAME[STABILITY_RUN_NAMES[0]],
+        args,
+        tmp_path / STABILITY_RUN_NAMES[0],
+        None,
+    )
+
+    assert "--stability-reward-curriculum" in command
 
 
 def test_exact_eight_gpu_plan_has_no_side_effects(
@@ -75,6 +141,7 @@ def test_exact_eight_gpu_plan_has_no_side_effects(
         zip(RUN_NAMES, range(8), strict=True)
     )
     assert plan["tensorboard_logdir"] == str((output_dir / "runs").resolve())
+    assert plan["num_envs"] == 8192
     assert plan["reward_weight_overrides"] == {}
     assert not output_dir.exists()
 
@@ -179,7 +246,9 @@ def test_ablation_worker_combines_physical_isolation_with_logical_device(
     launches: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setattr(pipeline, "_ppo_checkpoint", checkpoint)
     monkeypatch.setattr(pipeline, "_valid_diagnostic", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(pipeline, "_valid_s1_checkpoint", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        pipeline, "_valid_s1_checkpoint", lambda *_args, **_kwargs: True
+    )
     monkeypatch.setattr(
         pipeline,
         "_run_command",
@@ -239,7 +308,9 @@ def test_s0_diagnostic_failure_does_not_block_s1_training(
 
     monkeypatch.setattr(pipeline, "_ppo_checkpoint", checkpoint)
     monkeypatch.setattr(pipeline, "_valid_s1_checkpoint", valid_s1)
-    monkeypatch.setattr(pipeline, "_rollout_manifest_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        pipeline, "_rollout_manifest_matches", lambda *_args, **_kwargs: True
+    )
     monkeypatch.setattr(pipeline, "_valid_diagnostic", valid_diagnostic)
     monkeypatch.setattr(pipeline, "_run_command", run_command)
     args = argparse.Namespace(
@@ -365,7 +436,7 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     partial = tmp_path / "model_10.pt"
-    complete = tmp_path / "model_5999.pt"
+    complete = tmp_path / "model_3999.pt"
     wrong = tmp_path / "model_wrong.pt"
     for path in (partial, complete, wrong):
         path.write_bytes(b"checkpoint")
@@ -377,12 +448,12 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
             if Path(path) == wrong
             else spec.training_parameters
         )
-        iteration = 10 if Path(path) == partial else 5999
+        iteration = 10 if Path(path) == partial else 3999
         return {
             "iter": iteration,
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": parameters,
-                "max_iterations": 6000,
+                "max_iterations": 4000,
                 "task": "task",
                 "seed": 42,
                 "num_envs": 4096,
@@ -445,26 +516,32 @@ def test_s2_checkpoint_must_match_teacher_and_context_lineage(
         },
     )
 
-    assert pipeline._ppo_checkpoint(
-        tmp_path,
-        spec,
-        stage="s2_student_ppo",
-        task="task",
-        seed=42,
-        num_envs=4096,
-        teacher=teacher,
-        context=context,
-    ) is not None
-    assert pipeline._ppo_checkpoint(
-        tmp_path,
-        spec,
-        stage="s2_student_ppo",
-        task="task",
-        seed=42,
-        num_envs=4096,
-        teacher=other,
-        context=context,
-    ) is None
+    assert (
+        pipeline._ppo_checkpoint(
+            tmp_path,
+            spec,
+            stage="s2_student_ppo",
+            task="task",
+            seed=42,
+            num_envs=4096,
+            teacher=teacher,
+            context=context,
+        )
+        is not None
+    )
+    assert (
+        pipeline._ppo_checkpoint(
+            tmp_path,
+            spec,
+            stage="s2_student_ppo",
+            task="task",
+            seed=42,
+            num_envs=4096,
+            teacher=other,
+            context=context,
+        )
+        is None
+    )
 
 
 def test_s2_launcher_rejects_a_different_resume_lineage(tmp_path: Path) -> None:
@@ -518,9 +595,7 @@ def test_rollout_resume_requires_a_complete_matching_manifest(
     monkeypatch.setattr(
         pipeline,
         "load_stage_checkpoint",
-        lambda *_args, **_kwargs: {
-            pipeline.TRAINING_CONFIGURATION_KEY: configuration
-        },
+        lambda *_args, **_kwargs: {pipeline.TRAINING_CONFIGURATION_KEY: configuration},
     )
     monkeypatch.setattr(
         pipeline,
@@ -550,9 +625,7 @@ def test_rollout_resume_requires_a_complete_matching_manifest(
         "num_steps_per_stage": pipeline.DISTILLATION_ROLLOUT_STEPS,
         "shards": [shard.name],
     }
-    (rollout_dir / "manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
+    (rollout_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     assert pipeline._rollout_manifest_matches(
         rollout_dir,
@@ -597,7 +670,7 @@ def test_s1_resume_matches_the_training_invocation(
         lambda *_args, **_kwargs: {
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": spec.training_parameters,
-                "max_iterations": 4000,
+                "max_iterations": 3000,
                 "task": "task",
                 "seed": 42,
                 "num_envs": None,
@@ -606,7 +679,7 @@ def test_s1_resume_matches_the_training_invocation(
             pipeline.CHECKPOINT_LINEAGE_KEY: {
                 "teacher_checkpoint": str(teacher.resolve())
             },
-            "training": {"completed_iterations": 4000},
+            "training": {"completed_iterations": 3000},
         },
     )
 
@@ -618,7 +691,9 @@ def test_s1_resume_matches_the_training_invocation(
     )
 
 
-def test_diagnostic_resume_matches_protocol_and_newest_dependency(tmp_path: Path) -> None:
+def test_diagnostic_resume_matches_protocol_and_newest_dependency(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "checkpoint.pt"
     teacher = tmp_path / "teacher.pt"
     baseline = tmp_path / "s1.json"

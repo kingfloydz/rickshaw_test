@@ -10,7 +10,6 @@ import pytest
 from g1_rickshaw_lab.validation import (
     GUIDE_SCAN_RANGE_ORDER,
     SAFETY_THRESHOLD_FIELDS,
-    VALIDATION_SIGNED_SLOPES,
     ValidationReportError,
     build_feasibility_scan_plan,
     build_positive_candidate_grid,
@@ -99,7 +98,9 @@ def test_report_round_trip_keeps_paths_status_and_diagnostics(tmp_path: Path) ->
     loaded = load_report(path, expected_tool="validate_dynamics")
     assert loaded["status"] == "failed"
     assert loaded["failures"] == ["diagnostic mismatch"]
-    assert loaded["inputs"]["assets"]["robot_urdf"] == str(assets["robot_urdf"].resolve())
+    assert loaded["inputs"]["assets"]["robot_urdf"] == str(
+        assets["robot_urdf"].resolve()
+    )
 
 
 def test_report_rejects_nonfinite_metrics_and_invalid_failures(tmp_path: Path) -> None:
@@ -197,7 +198,11 @@ def test_feasibility_scan_plan_has_stable_endpoints_and_crosses() -> None:
     }
     plan = build_feasibility_scan_plan(ranges)
     names = [point.name for point in plan]
-    assert names[:3] == ["nominal", "payload.mass:minimum", "payload.mass:maximum"]
+    assert names[:3] == [
+        "nominal",
+        "torso.mass_delta:minimum",
+        "torso.mass_delta:maximum",
+    ]
     assert len(plan) == 1 + 2 * len(GUIDE_SCAN_RANGE_ORDER) + 2
     assert names[-2:] == [
         "cross:heavy_high_rr",

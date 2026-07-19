@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 import re
 
-from _isaaclab_wrappers import add_project_source_to_path, require_existing_file, run_isaaclab_rsl_rl
+from _isaaclab_wrappers import (
+    add_project_source_to_path,
+    require_existing_file,
+    run_isaaclab_rsl_rl,
+)
 
 add_project_source_to_path()
 
@@ -39,6 +43,7 @@ from _training_configuration import (  # noqa: E402
     cli_value,
     publish_training_configuration,
 )
+
 DEFAULT_TASK = GUIDE_TRAINING_TASK
 S0_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s0_teacher"]
 
@@ -60,6 +65,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--rollout-steps", type=int, choices=SUPPORTED_ROLLOUT_STEPS, default=None
+    )
+    parser.add_argument(
+        "--stability-reward-curriculum", action="store_true", default=None
     )
     parser.add_argument(
         "--reward-weight",
@@ -107,7 +115,9 @@ def main() -> int:
         )
         resume_configuration = loaded[TRAINING_CONFIGURATION_KEY]
     resume_parameters = (
-        None if resume_configuration is None else resume_configuration["training_parameters"]
+        None
+        if resume_configuration is None
+        else resume_configuration["training_parameters"]
     )
     if resume_configuration is None:
         reward_weight_overrides = requested_reward_overrides
@@ -115,23 +125,39 @@ def main() -> int:
         resumed_reward_overrides = reward_weight_overrides_from_configuration(
             resume_configuration
         )
-        if requested_reward_overrides and requested_reward_overrides != resumed_reward_overrides:
+        if (
+            requested_reward_overrides
+            and requested_reward_overrides != resumed_reward_overrides
+        ):
             raise ValueError("S0 resume cannot change reward weights")
         reward_weight_overrides = resumed_reward_overrides
-    defaults = DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
+    defaults = (
+        DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
+    )
     fat2_weight = float(
         defaults["fat2_weight"] if args.fat2_weight is None else args.fat2_weight
     )
-    latent_dim = int(defaults["latent_dim"] if args.latent_dim is None else args.latent_dim)
+    latent_dim = int(
+        defaults["latent_dim"] if args.latent_dim is None else args.latent_dim
+    )
     rollout_steps = int(
         defaults["rollout_steps"] if args.rollout_steps is None else args.rollout_steps
+    )
+    stability_reward_curriculum = bool(
+        defaults["stability_reward_curriculum"]
+        if args.stability_reward_curriculum is None
+        else args.stability_reward_curriculum
     )
     if resume_parameters is not None and (
         fat2_weight != float(resume_parameters["fat2_weight"])
         or latent_dim != int(resume_parameters["latent_dim"])
         or rollout_steps != int(resume_parameters["rollout_steps"])
+        or stability_reward_curriculum
+        != bool(resume_parameters["stability_reward_curriculum"])
     ):
-        raise ValueError("S0 resume cannot change FAT2, latent_dim, or rollout_steps")
+        raise ValueError(
+            "S0 resume cannot change FAT2, latent_dim, rollout_steps, or stability reward curriculum"
+        )
     os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = "{}"
     seed = cli_value(
         remaining,
@@ -162,6 +188,7 @@ def main() -> int:
             "latent_dim": latent_dim,
             "num_steps_per_env": rollout_steps,
             "save_interval": training_artifact_interval(rollout_steps),
+            "stability_reward_curriculum": stability_reward_curriculum,
             REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
             "launcher_arguments": list(remaining),
         },
@@ -170,6 +197,7 @@ def main() -> int:
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
         rollout_steps=rollout_steps,
+        stability_reward_curriculum=stability_reward_curriculum,
     )
     validate_guide_training_configuration(
         training_configuration,

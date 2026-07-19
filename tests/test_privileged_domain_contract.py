@@ -9,14 +9,13 @@ import pytest
 import torch
 
 from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import ACTION_DIM
+from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import (
+    events as events_module,
+)
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     DOMAIN_PARAMETER_NAMES,
     DomainRandomizationCfg,
-    domain_epoch_seed,
     effective_cart_mass_com_bounds,
-    initialize_domain_randomization,
     sample_domain_parameters,
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations import (
@@ -38,18 +37,15 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations impo
 
 def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
     ranges = {
-        "payload.mass": (0.0, 10.0),
+        "torso.mass_delta": (-1.0, 3.0),
+        "payload.mass": (-3.0, 3.0),
         "payload.com.x": (-0.5, 0.7),
         "payload.com.y": (-0.3, 0.3),
         "payload.com.z": (0.2, 1.2),
         "rolling_resistance.c_rr": (0.01, 0.03),
-        "terrain.friction": (0.5, 1.5),
+        "terrain.friction": (0.6, 1.1),
         "wheel.left_damping": (0.1, 0.3),
         "wheel.right_damping": (0.2, 0.6),
-        "motor.strength": (0.8, 1.2),
-        "joint.model_error": (-0.25, 0.25),
-        "control.delay": (0.0, 0.04),
-        "observation.delay": (0.0, 0.06),
     }
     nominal = {name: 0.5 * (low + high) for name, (low, high) in ranges.items()}
     return DomainRandomizationCfg(
@@ -57,16 +53,16 @@ def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
         ranges=ranges,
         nominal=nominal,
         calibration={},
-        refresh_interval_iterations=200,
     )
 
 
 def test_privileged_feature_schemas_are_explicit_and_fixed() -> None:
     assert set(_domain_cfg().ranges) == set(DOMAIN_PARAMETER_NAMES)
-    assert len(TEACHER_STATIC_FEATURE_NAMES) == TEACHER_STATIC_DIM == 40
+    assert len(TEACHER_STATIC_FEATURE_NAMES) == TEACHER_STATIC_DIM == 10
     assert len(TEACHER_DYNAMIC_FEATURE_NAMES) == TEACHER_DYNAMIC_DIM == 21
-    assert CRITIC_PRIVILEGED_DIM == TEACHER_STATIC_DIM + TEACHER_DYNAMIC_DIM + 3 == 64
-    assert TEACHER_STATIC_FEATURE_NAMES[:8] == (
+    assert CRITIC_PRIVILEGED_DIM == TEACHER_STATIC_DIM + TEACHER_DYNAMIC_DIM + 3 == 34
+    assert TEACHER_STATIC_FEATURE_NAMES == (
+        "robot.torso_mass",
         "cart.total_mass",
         "cart.com.x",
         "cart.com.y",
@@ -75,13 +71,6 @@ def test_privileged_feature_schemas_are_explicit_and_fixed() -> None:
         "terrain.friction",
         "wheel.left_damping",
         "wheel.right_damping",
-    )
-    assert TEACHER_STATIC_FEATURE_NAMES[8:37] == tuple(
-        f"actuator.effective_gain.{index}" for index in range(ACTION_DIM)
-    )
-    assert TEACHER_STATIC_FEATURE_NAMES[-3:] == (
-        "control.delay",
-        "observation.delay",
         "terrain.slope",
     )
 
@@ -105,7 +94,9 @@ def test_shape_probe_is_explicit_and_missing_runtime_state_fails() -> None:
         critic_privileged_state(probe)
 
 
-def test_teacher_static_contains_normalized_effective_physics_in_declared_order() -> None:
+def test_teacher_static_contains_normalized_effective_physics_in_declared_order() -> (
+    None
+):
     cfg = _domain_cfg()
     num_envs = 3
     cart_lower, cart_upper = effective_cart_mass_com_bounds(cfg.ranges)
@@ -117,19 +108,16 @@ def test_teacher_static_contains_normalized_effective_physics_in_declared_order(
     sampled = {
         name: torch.tensor((low, 0.5 * (low + high), high))
         for name, (low, high) in cfg.ranges.items()
-        if name != "joint.model_error"
     }
-    joint_error = torch.stack(
-        (
-            torch.full((ACTION_DIM,), -0.25),
-            torch.linspace(-0.25, 0.25, ACTION_DIM),
-            torch.full((ACTION_DIM,), 0.25),
-        )
-    )
+    nominal_torso_mass = 5.0
+    effective_torso_mass = nominal_torso_mass + sampled["torso.mass_delta"]
     env = SimpleNamespace(
         num_envs=num_envs,
         device="cpu",
         effective_cart_mass_com=effective_cart,
+        effective_torso_mass=effective_torso_mass,
+        torso_body_id=0,
+        _default_robot_masses_cpu=torch.full((num_envs, 1), nominal_torso_mass),
         slope=torch.tensor(
             (
                 min(SLOPE_GRADIENTS),
@@ -139,11 +127,11 @@ def test_teacher_static_contains_normalized_effective_physics_in_declared_order(
         ),
     )
 
-    events_module._update_teacher_static_domain(env, cfg, sampled, joint_error)
+    events_module._update_teacher_static_domain(env, cfg, sampled)
 
-    effective_gain = sampled["motor.strength"][:, None] * (1.0 + joint_error)
     expected_raw = torch.cat(
         (
+            effective_torso_mass[:, None],
             effective_cart,
             sampled["rolling_resistance.c_rr"][:, None],
             sampled["terrain.friction"][:, None],
@@ -151,9 +139,6 @@ def test_teacher_static_contains_normalized_effective_physics_in_declared_order(
                 (sampled["wheel.left_damping"], sampled["wheel.right_damping"]),
                 dim=-1,
             ),
-            effective_gain,
-            sampled["control.delay"][:, None],
-            sampled["observation.delay"][:, None],
         ),
         dim=-1,
     )
@@ -191,7 +176,9 @@ def _dynamic_env() -> SimpleNamespace:
         path_normal_w=normal,
         scene={
             "robot": SimpleNamespace(
-                data=SimpleNamespace(root_lin_vel_w=torch.tensor(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0))))
+                data=SimpleNamespace(
+                    root_lin_vel_w=torch.tensor(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)))
+                )
             ),
             "rickshaw": SimpleNamespace(
                 data=SimpleNamespace(
@@ -215,20 +202,50 @@ def test_dynamic_privilege_uses_sln_frame_and_force_then_torque_per_hand() -> No
     expected = torch.tensor(
         (
             (
-                2.0, 3.0, 1.0,
-                8.0, 9.0, 7.0,
+                2.0,
+                3.0,
+                1.0,
+                8.0,
+                9.0,
+                7.0,
                 0.1,
-                20.0, 21.0,
-                2.0, 3.0, 1.0, 5.0, 6.0, 4.0,
-                8.0, 9.0, 7.0, 11.0, 12.0, 10.0,
+                20.0,
+                21.0,
+                2.0,
+                3.0,
+                1.0,
+                5.0,
+                6.0,
+                4.0,
+                8.0,
+                9.0,
+                7.0,
+                11.0,
+                12.0,
+                10.0,
             ),
             (
-                5.0, 6.0, 4.0,
-                11.0, 12.0, 10.0,
+                5.0,
+                6.0,
+                4.0,
+                11.0,
+                12.0,
+                10.0,
                 0.2,
-                22.0, 23.0,
-                102.0, 103.0, 101.0, 105.0, 106.0, 104.0,
-                108.0, 109.0, 107.0, 111.0, 112.0, 110.0,
+                22.0,
+                23.0,
+                102.0,
+                103.0,
+                101.0,
+                105.0,
+                106.0,
+                104.0,
+                108.0,
+                109.0,
+                107.0,
+                111.0,
+                112.0,
+                110.0,
             ),
         )
     )
@@ -316,68 +333,28 @@ def test_critic_is_exact_static_dynamic_and_three_diagnostics() -> None:
     torch.testing.assert_close(result, expected)
 
 
-def _sample_epoch(cfg: DomainRandomizationCfg, seed: int, epoch: int):
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(domain_epoch_seed(seed, epoch))
+def _sample_startup(cfg: DomainRandomizationCfg, seed: int):
+    generator = torch.Generator(device="cpu").manual_seed(seed)
     return sample_domain_parameters(cfg, 8, device="cpu", generator=generator)
 
 
-def test_epoch_sampling_is_deterministic_and_nominal_mode_ignores_seed() -> None:
+def test_startup_sampling_is_deterministic_and_nominal_mode_ignores_seed() -> None:
     cfg = _domain_cfg()
-    first_values, first_error = _sample_epoch(cfg, 1234, 7)
-    repeated_values, repeated_error = _sample_epoch(cfg, 1234, 7)
-    next_values, next_error = _sample_epoch(cfg, 1234, 8)
+    first_values = _sample_startup(cfg, 1234)
+    repeated_values = _sample_startup(cfg, 1234)
+    next_values = _sample_startup(cfg, 1235)
 
     for name in first_values:
-        torch.testing.assert_close(first_values[name], repeated_values[name], rtol=0.0, atol=0.0)
-    torch.testing.assert_close(first_error, repeated_error, rtol=0.0, atol=0.0)
-    assert any(not torch.equal(first_values[name], next_values[name]) for name in first_values)
-    assert not torch.equal(first_error, next_error)
-    for name in ("control.delay", "observation.delay"):
         torch.testing.assert_close(
-            first_values[name], torch.full_like(first_values[name], cfg.nominal[name])
+            first_values[name], repeated_values[name], rtol=0.0, atol=0.0
         )
+    assert any(
+        not torch.equal(first_values[name], next_values[name]) for name in first_values
+    )
 
     fixed = replace(cfg, enabled=False)
-    fixed_a, fixed_error_a = _sample_epoch(fixed, 1, 0)
-    fixed_b, fixed_error_b = _sample_epoch(fixed, 999, 99)
+    fixed_a = _sample_startup(fixed, 1)
+    fixed_b = _sample_startup(fixed, 999)
     for name, value in fixed_a.items():
         torch.testing.assert_close(value, fixed_b[name], rtol=0.0, atol=0.0)
         torch.testing.assert_close(value, torch.full_like(value, fixed.nominal[name]))
-    torch.testing.assert_close(fixed_error_a, fixed_error_b, rtol=0.0, atol=0.0)
-
-
-def test_domain_iteration_repeated_inside_epoch_is_a_strict_noop(monkeypatch) -> None:
-    cfg = _domain_cfg()
-    env = SimpleNamespace(
-        num_envs=4,
-        device="cpu",
-        step_dt=0.02,
-        slope=torch.zeros(4),
-        scene=SimpleNamespace(terrain=SimpleNamespace(terrain_types=torch.arange(4))),
-        cfg=SimpleNamespace(seed=42),
-        extras={},
-        applied_epochs=[],
-    )
-    def fake_apply(target, _cfg, epoch: int, *, scale: float) -> None:
-        target.applied_epochs.append((epoch, scale))
-        target.domain_randomization_epoch = epoch
-        target.domain_randomization_initialized = True
-        target.normalized_teacher_static_domain = torch.full(
-            (target.num_envs, TEACHER_STATIC_DOMAIN_DIM), float(epoch)
-        )
-
-    monkeypatch.setattr(events_module, "_apply_domain_epoch", fake_apply)
-    initialize_domain_randomization(env, None, cfg)
-    epoch_zero = env.normalized_teacher_static_domain.clone()
-
-    assert env.set_domain_randomization_iteration(199) is False
-    assert env.applied_epochs == [(0, 0.0)]
-    torch.testing.assert_close(env.normalized_teacher_static_domain, epoch_zero)
-
-    assert env.set_domain_randomization_iteration(200) is True
-    assert env.applied_epochs == [(0, 0.0), (1, 1.0 / 30.0)]
-    epoch_one = env.normalized_teacher_static_domain.clone()
-    assert env.set_domain_randomization_iteration(200) is False
-    assert env.applied_epochs == [(0, 0.0), (1, 1.0 / 30.0)]
-    torch.testing.assert_close(env.normalized_teacher_static_domain, epoch_one)

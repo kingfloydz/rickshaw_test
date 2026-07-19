@@ -77,7 +77,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Previously exported .pt raw RewardManager samples.",
     )
     parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--policy-kind", choices=("auto", "teacher", "student"), default="auto")
+    parser.add_argument(
+        "--policy-kind", choices=("auto", "teacher", "student"), default="auto"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS)
     parser.add_argument("--samples-per-slope", type=int, default=10_000)
@@ -263,6 +265,7 @@ def _physics_snapshot(
         "angular_limit",
     )
     actual_values = {
+        "torso.mass_delta": base_env.torso_mass_delta,
         "payload.mass": base_env._payload_mass,
         "payload.com.x": base_env._payload_com[:, 0],
         "payload.com.y": base_env._payload_com[:, 1],
@@ -276,16 +279,6 @@ def _physics_snapshot(
         actual_values[f"d6.{field}"] = torch.full(
             (num_envs,), float(getattr(d6_cfg, field)), device=device
         )
-    step_dt = float(base_env.step_dt)
-    actual_values.update(
-        {
-            "motor.strength": base_env.motor_strength,
-            "control.delay": base_env.control_delay_steps.to(torch.float32) * step_dt,
-            "observation.delay": base_env.observation_delay_steps.to(torch.float32)
-            * step_dt,
-            "joint.model_error": base_env.joint_model_error,
-        }
-    )
     if set(actual_values) != set(C1_NOMINAL_PHYSICS_FIELDS):
         raise RewardCalibrationError("C1 runtime physical fields are incomplete")
     nominal_values = dict(nominal_source)
@@ -304,7 +297,9 @@ def _physics_snapshot(
     for name, value in sorted(actual_values.items()):
         tensor = value.detach().float()
         if tensor.numel() == 0 or torch.any(~torch.isfinite(tensor)):
-            raise RewardCalibrationError(f"C1 physical value {name!r} is empty or non-finite")
+            raise RewardCalibrationError(
+                f"C1 physical value {name!r} is empty or non-finite"
+            )
         minimum = float(torch.amin(tensor).cpu())
         maximum = float(torch.amax(tensor).cpu())
         result[name] = {"minimum": minimum, "maximum": maximum}
@@ -320,7 +315,6 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     from rsl_rl.runners import OnPolicyRunner
 
     import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
     checkpoint, _checkpoint_payload, training_configuration = _checkpoint_header(
         args.checkpoint
@@ -339,9 +333,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         env_cfg,
         reward_weight_overrides_from_configuration(training_configuration),
     )
-    env_cfg.rewards.fat2_prior_exp.weight = float(
-        training_parameters["fat2_weight"]
-    )
+    env_cfg.rewards.fat2_prior_exp.weight = float(training_parameters["fat2_weight"])
     registry_key = (
         "rsl_rl_cfg_entry_point"
         if policy_kind == "teacher"
@@ -390,21 +382,28 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
                 actions = policy(observation)
                 next_observation, _, dones, extras = env.step(actions)
             time_outs = extras["time_outs"]
-            if torch.any(dones.to(dtype=torch.bool) != (
-                base_env.reset_terminated | time_outs.to(dtype=torch.bool)
-            )):
-                raise RewardCalibrationError("RSL wrapper done mask differs from termination/timeout buffers")
+            if torch.any(
+                dones.to(dtype=torch.bool)
+                != (base_env.reset_terminated | time_outs.to(dtype=torch.bool))
+            ):
+                raise RewardCalibrationError(
+                    "RSL wrapper done mask differs from termination/timeout buffers"
+                )
             raw_step, step_sources = collect_reward_manager_unweighted_step(
                 base_env.reward_manager
             )
             if sources is None:
                 sources = step_sources
             elif sources != step_sources:
-                raise RewardCalibrationError("RewardManager term extraction source changed during rollout")
+                raise RewardCalibrationError(
+                    "RewardManager term extraction source changed during rollout"
+                )
             done_mask = dones.to(dtype=torch.bool)
             valid = ~done_mask
             done_rejected += int(torch.sum(done_mask).item())
-            selected = _select_quota_ids(valid, slope_slots, counts, args.samples_per_slope)
+            selected = _select_quota_ids(
+                valid, slope_slots, counts, args.samples_per_slope
+            )
             pending_slope_indices.append(
                 slope_slots[selected].detach().to(dtype=torch.long).cpu()
             )
@@ -417,7 +416,9 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         sample_slope_indices = torch.cat(pending_slope_indices)
         slope_counts = {
             f"{slope:+.2f}": int(count)
-            for slope, count in zip(SIGNED_SLOPES, counts.detach().cpu().tolist(), strict=True)
+            for slope, count in zip(
+                SIGNED_SLOPES, counts.detach().cpu().tolist(), strict=True
+            )
         }
         artifact = {
             "schema_version": RAW_REWARD_SAMPLE_SCHEMA_VERSION,
@@ -491,7 +492,9 @@ def main() -> int:
             os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(
                 args.feasibility_envelope.resolve()
             )
-            os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(args.reset_poses.resolve())
+            os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(
+                args.reset_poses.resolve()
+            )
             from isaaclab.app import AppLauncher
 
             args.headless = True

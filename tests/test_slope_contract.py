@@ -41,9 +41,9 @@ def test_terrain_index_rejects_unconfigured_gradient(gradient: float) -> None:
 
 
 def test_balanced_slope_counts_are_deterministic() -> None:
-    counts = balanced_slope_counts(4096)
-    assert counts == (216,) * 11 + (215,) * 8
-    assert sum(counts) == 4096
+    counts = balanced_slope_counts(8192)
+    assert counts == (432,) * 3 + (431,) * 16
+    assert sum(counts) == 8192
 
     with pytest.raises(ValueError, match="positive integer"):
         balanced_slope_counts(0)

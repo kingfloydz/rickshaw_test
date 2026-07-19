@@ -99,6 +99,7 @@ GUIDE_REWARD_NORMALIZATION_SCALES = {
 }
 
 C1_NOMINAL_PHYSICS_FIELDS = (
+    "torso.mass_delta",
     "payload.mass",
     "payload.com.x",
     "payload.com.y",
@@ -115,11 +116,8 @@ C1_NOMINAL_PHYSICS_FIELDS = (
     "d6.max_torque",
     "d6.linear_limit",
     "d6.angular_limit",
-    "motor.strength",
-    "control.delay",
-    "observation.delay",
-    "joint.model_error",
 )
+
 
 class RewardCalibrationError(ValueError):
     """Raised when reward samples do not satisfy the calibration contract."""
@@ -177,16 +175,12 @@ def validate_c1_physics_snapshot(
     for name in C1_NOMINAL_PHYSICS_FIELDS:
         bounds = snapshot[name]
         if not isinstance(bounds, Mapping) or set(bounds) != {"minimum", "maximum"}:
-            raise RewardCalibrationError(
-                f"c1_physics.{name} must contain exactly minimum/maximum"
-            )
+            raise RewardCalibrationError(f"c1_physics.{name} must contain exactly minimum/maximum")
         nominal = _finite_number(nominal_values[name], f"c1_nominal_values.{name}")
         minimum = _finite_number(bounds["minimum"], f"c1_physics.{name}.minimum")
         maximum = _finite_number(bounds["maximum"], f"c1_physics.{name}.maximum")
         if abs(minimum - nominal) > tolerance or abs(maximum - nominal) > tolerance:
-            raise RewardCalibrationError(
-                f"fixed C1 physical value {name!r} differs from nominal {nominal}"
-            )
+            raise RewardCalibrationError(f"fixed C1 physical value {name!r} differs from nominal {nominal}")
 
 
 def write_reward_calibration_json(
@@ -198,9 +192,7 @@ def write_reward_calibration_json(
     directory = Path(output_dir).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / "reward_calibration.json"
-    descriptor, temporary = tempfile.mkstemp(
-        dir=directory, prefix=".reward_calibration.", suffix=".tmp"
-    )
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".reward_calibration.", suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="ascii") as stream:
             json.dump(payload, stream, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
@@ -242,10 +234,7 @@ def _linear_quantile(sorted_values: Sequence[float], probability: float) -> floa
 def summarize_unweighted_samples(samples: Sequence[Any], *, term_name: str) -> dict[str, float | int]:
     if hasattr(samples, "detach") and hasattr(samples, "reshape"):
         samples = samples.detach().cpu().reshape(-1).tolist()
-    values = sorted(
-        _finite_number(value, f"samples.{term_name}[{index}]")
-        for index, value in enumerate(samples)
-    )
+    values = sorted(_finite_number(value, f"samples.{term_name}[{index}]") for index, value in enumerate(samples))
     if not values:
         raise RewardCalibrationError(f"samples.{term_name} must not be empty")
     return {
@@ -274,10 +263,7 @@ def _validate_term_contract(
             f"reward weights differ from guide section 11.1 terms: "
             f"missing={sorted(expected - weight_names)}, unknown={sorted(weight_names - expected)}"
         )
-    weights = {
-        name: _finite_number(term_weights[name], f"term_weights.{name}")
-        for name in GUIDE_REWARD_TERMS
-    }
+    weights = {name: _finite_number(term_weights[name], f"term_weights.{name}") for name in GUIDE_REWARD_TERMS}
     counts = {name: len(raw_terms[name]) for name in GUIDE_REWARD_TERMS}
     if any(count <= 0 for count in counts.values()):
         raise RewardCalibrationError("every reward term must contain normal C1 samples")
@@ -300,13 +286,8 @@ def _calibrate_reward_terms_unstratified(
     weights, sample_count = _validate_term_contract(raw_terms, term_weights)
     if weights[SPEED_REFERENCE_TERM] <= 0.0:
         raise RewardCalibrationError("track_speed_exp must retain a positive reference weight")
-    summaries = {
-        name: summarize_unweighted_samples(raw_terms[name], term_name=name)
-        for name in GUIDE_REWARD_TERMS
-    }
-    speed_weighted_p90 = weights[SPEED_REFERENCE_TERM] * float(
-        summaries[SPEED_REFERENCE_TERM]["p90"]
-    )
+    summaries = {name: summarize_unweighted_samples(raw_terms[name], term_name=name) for name in GUIDE_REWARD_TERMS}
+    speed_weighted_p90 = weights[SPEED_REFERENCE_TERM] * float(summaries[SPEED_REFERENCE_TERM]["p90"])
     if speed_weighted_p90 <= 0.0:
         raise RewardCalibrationError("track_speed_exp p90 must provide a positive calibration reference")
     speed_reference = abs(speed_weighted_p90)
@@ -357,40 +338,27 @@ def _calibrate_reward_terms_unstratified(
     }
 
 
-def _normalized_slope_indices(
-    sample_slope_indices: Sequence[Any], sample_count: int
-) -> list[int]:
+def _normalized_slope_indices(sample_slope_indices: Sequence[Any], sample_count: int) -> list[int]:
     if hasattr(sample_slope_indices, "detach"):
         sample_slope_indices = sample_slope_indices.detach().cpu().reshape(-1).tolist()
     elif hasattr(sample_slope_indices, "reshape") and hasattr(sample_slope_indices, "tolist"):
         sample_slope_indices = sample_slope_indices.reshape(-1).tolist()
-    if not isinstance(sample_slope_indices, Sequence) or isinstance(
-        sample_slope_indices, (str, bytes)
-    ):
+    if not isinstance(sample_slope_indices, Sequence) or isinstance(sample_slope_indices, (str, bytes)):
         raise RewardCalibrationError("sample_slope_indices must be a one-dimensional sequence")
     if len(sample_slope_indices) != sample_count:
         raise RewardCalibrationError("sample_slope_indices length differs from reward samples")
     result: list[int] = []
     for position, value in enumerate(sample_slope_indices):
         if isinstance(value, bool) or not isinstance(value, int):
-            raise RewardCalibrationError(
-                f"sample_slope_indices[{position}] must be an integer"
-            )
+            raise RewardCalibrationError(f"sample_slope_indices[{position}] must be an integer")
         if not 0 <= value < len(SIGNED_C1_SLOPES):
             raise RewardCalibrationError(
-                f"sample_slope_indices[{position}] lies outside "
-                f"[0, {len(SIGNED_C1_SLOPES) - 1}]"
+                f"sample_slope_indices[{position}] lies outside [0, {len(SIGNED_C1_SLOPES) - 1}]"
             )
         result.append(value)
-    missing = [
-        f"{SIGNED_C1_SLOPES[index]:+.2f}"
-        for index in range(len(SIGNED_C1_SLOPES))
-        if index not in result
-    ]
+    missing = [f"{SIGNED_C1_SLOPES[index]:+.2f}" for index in range(len(SIGNED_C1_SLOPES)) if index not in result]
     if missing:
-        raise RewardCalibrationError(
-            f"sample_slope_indices do not cover all fixed slopes: missing={missing}"
-        )
+        raise RewardCalibrationError(f"sample_slope_indices do not cover all fixed slopes: missing={missing}")
     return result
 
 
@@ -403,60 +371,38 @@ def calibrate_reward_terms(
 ) -> dict[str, Any]:
     """Calibrate globally and, when labels are supplied, independently per slope."""
 
-    result = _calibrate_reward_terms_unstratified(
-        raw_terms, term_weights, limit_ratio=limit_ratio
-    )
+    result = _calibrate_reward_terms_unstratified(raw_terms, term_weights, limit_ratio=limit_ratio)
     if sample_slope_indices is None:
         return result
 
     sample_count = int(result["normal_sample_count"])
     indices = _normalized_slope_indices(sample_slope_indices, sample_count)
     normalized_terms = {
-        name: (
-            values.detach().cpu().reshape(-1).tolist()
-            if hasattr(values, "detach")
-            else list(values)
-        )
+        name: (values.detach().cpu().reshape(-1).tolist() if hasattr(values, "detach") else list(values))
         for name, values in raw_terms.items()
     }
     per_slope: dict[str, dict[str, Any]] = {}
     slope_failures: dict[str, list[str]] = {}
     for slope_index, slope in enumerate(SIGNED_C1_SLOPES):
         selected = [position for position, value in enumerate(indices) if value == slope_index]
-        slope_terms = {
-            name: [values[position] for position in selected]
-            for name, values in normalized_terms.items()
-        }
+        slope_terms = {name: [values[position] for position in selected] for name, values in normalized_terms.items()}
         label = f"{slope:+.2f}"
-        slope_result = _calibrate_reward_terms_unstratified(
-            slope_terms, term_weights, limit_ratio=limit_ratio
-        )
+        slope_result = _calibrate_reward_terms_unstratified(slope_terms, term_weights, limit_ratio=limit_ratio)
         per_slope[label] = slope_result
         if slope_result["failures"]:
             slope_failures[label] = list(slope_result["failures"])
 
     global_failures = list(result["failures"])
-    all_failures = sorted(
-        set(global_failures).union(
-            term for failures in slope_failures.values() for term in failures
-        )
-    )
+    all_failures = sorted(set(global_failures).union(term for failures in slope_failures.values() for term in failures))
     for name, term in result["terms"].items():
-        slope_terms = {
-            label: slope_result["terms"][name]
-            for label, slope_result in per_slope.items()
-        }
+        slope_terms = {label: slope_result["terms"][name] for label, slope_result in per_slope.items()}
         allowed_weights = {
             label: slope_term["maximum_allowed_abs_weight"]
             for label, slope_term in slope_terms.items()
             if slope_term["maximum_allowed_abs_weight"] is not None
         }
         strictest_weight = min(allowed_weights.values()) if allowed_weights else None
-        limiting_slope = (
-            min(allowed_weights, key=allowed_weights.__getitem__)
-            if allowed_weights
-            else None
-        )
+        limiting_slope = min(allowed_weights, key=allowed_weights.__getitem__) if allowed_weights else None
         exceedance_ratios: dict[str, float] = {}
         for label, slope_term in slope_terms.items():
             cap = slope_term["maximum_allowed_abs_p90"]
@@ -465,36 +411,22 @@ def calibrate_reward_terms(
                 continue
             cap_value = float(cap)
             exceedance_ratios[label] = (
-                weighted / cap_value
-                if cap_value > 0.0
-                else (math.inf if weighted > 0.0 else 0.0)
+                weighted / cap_value if cap_value > 0.0 else (math.inf if weighted > 0.0 else 0.0)
             )
-        worst_slope = (
-            max(exceedance_ratios, key=exceedance_ratios.__getitem__)
-            if exceedance_ratios
-            else None
-        )
-        failing_slopes = [
-            label for label, slope_term in slope_terms.items() if not slope_term["passed"]
-        ]
+        worst_slope = max(exceedance_ratios, key=exceedance_ratios.__getitem__) if exceedance_ratios else None
+        failing_slopes = [label for label, slope_term in slope_terms.items() if not slope_term["passed"]]
         term["global_passed"] = bool(term["passed"])
         term["passed"] = bool(term["passed"]) and not failing_slopes
         term["failing_slopes"] = failing_slopes
         term["worst_slope"] = worst_slope
         term["worst_slope_weighted_abs_p90"] = (
-            None
-            if worst_slope is None
-            else float(slope_terms[worst_slope]["weighted_abs_p90"])
+            None if worst_slope is None else float(slope_terms[worst_slope]["weighted_abs_p90"])
         )
-        term["worst_slope_cap_exceedance_ratio"] = (
-            None if worst_slope is None else exceedance_ratios[worst_slope]
-        )
+        term["worst_slope_cap_exceedance_ratio"] = None if worst_slope is None else exceedance_ratios[worst_slope]
         term["limiting_slope"] = limiting_slope
         term["stratified_maximum_allowed_abs_weight"] = strictest_weight
         if strictest_weight is not None and abs(float(term["weight"])) > strictest_weight:
-            term["recommended_weight_if_failed"] = math.copysign(
-                strictest_weight, float(term["weight"])
-            )
+            term["recommended_weight_if_failed"] = math.copysign(strictest_weight, float(term["weight"]))
 
     result["global_status"] = result["status"]
     result["global_failures"] = global_failures
@@ -512,12 +444,9 @@ def calibrate_reward_terms(
 def reward_manager_term_weights(reward_manager: Any) -> dict[str, float]:
     names = tuple(reward_manager.active_terms)
     if names != GUIDE_REWARD_TERMS:
-        raise RewardCalibrationError(
-            f"RewardManager active term order differs from guide: actual={names}"
-        )
+        raise RewardCalibrationError(f"RewardManager active term order differs from guide: actual={names}")
     return {
-        name: _finite_number(reward_manager.get_term_cfg(name).weight, f"RewardManager.{name}.weight")
-        for name in names
+        name: _finite_number(reward_manager.get_term_cfg(name).weight, f"RewardManager.{name}.weight") for name in names
     }
 
 
@@ -534,9 +463,7 @@ def collect_reward_manager_unweighted_step(reward_manager: Any) -> tuple[dict[st
 
     names = tuple(reward_manager.active_terms)
     if names != GUIDE_REWARD_TERMS:
-        raise RewardCalibrationError(
-            f"RewardManager active term order differs from guide: actual={names}"
-        )
+        raise RewardCalibrationError(f"RewardManager active term order differs from guide: actual={names}")
     step_reward = getattr(reward_manager, "_step_reward", None)
     if step_reward is None or getattr(step_reward, "ndim", None) != 2:
         raise RewardCalibrationError("RewardManager does not expose a two-dimensional _step_reward")
@@ -556,9 +483,7 @@ def collect_reward_manager_unweighted_step(reward_manager: Any) -> tuple[dict[st
     max_residual = float(residual.detach().abs().max().cpu())
     reference = float(expected_per_second.detach().abs().max().cpu())
     if max_residual > 1.0e-5 * (1.0 + reference):
-        raise RewardCalibrationError(
-            "RewardManager _step_reward is not the pinned per-second weighted-term ABI"
-        )
+        raise RewardCalibrationError("RewardManager _step_reward is not the pinned per-second weighted-term ABI")
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
     for index, name in enumerate(names):
@@ -591,17 +516,13 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
         raise RewardCalibrationError("raw samples must record one fixed non-negative integer seed")
     slopes = value.get("fixed_slopes")
     if not isinstance(slopes, Sequence) or isinstance(slopes, (str, bytes)):
-        raise RewardCalibrationError(
-            "raw samples must record the configured slope sequence"
-        )
+        raise RewardCalibrationError("raw samples must record the configured slope sequence")
     try:
         normalized_slopes = tuple(float(item) for item in slopes)
     except (TypeError, ValueError) as error:
         raise RewardCalibrationError("raw samples contain malformed fixed slopes") from error
     if normalized_slopes != SIGNED_C1_SLOPES:
-        raise RewardCalibrationError(
-            "raw samples do not cover the exact configured training slopes"
-        )
+        raise RewardCalibrationError("raw samples do not cover the exact configured training slopes")
     if value.get("normal_sample_definition") != NORMAL_SAMPLE_DEFINITION:
         raise RewardCalibrationError("raw samples use an unsupported normal-sample definition")
     raw_terms = value.get("raw_terms")
@@ -620,20 +541,11 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
             raise RewardCalibrationError(f"slope_sample_counts.{label} must be a positive integer")
         counts.append(count)
     if len(set(counts)) != 1 or sum(counts) != sample_count:
-        raise RewardCalibrationError(
-            "raw reward samples must be equally balanced over all configured slopes"
-        )
-    sample_slope_indices = _normalized_slope_indices(
-        value.get("sample_slope_indices"), sample_count
-    )
-    actual_counts = {
-        f"{slope:+.2f}": sample_slope_indices.count(index)
-        for index, slope in enumerate(SIGNED_C1_SLOPES)
-    }
+        raise RewardCalibrationError("raw reward samples must be equally balanced over all configured slopes")
+    sample_slope_indices = _normalized_slope_indices(value.get("sample_slope_indices"), sample_count)
+    actual_counts = {f"{slope:+.2f}": sample_slope_indices.count(index) for index, slope in enumerate(SIGNED_C1_SLOPES)}
     if actual_counts != dict(slope_counts):
-        raise RewardCalibrationError(
-            "sample_slope_indices do not match slope_sample_counts"
-        )
+        raise RewardCalibrationError("sample_slope_indices do not match slope_sample_counts")
     term_sources = value.get("term_sources")
     if not isinstance(term_sources, Mapping) or set(term_sources) != set(GUIDE_REWARD_TERMS):
         raise RewardCalibrationError("raw samples must identify the extraction source of every reward term")
@@ -658,9 +570,7 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
         or not all(isinstance(item, str) and item for item in runtime_versions.values())
     ):
         raise RewardCalibrationError("raw samples contain malformed runtime versions")
-    validate_c1_physics_snapshot(
-        value.get("c1_physics"), value.get("c1_nominal_values")
-    )
+    validate_c1_physics_snapshot(value.get("c1_physics"), value.get("c1_nominal_values"))
 
 
 def validate_sample_checkpoint_binding(value: Mapping[str, Any]) -> Path:
@@ -678,9 +588,7 @@ def validate_sample_checkpoint_binding(value: Mapping[str, Any]) -> Path:
     return path
 
 
-def load_raw_reward_sample_artifact(
-    path: str | Path, *, require_checkpoint_binding: bool = True
-) -> Mapping[str, Any]:
+def load_raw_reward_sample_artifact(path: str | Path, *, require_checkpoint_binding: bool = True) -> Mapping[str, Any]:
     """Load and fully validate one raw reward sample artifact."""
 
     try:
@@ -768,10 +676,7 @@ def load_and_recompute_reward_calibration_report(
         raise RewardCalibrationError(f"invalid reward calibration report: {path}") from error
     if not isinstance(report, Mapping):
         raise RewardCalibrationError("reward calibration report must contain a mapping")
-    if (
-        report.get("schema_version") != REWARD_CALIBRATION_SCHEMA_VERSION
-        or report.get("tool") != "calibrate_rewards"
-    ):
+    if report.get("schema_version") != REWARD_CALIBRATION_SCHEMA_VERSION or report.get("tool") != "calibrate_rewards":
         raise RewardCalibrationError("reward calibration report has an unsupported schema")
     raw_binding = report.get("raw_sample_artifact")
     if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"path"}:
@@ -801,9 +706,7 @@ def load_and_recompute_reward_calibration_report(
             or not teacher_path.is_file()
             or Path(str(checkpoint.get("path", ""))).resolve() != teacher_path
         ):
-            raise RewardCalibrationError(
-                "reward calibration samples are not bound to the supplied S0 teacher"
-            )
+            raise RewardCalibrationError("reward calibration samples are not bound to the supplied S0 teacher")
     return {
         "report": report,
         "artifact": artifact,

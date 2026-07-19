@@ -18,6 +18,7 @@ from g1_rickshaw_lab.training_contract import (
 TRAINING_CONFIGURATION_ENV = "G1_RICKSHAW_TRAINING_CONFIGURATION"
 TRAINING_CONFIGURATION_CHECKPOINT_KEY = TRAINING_CONFIGURATION_KEY
 
+
 def validate_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
     return _validate_training_configuration(value)
 
@@ -50,6 +51,9 @@ def build_training_configuration(
     fat2_weight: float = float(DEFAULT_TRAINING_PARAMETERS["fat2_weight"]),
     latent_dim: int = int(DEFAULT_TRAINING_PARAMETERS["latent_dim"]),
     rollout_steps: int = int(DEFAULT_TRAINING_PARAMETERS["rollout_steps"]),
+    stability_reward_curriculum: bool = bool(
+        DEFAULT_TRAINING_PARAMETERS["stability_reward_curriculum"]
+    ),
 ) -> dict[str, Any]:
     """Build the stable configuration shared by every mainline stage."""
 
@@ -59,7 +63,11 @@ def build_training_configuration(
         isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0
     ):
         raise ValueError("training num_envs must be a positive integer or null")
-    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations <= 0:
+    if (
+        isinstance(max_iterations, bool)
+        or not isinstance(max_iterations, int)
+        or max_iterations <= 0
+    ):
         raise ValueError("max_iterations must be a positive integer")
     return finalize_training_configuration(
         {
@@ -77,6 +85,7 @@ def build_training_configuration(
                 "fat2_weight": fat2_weight,
                 "rollout_steps": rollout_steps,
                 "latent_dim": latent_dim,
+                "stability_reward_curriculum": stability_reward_curriculum,
             },
         }
     )

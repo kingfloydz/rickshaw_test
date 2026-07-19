@@ -56,8 +56,7 @@ def _artifact(checkpoint: Path | None = None) -> dict:
     count_per_slope = 2
     total = len(SIGNED_C1_SLOPES) * count_per_slope
     nominal = {
-        name: float(index + 1)
-        for index, name in enumerate(C1_NOMINAL_PHYSICS_FIELDS)
+        name: float(index + 1) for index, name in enumerate(C1_NOMINAL_PHYSICS_FIELDS)
     }
     return {
         "schema_version": RAW_REWARD_SAMPLE_SCHEMA_VERSION,
@@ -134,8 +133,12 @@ def test_calibration_records_quantiles_and_reports_oversized_term() -> None:
     assert result["status"] == "failed"
     assert result["failures"] == ["zmp_margin_barrier"]
     assert result["terms"]["track_speed_exp"]["unweighted"]["p90"] == pytest.approx(1.8)
-    assert result["terms"]["zmp_margin_barrier"]["weighted_abs_p90"] == pytest.approx(3.6)
-    assert result["terms"]["termination"]["exempt_reason"] == "guide_termination_exception"
+    assert result["terms"]["zmp_margin_barrier"]["weighted_abs_p90"] == pytest.approx(
+        3.6
+    )
+    assert (
+        result["terms"]["termination"]["exempt_reason"] == "guide_termination_exception"
+    )
 
 
 def test_calibration_rejects_missing_nonfinite_or_misaligned_samples() -> None:
@@ -228,7 +231,9 @@ def test_c1_snapshot_requires_every_field_at_its_nominal_value() -> None:
     validate_c1_physics_snapshot(artifact["c1_physics"], artifact["c1_nominal_values"])
     artifact["c1_physics"]["terrain.friction"]["maximum"] += 0.01
     with pytest.raises(RewardCalibrationError, match="differs from nominal"):
-        validate_c1_physics_snapshot(artifact["c1_physics"], artifact["c1_nominal_values"])
+        validate_c1_physics_snapshot(
+            artifact["c1_physics"], artifact["c1_nominal_values"]
+        )
 
 
 def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
@@ -244,6 +249,7 @@ def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
     )
     d6_values = {name: float(index + 2) for index, name in enumerate(d6_fields)}
     domain_nominal = {
+        "torso.mass_delta": 0.0,
         "payload.mass": 1.0,
         "payload.com.x": 1.0,
         "payload.com.y": 1.0,
@@ -252,10 +258,6 @@ def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
         "terrain.friction": 1.0,
         "wheel.left_damping": 1.0,
         "wheel.right_damping": 1.0,
-        "motor.strength": 1.0,
-        "control.delay": 0.0,
-        "observation.delay": 0.0,
-        "joint.model_error": 1.0,
     }
     ones = torch.ones(2)
     base_env = SimpleNamespace(
@@ -265,16 +267,12 @@ def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
         num_envs=2,
         device="cpu",
         d6_constraint_manager=SimpleNamespace(cfg=SimpleNamespace(**d6_values)),
+        torso_mass_delta=torch.zeros(2),
         _payload_mass=ones,
         _payload_com=torch.ones(2, 3),
         c_rr=ones,
         terrain_friction=ones,
         _wheel_damping=torch.ones(2, 2),
-        motor_strength=ones,
-        control_delay_steps=torch.zeros(2, dtype=torch.long),
-        observation_delay_steps=torch.zeros(2, dtype=torch.long),
-        joint_model_error=ones,
-        step_dt=0.02,
     )
 
     _, nominal = _physics_snapshot(base_env)

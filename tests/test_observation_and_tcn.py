@@ -69,7 +69,9 @@ def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
         torch.tensor([[1.4, -0.4, torch.pi]], dtype=dtype),
     )
     torch.testing.assert_close(observation[:, JOINT_POSITION_SLICE], position_error)
-    torch.testing.assert_close(observation[:, JOINT_VELOCITY_SLICE], joint_velocity * 0.05)
+    torch.testing.assert_close(
+        observation[:, JOINT_VELOCITY_SLICE], joint_velocity * 0.05
+    )
     torch.testing.assert_close(
         observation[:, PREVIOUS_ACTION_SLICE], previous_processed_action
     )
@@ -165,7 +167,9 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
         module for module in student.modules() if isinstance(module, ContextEncoder)
     ]
     recurrent_modules = [
-        module for module in student.modules() if isinstance(module, (nn.RNNBase, nn.RNNCellBase))
+        module
+        for module in student.modules()
+        if isinstance(module, (nn.RNNBase, nn.RNNCellBase))
     ]
     assert len(history_encoders) == 1
     assert recurrent_modules == []
@@ -177,7 +181,7 @@ def test_fixed_teacher_and_student_context_interfaces() -> None:
     current = torch.zeros(2, 96)
     observation_history = torch.zeros(2, 61, 96)
     dynamic_history = torch.zeros(2, 61, 21)
-    static_privilege = torch.zeros(2, 40)
+    static_privilege = torch.zeros(2, 10)
     with torch.no_grad():
         teacher_distribution, teacher_context = teacher.forward_with_context(
             current,
@@ -213,7 +217,7 @@ def test_teacher_and_student_use_the_selected_latent_width(latent_dim: int) -> N
             current,
             history,
             torch.zeros(2, 61, 21),
-            torch.zeros(2, 40),
+            torch.zeros(2, 10),
         )
         student_distribution, student_context = student.forward_with_context(
             current, history

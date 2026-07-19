@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import MISSING, dataclass, field
-from enum import IntEnum
 from types import MethodType
 from typing import Any, Mapping
 
@@ -22,7 +21,6 @@ from .actions import (
     ButterworthActionState,
     action_scale_vector,
     canonicalize_action_scale,
-    gain_compensated_static_target,
 )
 from .actuation import actuator_effort_limits
 from .dynamics import (
@@ -124,9 +122,7 @@ class RickshawRuntimeState:
     ) -> "RickshawRuntimeState":
         scalar = torch.zeros(num_envs, device=device, dtype=dtype)
         return cls(
-            wheel_normal_force=torch.zeros(
-                (num_envs, num_wheels), device=device, dtype=dtype
-            ),
+            wheel_normal_force=torch.zeros((num_envs, num_wheels), device=device, dtype=dtype),
             hitch_height=scalar.clone(),
             hitch_vertical_speed=scalar.clone(),
             pitch=scalar.clone(),
@@ -168,12 +164,8 @@ class StabilityState:
         return cls(
             theta_fat=scalar.clone(),
             fat_valid=torch.zeros(num_envs, device=device, dtype=torch.bool),
-            fat_wrench_consistent=torch.zeros(
-                num_envs, device=device, dtype=torch.bool
-            ),
-            fat_wrench_relative_error=torch.zeros(
-                (num_envs, 2), device=device, dtype=dtype
-            ),
+            fat_wrench_consistent=torch.zeros(num_envs, device=device, dtype=torch.bool),
+            fat_wrench_relative_error=torch.zeros((num_envs, 2), device=device, dtype=dtype),
             torso_pitch=scalar.clone(),
             zmp_s=scalar.clone(),
             zmp_margin=scalar.clone(),
@@ -207,9 +199,7 @@ def target_pitch_from_hitch_height(cfg: RickshawPoseTargetCfg) -> float:
     return math.asin(ratio) - phase
 
 
-def wheel_phase_from_path_position(
-    path_position: torch.Tensor, wheel_radius: float = 0.374999
-) -> torch.Tensor:
+def wheel_phase_from_path_position(path_position: torch.Tensor, wheel_radius: float = 0.374999) -> torch.Tensor:
     if wheel_radius <= 0.0:
         raise ValueError("wheel_radius must be positive")
     phase = torch.remainder(-path_position / wheel_radius + math.pi, 2.0 * math.pi) - math.pi
@@ -234,9 +224,7 @@ def quat_multiply_wxyz(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
     )
 
 
-def target_cart_orientation(
-    slope_quaternion_wxyz: torch.Tensor, alpha_target: float
-) -> torch.Tensor:
+def target_cart_orientation(slope_quaternion_wxyz: torch.Tensor, alpha_target: float) -> torch.Tensor:
     zeros = torch.zeros_like(slope_quaternion_wxyz[..., 0])
     pitch_relative = torch.stack(
         (
@@ -284,12 +272,8 @@ def fit_cart_pose_to_hitch_targets(
     y_axis_w = -target_delta_w / target_length
     local_forward = torch.zeros((num_envs, 3), device=device, dtype=dtype)
     local_forward[:, 0] = 1.0
-    nominal_forward_w = quat_apply_wxyz(
-        nominal_cart_quaternion_wxyz, local_forward
-    )
-    x_axis_w = nominal_forward_w - torch.sum(
-        nominal_forward_w * y_axis_w, dim=-1, keepdim=True
-    ) * y_axis_w
+    nominal_forward_w = quat_apply_wxyz(nominal_cart_quaternion_wxyz, local_forward)
+    x_axis_w = nominal_forward_w - torch.sum(nominal_forward_w * y_axis_w, dim=-1, keepdim=True) * y_axis_w
     x_length = torch.linalg.vector_norm(x_axis_w, dim=-1, keepdim=True)
     if torch.any(x_length <= 1.0e-8):
         raise RuntimeError("two-point cart fit cannot preserve the nominal forward axis")
@@ -314,9 +298,7 @@ def fit_cart_pose_to_hitch_targets(
         ),
         dim=-1,
     )
-    fitted_quaternion = fitted_quaternion / torch.linalg.vector_norm(
-        fitted_quaternion, dim=-1, keepdim=True
-    )
+    fitted_quaternion = fitted_quaternion / torch.linalg.vector_norm(fitted_quaternion, dim=-1, keepdim=True)
     local_midpoint = torch.mean(local_hitches, dim=1)
     target_midpoint = torch.mean(target_hitch_positions_w, dim=1)
     fitted_root = target_midpoint - quat_apply_wxyz(fitted_quaternion, local_midpoint)
@@ -390,9 +372,7 @@ def advance_speed_command_resampling(
     elapsed = env.command_state.resampling_elapsed_s
     if env_ids is None:
         elapsed += float(env.step_dt)
-        due_ids = torch.nonzero(
-            elapsed >= cfg.resampling_time_s - 1.0e-9, as_tuple=False
-        ).flatten()
+        due_ids = torch.nonzero(elapsed >= cfg.resampling_time_s - 1.0e-9, as_tuple=False).flatten()
     else:
         env_ids = torch.as_tensor(env_ids, device=elapsed.device, dtype=torch.long)
         elapsed[env_ids] += float(env.step_dt)
@@ -414,9 +394,7 @@ def advance_speed_reference(
         update_speed_reference(env.command_state, env.command_state.v_sample, env.step_dt, cfg)
         return
 
-    env_ids = torch.as_tensor(
-        env_ids, device=env.command_state.v_ref.device, dtype=torch.long
-    )
+    env_ids = torch.as_tensor(env_ids, device=env.command_state.v_ref.device, dtype=torch.long)
     if env_ids.numel() == 0:
         return
     selected = CommandState(
@@ -479,28 +457,19 @@ def update_rickshaw_geometry_state(
 
     cart = env.scene["rickshaw"]
     if hitch_position_w is None:
-        hitch_position_w = torch.mean(
-            cart.data.body_pos_w[:, env.hitch_body_ids], dim=1
-        )
+        hitch_position_w = torch.mean(cart.data.body_pos_w[:, env.hitch_body_ids], dim=1)
     if hitch_velocity_w is None:
-        hitch_velocity_w = torch.mean(
-            cart.data.body_lin_vel_w[:, env.hitch_body_ids], dim=1
-        )
+        hitch_velocity_w = torch.mean(cart.data.body_lin_vel_w[:, env.hitch_body_ids], dim=1)
     terrain_origin = env.scene.terrain.env_origins
-    env.rickshaw_state.hitch_height[:] = torch.sum(
-        (hitch_position_w - terrain_origin) * env.path_normal_w, dim=-1
-    )
-    env.rickshaw_state.hitch_vertical_speed[:] = torch.sum(
-        hitch_velocity_w * env.path_normal_w, dim=-1
-    )
+    env.rickshaw_state.hitch_height[:] = torch.sum((hitch_position_w - terrain_origin) * env.path_normal_w, dim=-1)
+    env.rickshaw_state.hitch_vertical_speed[:] = torch.sum(hitch_velocity_w * env.path_normal_w, dim=-1)
     if pitch is None:
-        pitch = rickshaw_pitch_from_quaternion(
-            cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-        )
+        pitch = rickshaw_pitch_from_quaternion(cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w)
     env.rickshaw_state.pitch[:] = pitch
 
 
 DOMAIN_RANDOMIZATION_NAMES = (
+    "torso.mass_delta",
     "payload.mass",
     "payload.com.x",
     "payload.com.y",
@@ -509,72 +478,18 @@ DOMAIN_RANDOMIZATION_NAMES = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "motor.strength",
-    "control.delay",
-    "observation.delay",
 )
-DOMAIN_PARAMETER_NAMES = DOMAIN_RANDOMIZATION_NAMES + ("joint.model_error",)
-DELAY_PARAMETER_NAMES = ("control.delay", "observation.delay")
-
-
-class DomainRandomizationStage(IntEnum):
-    NOMINAL = 0
-    NARROW = 1
-    FULL = 2
-
-
-@dataclass(kw_only=True)
-class DomainRandomizationScheduleCfg:
-    """Progressive physical randomization with an independent delay schedule."""
-
-    max_scale: float = 0.6
-    ramp_refreshes: int = 30
-    friction_scale: float = 0.5
-    delay_max_probability: float = 0.25
-    delay_ramp_refreshes: int = 60
-
-    def validate(self) -> None:
-        if not 0.0 < self.max_scale <= 1.0:
-            raise ValueError("max_scale must lie in (0, 1]")
-        if self.ramp_refreshes <= 0 or self.delay_ramp_refreshes <= 0:
-            raise ValueError("randomization ramp lengths must be positive")
-        if not 0.0 < self.friction_scale <= 1.0:
-            raise ValueError("friction_scale must lie in (0, 1]")
-        if not 0.0 <= self.delay_max_probability <= 1.0:
-            raise ValueError("delay_max_probability must lie in [0, 1]")
-
-    def resolve(
-        self, iteration: int, refresh_interval_iterations: int = 200
-    ) -> tuple[DomainRandomizationStage, float]:
-        if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
-            raise ValueError("domain randomization iteration must be a non-negative integer")
-        refresh_index = iteration // refresh_interval_iterations
-        scale = min(self.max_scale, refresh_index / float(self.ramp_refreshes))
-        if scale == 0.0:
-            return DomainRandomizationStage.NOMINAL, 0.0
-        if scale < self.max_scale:
-            return DomainRandomizationStage.NARROW, scale
-        return DomainRandomizationStage.FULL, scale
-
-    def delay_probability(self, refresh_index: int) -> float:
-        return min(
-            self.delay_max_probability,
-            refresh_index / float(self.delay_ramp_refreshes),
-        )
+DOMAIN_PARAMETER_NAMES = DOMAIN_RANDOMIZATION_NAMES
 
 
 @dataclass(kw_only=True)
 class DomainRandomizationCfg:
-    """Single source of truth for fixed-epoch training and nominal evaluation."""
+    """Startup-fixed physical randomization for training and evaluation."""
 
     enabled: bool = True
     ranges: Mapping[str, tuple[float, float]] = MISSING
     nominal: Mapping[str, float] = MISSING
     calibration: Mapping[str, Any] = MISSING
-    schedule: DomainRandomizationScheduleCfg = field(
-        default_factory=DomainRandomizationScheduleCfg
-    )
-    refresh_interval_iterations: int = 200
 
     def validate(self) -> None:
         required = set(DOMAIN_PARAMETER_NAMES)
@@ -597,29 +512,17 @@ class DomainRandomizationCfg:
                 raise ValueError(f"nominal value {name!r} lies outside its range")
 
         nonnegative = (
-            "payload.mass",
             "rolling_resistance.c_rr",
             "wheel.left_damping",
             "wheel.right_damping",
-            "control.delay",
-            "observation.delay",
         )
         if any(float(self.ranges[name][0]) < 0.0 for name in nonnegative):
-            raise ValueError("mass, resistance, damping, and delay ranges cannot be negative")
-        positive = ("terrain.friction", "motor.strength")
+            raise ValueError("resistance and damping ranges cannot be negative")
+        positive = ("terrain.friction",)
         if any(float(self.ranges[name][0]) <= 0.0 for name in positive):
-            raise ValueError("friction and motor strength ranges must stay positive")
-        if float(self.ranges["joint.model_error"][0]) <= -1.0:
-            raise ValueError("joint.model_error must keep actuator gains positive")
+            raise ValueError("friction range must stay positive")
         if not isinstance(self.calibration, Mapping):
             raise ValueError("domain randomization calibration must be a mapping")
-        self.schedule.validate()
-        if (
-            not isinstance(self.refresh_interval_iterations, int)
-            or isinstance(self.refresh_interval_iterations, bool)
-            or self.refresh_interval_iterations <= 0
-        ):
-            raise ValueError("refresh_interval_iterations must be a positive integer")
 
 
 def sample_domain_parameters(
@@ -629,42 +532,23 @@ def sample_domain_parameters(
     device: torch.device | str | None = None,
     dtype: torch.dtype = torch.float32,
     generator: torch.Generator | None = None,
-    scale: float = 1.0,
-) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-    """Sample independent scalar parameters and per-joint actuator error."""
+) -> dict[str, torch.Tensor]:
+    """Sample independent startup-fixed physical parameters."""
 
     cfg.validate()
     if batch_size < 0:
         raise ValueError("batch_size cannot be negative")
-    if (
-        isinstance(scale, bool)
-        or not isinstance(scale, (int, float))
-        or not math.isfinite(float(scale))
-        or not 0.0 <= scale <= 1.0
-    ):
-        raise ValueError("domain randomization scale must be between 0 and 1")
 
     def sample(name: str, shape: tuple[int, ...]) -> torch.Tensor:
         nominal = float(cfg.nominal[name])
-        if not cfg.enabled or scale == 0.0 or name in DELAY_PARAMETER_NAMES:
+        if not cfg.enabled:
             return torch.full(shape, nominal, device=device, dtype=dtype)
         range_low, range_high = map(float, cfg.ranges[name])
-        parameter_scale = (
-            scale * cfg.schedule.friction_scale
-            if name == "terrain.friction"
-            else scale
-        )
-        low = nominal + parameter_scale * (range_low - nominal)
-        high = nominal + parameter_scale * (range_high - nominal)
-        if low == high:
-            return torch.full(shape, low, device=device, dtype=dtype)
-        return torch.empty(shape, device=device, dtype=dtype).uniform_(
-            low, high, generator=generator
-        )
+        if range_low == range_high:
+            return torch.full(shape, range_low, device=device, dtype=dtype)
+        return torch.empty(shape, device=device, dtype=dtype).uniform_(range_low, range_high, generator=generator)
 
-    values = {name: sample(name, (batch_size,)) for name in DOMAIN_RANDOMIZATION_NAMES}
-    joint_error = sample("joint.model_error", (batch_size, ACTION_DIM))
-    return values, joint_error
+    return {name: sample(name, (batch_size,)) for name in DOMAIN_RANDOMIZATION_NAMES}
 
 
 def effective_cart_mass_com_bounds(
@@ -683,10 +567,7 @@ def effective_cart_mass_com_bounds(
     for axis, name in enumerate(("payload.com.x", "payload.com.y", "payload.com.z")):
         payload_low, payload_high = map(float, ranges[name])
         candidates = [
-            (
-                RICKSHAW_TOTAL_MASS * RICKSHAW_CENTER_OF_MASS[axis]
-                + payload_mass * payload_com
-            )
+            (RICKSHAW_TOTAL_MASS * RICKSHAW_CENTER_OF_MASS[axis] + payload_mass * payload_com)
             / (RICKSHAW_TOTAL_MASS + payload_mass)
             for payload_mass in (mass_low, mass_high)
             for payload_com in (payload_low, payload_high)
@@ -702,10 +583,32 @@ def _ensure_wheel_joint_ids(env: Any) -> list[int]:
     from g1_rickshaw_lab.assets.rickshaw import WHEEL_JOINT_NAMES
 
     cart = env.scene["rickshaw"]
-    env.wheel_joint_ids = _exact_name_ids(
-        tuple(cart.joint_names), WHEEL_JOINT_NAMES, "wheel joint"
-    )
+    env.wheel_joint_ids = _exact_name_ids(tuple(cart.joint_names), WHEEL_JOINT_NAMES, "wheel joint")
     return env.wheel_joint_ids
+
+
+def _write_torso_mass_to_physx(env: Any, env_ids: torch.Tensor, mass_delta: torch.Tensor) -> None:
+    """Apply Unitree-style additive torso mass randomization."""
+
+    robot = env.scene["robot"]
+    view = robot.root_physx_view
+    ids_cpu = env_ids.detach().to(device="cpu", dtype=torch.long)
+    if not hasattr(env, "_default_robot_masses_cpu"):
+        env._default_robot_masses_cpu = view.get_masses().clone().cpu()
+
+    masses = view.get_masses().clone()
+    delta_cpu = mass_delta.detach().to(device="cpu", dtype=masses.dtype)
+    masses[ids_cpu, env.torso_body_id] = env._default_robot_masses_cpu[ids_cpu, env.torso_body_id] + delta_cpu
+    view.set_masses(masses, ids_cpu)
+
+    updated = masses[ids_cpu].to(device=env.device, dtype=env.robot_body_masses.dtype)
+    total = torch.sum(updated, dim=-1)
+    env.robot_body_masses[env_ids] = updated
+    env.robot_total_mass[env_ids] = total
+    env.robot_mass[env_ids] = total
+    env.robot_body_mass_weights[env_ids] = updated / total[:, None]
+    env.torso_mass_delta = mass_delta
+    env.effective_torso_mass = masses[:, env.torso_body_id].to(device=env.device, dtype=env.robot_body_masses.dtype)
 
 
 def _write_payload_to_physx(
@@ -752,9 +655,7 @@ def _write_payload_to_physx(
     view = cart.root_physx_view
     ids_cpu = env_ids.detach().to(device="cpu", dtype=torch.long)
     if not hasattr(env, "_rickshaw_default_masses_cpu"):
-        env._rickshaw_base_body_id = _exact_name_ids(
-            tuple(cart.body_names), (BASE_LINK_NAME,), "rickshaw base body"
-        )[0]
+        env._rickshaw_base_body_id = _exact_name_ids(tuple(cart.body_names), (BASE_LINK_NAME,), "rickshaw base body")[0]
         env._rickshaw_default_masses_cpu = view.get_masses().clone().cpu()
         env._rickshaw_default_coms_cpu = view.get_coms().clone().cpu()
         env._rickshaw_default_inertias_cpu = view.get_inertias().clone().cpu()
@@ -766,9 +667,7 @@ def _write_payload_to_physx(
             atol=1.0e-4,
         ):
             actual = (float(torch.amin(default_total)), float(torch.amax(default_total)))
-            raise RuntimeError(
-                f"rickshaw USD mass contract failed: expected {RICKSHAW_TOTAL_MASS}, got range {actual}"
-            )
+            raise RuntimeError(f"rickshaw USD mass contract failed: expected {RICKSHAW_TOTAL_MASS}, got range {actual}")
 
     base_id = env._rickshaw_base_body_id
     default_mass = env._rickshaw_default_masses_cpu[ids_cpu, base_id]
@@ -795,15 +694,11 @@ def _write_payload_to_physx(
     view.set_masses(masses, ids_cpu)
     view.set_coms(coms, ids_cpu)
     view.set_inertias(inertias, ids_cpu)
-    env.rickshaw_body_masses[env_ids] = masses[ids_cpu].to(
-        device=env.device, dtype=env.rickshaw_body_masses.dtype
-    )
+    env.rickshaw_body_masses[env_ids] = masses[ids_cpu].to(device=env.device, dtype=env.rickshaw_body_masses.dtype)
     updated_masses = env.rickshaw_body_masses[env_ids]
     updated_total_mass = torch.sum(updated_masses, dim=-1)
     env.rickshaw_total_mass[env_ids] = updated_total_mass
-    env.rickshaw_body_mass_weights[env_ids] = (
-        updated_masses / updated_total_mass[:, None]
-    )
+    env.rickshaw_body_mass_weights[env_ids] = updated_masses / updated_total_mass[:, None]
     env.rickshaw_body_com_pos_b[env_ids] = coms[ids_cpu, :, :3].to(
         device=env.device, dtype=env.rickshaw_body_com_pos_b.dtype
     )
@@ -811,9 +706,7 @@ def _write_payload_to_physx(
     env._rickshaw_payload_com_written[env_ids] = desired_com
 
 
-def _write_effective_terrain_friction_to_physx(
-    env: Any, env_ids: torch.Tensor, friction: torch.Tensor
-) -> None:
+def _write_effective_terrain_friction_to_physx(env: Any, env_ids: torch.Tensor, friction: torch.Tensor) -> None:
     """Set per-environment collider friction against the unit-friction terrain.
 
     Isaac Lab imports the generated terrain as one shared mesh, so its material
@@ -839,9 +732,7 @@ def _write_effective_terrain_friction_to_physx(
     if not hasattr(env, "terrain_friction"):
         env.terrain_friction = torch.ones(env.num_envs, device=env.device)
     desired = friction.to(device=env.terrain_friction.device, dtype=env.terrain_friction.dtype)
-    changed = ~torch.isclose(
-        env.terrain_friction[env_ids], desired, rtol=0.0, atol=1.0e-6
-    )
+    changed = ~torch.isclose(env.terrain_friction[env_ids], desired, rtol=0.0, atol=1.0e-6)
     env.terrain_friction[env_ids] = desired
     if not torch.any(changed):
         return
@@ -908,23 +799,17 @@ def _update_rickshaw_mass_properties(
     )
     total_mass = base_mass + env._payload_mass
     total_com_cart = (
-        base_mass[:, None] * base_com_cart[None, :]
-        + env._payload_mass[:, None] * env._payload_com
+        base_mass[:, None] * base_com_cart[None, :] + env._payload_mass[:, None] * env._payload_com
     ) / torch.clamp(total_mass[:, None], min=1.0e-6)
-    env.effective_cart_mass_com = torch.cat(
-        (total_mass[:, None], total_com_cart), dim=-1
-    )
+    env.effective_cart_mass_com = torch.cat((total_mass[:, None], total_com_cart), dim=-1)
     base_com = base_com_cart.clone()
     base_com[2] -= WHEEL_RADIUS
     payload_com_from_axle = env._payload_com.clone()
     payload_com_from_axle[:, 2] -= WHEEL_RADIUS
     total_com = (
-        base_mass[:, None] * base_com[None, :]
-        + env._payload_mass[:, None] * payload_com_from_axle
+        base_mass[:, None] * base_com[None, :] + env._payload_mass[:, None] * payload_com_from_axle
     ) / torch.clamp(total_mass[:, None], min=1.0e-6)
-    payload_pitch_offset = torch.square(payload_com_from_axle[:, 0]) + torch.square(
-        payload_com_from_axle[:, 2]
-    )
+    payload_pitch_offset = torch.square(payload_com_from_axle[:, 0]) + torch.square(payload_com_from_axle[:, 2])
     pitch_inertia = base_pitch_inertia + env._payload_mass * payload_pitch_offset
     wheel_radius = torch.full((env.num_envs, 2), WHEEL_RADIUS, device=device, dtype=dtype)
     wheel_spin_inertia = torch.full(
@@ -933,9 +818,7 @@ def _update_rickshaw_mass_properties(
         device=device,
         dtype=dtype,
     )
-    handle = torch.tensor(
-        (HITCH_X, 0.0, HITCH_Z - WHEEL_RADIUS), device=device, dtype=dtype
-    )
+    handle = torch.tensor((HITCH_X, 0.0, HITCH_Z - WHEEL_RADIUS), device=device, dtype=dtype)
     env.rickshaw_mass_properties = RickshawMassProperties(
         m_cart=total_mass,
         com_x_from_axle=total_com[:, 0],
@@ -955,234 +838,24 @@ def initialize_domain_randomization(
 ) -> None:
     """Sample and write one fixed physical domain for every environment."""
 
-    del env_ids  # Startup state is allocated for every environment at once.
+    del env_ids
     cfg.validate()
-
-    step_dt = float(env.step_dt)
-    if step_dt <= 0.0:
-        raise ValueError("environment policy step must be positive")
-    max_control_delay = int(
-        math.ceil(float(cfg.ranges["control.delay"][1]) / step_dt - 1.0e-9)
-    )
-    max_observation_delay = int(
-        math.ceil(float(cfg.ranges["observation.delay"][1]) / step_dt - 1.0e-9)
-    )
-    env.max_control_delay_steps = max_control_delay
-    env.control_delay_steps = torch.zeros(
-        env.num_envs, device=env.device, dtype=torch.long
-    )
-    env.observation_delay_steps = torch.zeros(
-        env.num_envs, device=env.device, dtype=torch.long
-    )
-    env.motor_strength = torch.ones(env.num_envs, device=env.device)
-    env.joint_model_error = torch.zeros(
-        (env.num_envs, ACTION_DIM), device=env.device
-    )
-    from .observations import ObservationDelayState
-
-    env.observation_delay_state = ObservationDelayState.zeros(
-        env.num_envs, max_observation_delay, device=env.device
-    )
-
-    def set_domain_iteration(self: Any, iteration: int) -> bool:
-        if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
-            raise ValueError("domain randomization iteration must be a non-negative integer")
-        previous_iteration = getattr(self, "domain_randomization_iteration", -1)
-        if iteration < previous_iteration:
-            raise ValueError("domain randomization iteration cannot move backwards")
-        self.domain_randomization_iteration = iteration
-        stage, scale = (
-            cfg.schedule.resolve(iteration, cfg.refresh_interval_iterations)
-            if cfg.enabled
-            else (DomainRandomizationStage.NOMINAL, 0.0)
-        )
-        epoch = iteration // cfg.refresh_interval_iterations
-        key = (int(stage), epoch if scale > 0.0 else 0)
-        if key == self.domain_randomization_key:
-            return False
-        _apply_domain_epoch(self, cfg, epoch, scale=scale)
-        self.domain_randomization_key = key
-        return True
-
-    env.set_domain_randomization_iteration = MethodType(set_domain_iteration, env)
-    env.domain_randomization_cfg = cfg
-    env.domain_randomization_iteration = 0
-    env.domain_randomization_key = (int(DomainRandomizationStage.NOMINAL), 0)
-    env.domain_randomization_stage = DomainRandomizationStage.NOMINAL.name
-    _apply_domain_epoch(env, cfg, 0, scale=0.0)
+    generator = torch.Generator(device=env.device)
+    generator.manual_seed(int(env.cfg.seed))
+    _apply_domain_randomization(env, cfg, generator)
 
 
-def _sample_delay_steps(
-    batch_size: int,
-    max_steps: int,
-    probability: float,
-    *,
-    device: torch.device | str,
-    generator: torch.Generator | None,
-) -> torch.Tensor:
-    if max_steps == 0 or probability == 0.0:
-        return torch.zeros(batch_size, device=device, dtype=torch.long)
-    active = torch.rand(batch_size, device=device, generator=generator) < probability
-    sampled = torch.randint(
-        1,
-        max_steps + 1,
-        (batch_size,),
-        device=device,
-        generator=generator,
-    )
-    return sampled * active.to(torch.long)
-
-
-def _write_actuator_parameters(
-    env: Any,
-    env_ids: torch.Tensor,
-    motor_strength: torch.Tensor,
-    joint_model_error: torch.Tensor,
-) -> None:
-    """Write the same effective gains to PhysX and explicit actuator models."""
-
-    if env_ids.numel() == 0:
-        return
-    robot = env.scene["robot"]
-    num_envs = env.num_envs
-    action_dim = int(joint_model_error.shape[-1])
-    if not hasattr(env, "_motor_strength_written"):
-        env._motor_strength_written = torch.full(
-            (num_envs,), float("nan"), device=env.device
-        )
-        env._joint_model_error_written = torch.full(
-            (num_envs, action_dim), float("nan"), device=env.device
-        )
-    desired_motor = motor_strength.to(
-        device=env._motor_strength_written.device,
-        dtype=env._motor_strength_written.dtype,
-    )
-    desired_joint_error = joint_model_error.to(
-        device=env._joint_model_error_written.device,
-        dtype=env._joint_model_error_written.dtype,
-    )
-    unchanged = torch.isclose(
-        env._motor_strength_written[env_ids], desired_motor, rtol=0.0, atol=1.0e-6
-    ) & torch.all(
-        torch.isclose(
-            env._joint_model_error_written[env_ids],
-            desired_joint_error,
-            rtol=0.0,
-            atol=1.0e-6,
-        ),
-        dim=-1,
-    )
-    if torch.all(unchanged):
-        return
-    changed = ~unchanged
-    env_ids = env_ids[changed]
-    motor_strength = motor_strength[changed]
-    joint_model_error = joint_model_error[changed]
-    desired_motor = desired_motor[changed]
-    desired_joint_error = desired_joint_error[changed]
-
-    joint_ids = env.policy_joint_ids
-    if not hasattr(env, "_nominal_robot_joint_stiffness"):
-        env._nominal_robot_joint_stiffness = robot.data.joint_stiffness.clone()
-        env._nominal_robot_joint_damping = robot.data.joint_damping.clone()
-        env._nominal_robot_joint_effort_limit = robot.data.joint_effort_limits.clone()
-        env._nominal_robot_joint_effort_limit[:, joint_ids] = actuator_effort_limits(
-            robot, joint_ids
-        )
-        env._nominal_actuator_parameters = {
-            name: {
-                parameter: getattr(actuator, parameter).clone()
-                for parameter in (
-                    "stiffness",
-                    "damping",
-                    "effort_limit",
-                    "_saturation_effort",
-                )
-                if torch.is_tensor(getattr(actuator, parameter, None))
-            }
-            for name, actuator in robot.actuators.items()
-        }
-    ids = env_ids[:, None]
-    gain = motor_strength[:, None] * (1.0 + joint_model_error)
-    stiffness = env._nominal_robot_joint_stiffness[ids, joint_ids] * gain
-    damping = env._nominal_robot_joint_damping[ids, joint_ids] * gain
-    effort_limit = env._nominal_robot_joint_effort_limit[ids, joint_ids] * gain
-    robot.write_joint_stiffness_to_sim(stiffness, joint_ids=joint_ids, env_ids=env_ids)
-    robot.write_joint_damping_to_sim(damping, joint_ids=joint_ids, env_ids=env_ids)
-    robot.write_joint_effort_limit_to_sim(
-        effort_limit, joint_ids=joint_ids, env_ids=env_ids
-    )
-    policy_stiffness = stiffness.clone()
-
-    policy_index_by_joint = {
-        int(joint_id): index for index, joint_id in enumerate(env.policy_joint_ids)
-    }
-    for name, actuator in robot.actuators.items():
-        actuator_joint_ids = actuator.joint_indices
-        if isinstance(actuator_joint_ids, slice):
-            actuator_joint_ids = torch.arange(robot.num_joints, device=env.device)[
-                actuator_joint_ids
-            ]
-        policy_indices = [
-            policy_index_by_joint.get(int(joint_id), -1)
-            for joint_id in actuator_joint_ids
-        ]
-        selected_local = [index for index, value in enumerate(policy_indices) if value >= 0]
-        if not selected_local:
-            continue
-        selected_policy = torch.tensor(
-            [policy_indices[index] for index in selected_local],
-            device=env.device,
-            dtype=torch.long,
-        )
-        local_gain = motor_strength[:, None] * (
-            1.0 + joint_model_error[:, selected_policy]
-        )
-        nominal = env._nominal_actuator_parameters[name]
-        for parameter in ("stiffness", "damping", "effort_limit", "_saturation_effort"):
-            if parameter not in nominal:
-                continue
-            target = getattr(actuator, parameter)
-            target[ids, selected_local] = nominal[parameter][ids, selected_local] * local_gain
-        if "stiffness" in nominal:
-            policy_stiffness[:, selected_policy] = actuator.stiffness[
-                ids, selected_local
-            ]
-
-    if not hasattr(env, "policy_joint_stiffness"):
-        env.policy_joint_stiffness = torch.zeros(
-            (robot.data.joint_stiffness.shape[0], len(joint_ids)),
-            device=env.device,
-            dtype=policy_stiffness.dtype,
-        )
-    env.policy_joint_stiffness[env_ids] = policy_stiffness
-
-    actual_effort_limit = actuator_effort_limits(robot, joint_ids)[env_ids]
-    if not torch.allclose(actual_effort_limit, effort_limit, rtol=1.0e-6, atol=1.0e-6):
-        raise RuntimeError("actuator and PhysX effort limits diverged")
-    env._motor_strength_written[env_ids] = desired_motor
-    env._joint_model_error_written[env_ids] = desired_joint_error
-
-
-def _write_wheel_damping(
-    env: Any, env_ids: torch.Tensor, sampled: Mapping[str, torch.Tensor]
-) -> None:
+def _write_wheel_damping(env: Any, env_ids: torch.Tensor, sampled: Mapping[str, torch.Tensor]) -> None:
     wheel_joint_ids = _ensure_wheel_joint_ids(env)
-    wheel_damping = torch.stack(
-        (sampled["wheel.left_damping"], sampled["wheel.right_damping"]), dim=-1
-    )
+    wheel_damping = torch.stack((sampled["wheel.left_damping"], sampled["wheel.right_damping"]), dim=-1)
     if not hasattr(env, "_wheel_damping_written"):
-        env._wheel_damping_written = torch.full(
-            (env.num_envs, 2), float("nan"), device=env.device
-        )
+        env._wheel_damping_written = torch.full((env.num_envs, 2), float("nan"), device=env.device)
     desired = wheel_damping.to(
         device=env._wheel_damping_written.device,
         dtype=env._wheel_damping_written.dtype,
     )
     changed = torch.any(
-        ~torch.isclose(
-            env._wheel_damping_written[env_ids], desired, rtol=0.0, atol=1.0e-6
-        ),
+        ~torch.isclose(env._wheel_damping_written[env_ids], desired, rtol=0.0, atol=1.0e-6),
         dim=-1,
     )
     if not torch.any(changed):
@@ -1198,13 +871,12 @@ def _update_teacher_static_domain(
     env: Any,
     cfg: DomainRandomizationCfg,
     sampled: Mapping[str, torch.Tensor],
-    joint_error: torch.Tensor,
 ) -> None:
     """Publish normalized effective physics, excluding reset-scoped slope."""
 
-    effective_gain = sampled["motor.strength"][:, None] * (1.0 + joint_error)
     raw = torch.cat(
         (
+            env.effective_torso_mass[:, None],
             env.effective_cart_mass_com,
             sampled["rolling_resistance.c_rr"][:, None],
             sampled["terrain.friction"][:, None],
@@ -1212,41 +884,31 @@ def _update_teacher_static_domain(
                 (sampled["wheel.left_damping"], sampled["wheel.right_damping"]),
                 dim=-1,
             ),
-            effective_gain,
-            sampled["control.delay"][:, None],
-            sampled["observation.delay"][:, None],
         ),
         dim=-1,
     )
     cart_lower, cart_upper = effective_cart_mass_com_bounds(cfg.ranges)
-    motor_low, motor_high = map(float, cfg.ranges["motor.strength"])
-    error_low, error_high = map(float, cfg.ranges["joint.model_error"])
-    gain_low = motor_low * (1.0 + error_low)
-    gain_high = motor_high * (1.0 + error_high)
+    nominal_torso_mass = float(env._default_robot_masses_cpu[0, env.torso_body_id])
     lower = torch.tensor(
         (
+            nominal_torso_mass + cfg.ranges["torso.mass_delta"][0],
             *cart_lower,
             cfg.ranges["rolling_resistance.c_rr"][0],
             cfg.ranges["terrain.friction"][0],
             cfg.ranges["wheel.left_damping"][0],
             cfg.ranges["wheel.right_damping"][0],
-            *(gain_low for _ in range(ACTION_DIM)),
-            cfg.ranges["control.delay"][0],
-            cfg.ranges["observation.delay"][0],
         ),
         device=env.device,
         dtype=raw.dtype,
     )
     upper = torch.tensor(
         (
+            nominal_torso_mass + cfg.ranges["torso.mass_delta"][1],
             *cart_upper,
             cfg.ranges["rolling_resistance.c_rr"][1],
             cfg.ranges["terrain.friction"][1],
             cfg.ranges["wheel.left_damping"][1],
             cfg.ranges["wheel.right_damping"][1],
-            *(gain_high for _ in range(ACTION_DIM)),
-            cfg.ranges["control.delay"][1],
-            cfg.ranges["observation.delay"][1],
         ),
         device=env.device,
         dtype=raw.dtype,
@@ -1254,81 +916,27 @@ def _update_teacher_static_domain(
     from .observations import TEACHER_STATIC_DOMAIN_DIM, normalize_features
 
     if raw.shape != (env.num_envs, TEACHER_STATIC_DOMAIN_DIM):
-        raise RuntimeError("effective teacher static domain must have shape [N,39]")
+        raise RuntimeError(f"effective teacher static domain must have shape [N,{TEACHER_STATIC_DOMAIN_DIM}]")
     env.teacher_static_domain_raw = raw
     env.teacher_static_domain_bounds = (lower, upper)
     env.normalized_teacher_static_domain = normalize_features(raw, lower, upper)
 
 
-def domain_epoch_seed(base_seed: int, epoch: int) -> int:
-    """Derive an order-independent seed for one domain epoch."""
-
-    if isinstance(base_seed, bool) or not isinstance(base_seed, int):
-        raise ValueError("domain randomization requires an integer environment seed")
-    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
-        raise ValueError("domain epoch must be a non-negative integer")
-    mask = (1 << 63) - 1
-    return (base_seed ^ (epoch * 0x4F1BBCDCBFA54001)) & mask
-
-
-def _apply_domain_epoch(
-    env: Any, cfg: DomainRandomizationCfg, epoch: int, *, scale: float = 1.0
+def _apply_domain_randomization(
+    env: Any,
+    cfg: DomainRandomizationCfg,
+    generator: torch.Generator,
 ) -> None:
-    """Sample and apply one physical domain at a PPO boundary."""
+    """Sample and apply each environment's fixed physical domain."""
 
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
-    generator = None
-    if cfg.enabled and scale > 0.0:
-        base_seed = getattr(env.cfg, "seed", None)
-        generator = torch.Generator(device=env.device)
-        generator.manual_seed(domain_epoch_seed(base_seed, epoch))
-    sampled, joint_error = sample_domain_parameters(
-        cfg, env.num_envs, device=env.device, generator=generator, scale=scale
-    )
-    delay_probability = (
-        cfg.schedule.delay_probability(epoch) if cfg.enabled else 0.0
-    )
-    control_steps = _sample_delay_steps(
-        env.num_envs,
-        env.max_control_delay_steps,
-        delay_probability,
-        device=env.device,
-        generator=generator,
-    )
-    observation_steps = _sample_delay_steps(
-        env.num_envs,
-        env.observation_delay_state.max_delay_steps,
-        delay_probability,
-        device=env.device,
-        generator=generator,
-    )
-    sampled["control.delay"] = control_steps.to(torch.float32) * float(env.step_dt)
-    sampled["observation.delay"] = observation_steps.to(torch.float32) * float(env.step_dt)
-    env.control_delay_steps[env_ids] = control_steps
-    env.observation_delay_steps[env_ids] = observation_steps
-
+    sampled = sample_domain_parameters(cfg, env.num_envs, device=env.device, generator=generator)
+    _write_torso_mass_to_physx(env, env_ids, sampled["torso.mass_delta"])
     env.c_rr[env_ids] = sampled["rolling_resistance.c_rr"]
     _update_rickshaw_mass_properties(env, env_ids, sampled, cfg.calibration)
-    update_slope_frame(env, env_ids)
-    env.motor_strength[env_ids] = sampled["motor.strength"]
-    env.joint_model_error[env_ids] = joint_error
-    _write_effective_terrain_friction_to_physx(
-        env, env_ids, sampled["terrain.friction"]
-    )
-    _write_actuator_parameters(
-        env, env_ids, sampled["motor.strength"], joint_error
-    )
+    _write_effective_terrain_friction_to_physx(env, env_ids, sampled["terrain.friction"])
     _write_wheel_damping(env, env_ids, sampled)
-    _update_teacher_static_domain(env, cfg, sampled, joint_error)
-    env.domain_randomization_epoch = int(epoch)
-    env.domain_randomization_scale = float(scale)
-    env.domain_randomization_stage = (
-        DomainRandomizationStage.NOMINAL.name
-        if scale == 0.0
-        else DomainRandomizationStage.FULL.name
-        if scale >= cfg.schedule.max_scale
-        else DomainRandomizationStage.NARROW.name
-    )
+    _update_teacher_static_domain(env, cfg, sampled)
     env.domain_randomization_initialized = True
 
 
@@ -1343,9 +951,7 @@ class HandleConstraintCfg:
     robot_body_paths: tuple[str, str] = MISSING
     hitch_body_paths: tuple[str, str] = MISSING
     grasp_local_positions: tuple[tuple[float, float, float], tuple[float, float, float]] = MISSING
-    grasp_local_quaternions_wxyz: tuple[
-        tuple[float, float, float, float], tuple[float, float, float, float]
-    ] = MISSING
+    grasp_local_quaternions_wxyz: tuple[tuple[float, float, float, float], tuple[float, float, float, float]] = MISSING
     linear_stiffness: float = MISSING
     linear_damping: float = MISSING
     angular_stiffness: float = MISSING
@@ -1423,16 +1029,12 @@ class D6ConstraintManager:
         stage = self._stage_from_env(self.env)
         source_namespace = self.cfg.env_prim_path_template.format(env_id=0)
         source_paths = [
-            self.cfg.joint_prim_path_template.format(
-                ENV_NS=source_namespace, side=side, env_id=0
-            )
+            self.cfg.joint_prim_path_template.format(ENV_NS=source_namespace, side=side, env_id=0)
             for side in self._SIDES
         ]
         for joint_path in source_paths:
             if not stage.GetPrimAtPath(joint_path).IsValid():
-                raise RuntimeError(
-                    f"replicated D6 source prim does not exist: {joint_path}"
-                )
+                raise RuntimeError(f"replicated D6 source prim does not exist: {joint_path}")
         self.joint_paths = [
             [
                 self.cfg.joint_prim_path_template.format(
@@ -1445,6 +1047,7 @@ class D6ConstraintManager:
             for env_id in range(self.env.num_envs)
         ]
         self.created = True
+
 
 class D6ReactionResidualAdapter:
     """Version-independent adapter around a local D6 constraint proxy reader.
@@ -1467,9 +1070,7 @@ class D6ReactionResidualAdapter:
                 "set env.d6_reaction_residual_provider to the validated Isaac-Sim-version "
                 "D6 tensor adapter before training"
             )
-        raw_wrench, position_residual, rotation_residual, impulse = provider(
-            self.manager.joint_paths
-        )
+        raw_wrench, position_residual, rotation_residual, impulse = provider(self.manager.joint_paths)
         if raw_wrench.shape != (self.env.num_envs, 2, 6):
             raise ValueError("D6 provider wrench must have shape [N,2,6]")
         if position_residual.shape != (self.env.num_envs, 2, 3):
@@ -1512,9 +1113,7 @@ def d6_spatial_impulse_magnitudes(impulse: torch.Tensor) -> torch.Tensor:
 def _axis_angle_from_quaternion_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     """Return the shortest batched rotation vector for scalar-first quaternions."""
 
-    quaternion = quaternion / torch.clamp(
-        torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True), min=1.0e-12
-    )
+    quaternion = quaternion / torch.clamp(torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True), min=1.0e-12)
     quaternion = torch.where(quaternion[..., :1] < 0.0, -quaternion, quaternion)
     vector = quaternion[..., 1:]
     sin_half = torch.linalg.vector_norm(vector, dim=-1, keepdim=True)
@@ -1551,9 +1150,7 @@ class IsaacSimD6ReactionProvider:
         self.env = env
         self.manager = manager
 
-    def __call__(
-        self, joint_paths: list[list[str]]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __call__(self, joint_paths: list[list[str]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if joint_paths != self.manager.joint_paths:
             raise ValueError("D6 provider received paths outside its constraint manager")
 
@@ -1572,9 +1169,7 @@ class IsaacSimD6ReactionProvider:
         # fixed hitch joint has identity local rotation, so only rotate it to
         # world; translating it by the base-to-hitch lever arm would double
         # count r x F.
-        incoming_torque_hitch_w = quat_apply_wxyz(
-            parent_quaternion_w, incoming_wrench_b[..., 3:]
-        )
+        incoming_torque_hitch_w = quat_apply_wxyz(parent_quaternion_w, incoming_wrench_b[..., 3:])
 
         mass = cart.data.default_mass[:, hitch_ids, None].to(
             device=incoming_force_w.device, dtype=incoming_force_w.dtype
@@ -1599,9 +1194,8 @@ class IsaacSimD6ReactionProvider:
             acceleration_w[..., 3:],
         )
         angular_momentum_b = torch.matmul(inertia_b, angular_velocity_b[..., None]).squeeze(-1)
-        inertial_torque_b = (
-            torch.matmul(inertia_b, angular_acceleration_b[..., None]).squeeze(-1)
-            + torch.linalg.cross(angular_velocity_b, angular_momentum_b)
+        inertial_torque_b = torch.matmul(inertia_b, angular_acceleration_b[..., None]).squeeze(-1) + torch.linalg.cross(
+            angular_velocity_b, angular_momentum_b
         )
         # Convert the retained-link incoming load to the historical robot-side
         # proxy convention. Whole-cart momentum balance supplies physical force.
@@ -1626,19 +1220,13 @@ class IsaacSimD6ReactionProvider:
             device=grasp_body_quaternion_w.device,
             dtype=grasp_body_quaternion_w.dtype,
         ).view(1, 2, 4)
-        grasp_frame_position_w = grasp_body_position_w + quat_apply_wxyz(
-            grasp_body_quaternion_w, grasp_local_position
-        )
+        grasp_frame_position_w = grasp_body_position_w + quat_apply_wxyz(grasp_body_quaternion_w, grasp_local_position)
         grasp_frame_quaternion_w = quat_multiply_wxyz(
             grasp_body_quaternion_w,
             grasp_local_quaternion.expand_as(grasp_body_quaternion_w),
         )
-        hitch_conjugate = torch.cat(
-            (hitch_quaternion_w[..., :1], -hitch_quaternion_w[..., 1:]), dim=-1
-        )
-        relative_quaternion = quat_multiply_wxyz(
-            hitch_conjugate, grasp_frame_quaternion_w
-        )
+        hitch_conjugate = torch.cat((hitch_quaternion_w[..., :1], -hitch_quaternion_w[..., 1:]), dim=-1)
+        relative_quaternion = quat_multiply_wxyz(hitch_conjugate, grasp_frame_quaternion_w)
         rotation_residual = _axis_angle_from_quaternion_wxyz(relative_quaternion)
         free_axes = torch.tensor(
             self.manager.cfg.rotation_free_axes,
@@ -1659,9 +1247,7 @@ def bind_d6_runtime_adapters(env: Any) -> D6ReactionResidualAdapter:
 
     manager = getattr(env, "d6_constraint_manager", None)
     if manager is None or not manager.created:
-        raise RuntimeError(
-            "replicated D6 prims must be bound before installing runtime adapters"
-        )
+        raise RuntimeError("replicated D6 prims must be bound before installing runtime adapters")
     if hasattr(env, "d6_reaction_adapter"):
         raise RuntimeError("D6 runtime adapter is already bound")
     if not hasattr(env, "d6_reaction_residual_provider"):
@@ -1671,6 +1257,7 @@ def bind_d6_runtime_adapters(env: Any) -> D6ReactionResidualAdapter:
 
     def read_reaction(self: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.d6_reaction_adapter.read()
+
     env.read_d6_reaction_residual = MethodType(read_reaction, env)
     return adapter
 
@@ -1737,30 +1324,20 @@ def resolve_task_entities(env: Any, cfg: TaskEntityNamesCfg) -> None:
     robot_body_names = tuple(robot.body_names)
     cart_body_names = tuple(cart.body_names)
     env.policy_joint_names = cfg.policy_joint_names
-    env.policy_joint_ids = _exact_name_ids(
-        robot_joint_names, cfg.policy_joint_names, "policy joint"
-    )
+    env.policy_joint_ids = _exact_name_ids(robot_joint_names, cfg.policy_joint_names, "policy joint")
     env.arm_joint_ids = _exact_name_ids(robot_joint_names, cfg.arm_joint_names, "arm joint")
     env.dex_joint_ids = _exact_name_ids(robot_joint_names, cfg.dex_joint_names, "Dex joint")
     env.wheel_body_ids = _exact_name_ids(cart_body_names, cfg.wheel_body_names, "wheel body")
     env.hitch_body_ids = _exact_name_ids(cart_body_names, cfg.hitch_body_names, "hitch body")
     env.foot_body_ids = _exact_name_ids(robot_body_names, cfg.foot_body_names, "foot body")
-    env.torso_body_id = _exact_name_ids(
-        robot_body_names, (cfg.torso_body_name,), "torso body"
-    )[0]
+    env.torso_body_id = _exact_name_ids(robot_body_names, (cfg.torso_body_name,), "torso body")[0]
     wheel_sensor = env.scene["wheel_contacts"]
     robot_sensor = env.scene["robot_contacts"]
-    env.wheel_sensor_ids = _exact_name_ids(
-        tuple(wheel_sensor.body_names), cfg.wheel_body_names, "wheel sensor body"
-    )
-    env.foot_sensor_ids = _exact_name_ids(
-        tuple(robot_sensor.body_names), cfg.foot_body_names, "foot sensor body"
-    )
+    env.wheel_sensor_ids = _exact_name_ids(tuple(wheel_sensor.body_names), cfg.wheel_body_names, "wheel sensor body")
+    env.foot_sensor_ids = _exact_name_ids(tuple(robot_sensor.body_names), cfg.foot_body_names, "foot sensor body")
     robot_masses = robot.root_physx_view.get_masses().to(device=env.device)
     if robot_masses.shape != (env.num_envs, len(robot_body_names)):
-        raise RuntimeError(
-            "robot PhysX mass tensor shape differs from the resolved body-name contract"
-        )
+        raise RuntimeError("robot PhysX mass tensor shape differs from the resolved body-name contract")
     if torch.any(~torch.isfinite(robot_masses)) or torch.any(robot_masses <= 0.0):
         raise RuntimeError("every retained G1 body must have finite positive PhysX mass")
     expected_mass = float(getattr(env.cfg, "robot_mass"))
@@ -1772,24 +1349,18 @@ def resolve_task_entities(env: Any, cfg: TaskEntityNamesCfg) -> None:
         atol=max(1.0e-4, expected_mass * 1.0e-5),
     ):
         actual = (float(torch.amin(actual_mass)), float(torch.amax(actual_mass)))
-        raise RuntimeError(
-            f"G1 USD mass contract failed: expected {expected_mass}, got range {actual}"
-        )
+        raise RuntimeError(f"G1 USD mass contract failed: expected {expected_mass}, got range {actual}")
     env.robot_body_masses = robot_masses
     env.robot_total_mass = actual_mass
     env.robot_body_mass_weights = robot_masses / actual_mass[:, None]
     cart_masses = cart.root_physx_view.get_masses().to(device=env.device)
     if cart_masses.shape != (env.num_envs, len(cart_body_names)):
-        raise RuntimeError(
-            "rickshaw PhysX mass tensor shape differs from the resolved body-name contract"
-        )
+        raise RuntimeError("rickshaw PhysX mass tensor shape differs from the resolved body-name contract")
     if torch.any(~torch.isfinite(cart_masses)) or torch.any(cart_masses <= 0.0):
         raise RuntimeError("every retained rickshaw body must have finite positive PhysX mass")
     env.rickshaw_body_masses = cart_masses
     env.rickshaw_total_mass = torch.sum(cart_masses, dim=-1)
-    env.rickshaw_body_mass_weights = (
-        cart_masses / env.rickshaw_total_mass[:, None]
-    )
+    env.rickshaw_body_mass_weights = cart_masses / env.rickshaw_total_mass[:, None]
     env.rickshaw_body_com_pos_b = cart.root_physx_view.get_coms()[..., :3].to(
         device=env.device, dtype=cart_masses.dtype
     )
@@ -1803,7 +1374,7 @@ def _body_name_from_prim_path(path: str) -> str:
 
 
 def install_q_ref_from_reset_library(env: Any, env_ids: torch.Tensor) -> None:
-    """Install a reference that preserves nominal reset torque under gain error."""
+    """Install the calibrated reset pose and controller reference."""
 
     candidate_indices = getattr(env, "reset_candidate_pose_index", None)
     if candidate_indices is None:
@@ -1815,13 +1386,7 @@ def install_q_ref_from_reset_library(env: Any, env_ids: torch.Tensor) -> None:
         pose_indices = candidate_indices[env_ids]
     env.reset_pose_index[env_ids] = pose_indices
     q_reset = env.reset_q_reset_table[pose_indices]
-    q_ref = gain_compensated_static_target(
-        q_reset,
-        env.reset_q_ref_table[pose_indices],
-        env.motor_strength[env_ids],
-        env.joint_model_error[env_ids],
-    )
-    env.action_state.q_ref[env_ids] = q_ref
+    env.action_state.q_ref[env_ids] = env.reset_q_ref_table[pose_indices]
     env.reset_policy_joint_pos[env_ids] = q_reset
 
 
@@ -1836,30 +1401,16 @@ def _compile_reset_pose_tables(env: Any) -> None:
         raise RuntimeError("a schema-v4 reset pose library is required")
     device = env.device
     dtype = env.action_state.q_ref.dtype
-    env.reset_pose_gradients = torch.tensor(
-        [pose.gradient for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_q_reset_table = torch.tensor(
-        [pose.q_reset for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_q_ref_table = torch.tensor(
-        [pose.q_ref for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_root_pitch_table = torch.tensor(
-        [pose.root_pitch for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_root_height_table = torch.tensor(
-        [pose.root_height for pose in poses], device=device, dtype=dtype
-    )
+    env.reset_pose_gradients = torch.tensor([pose.gradient for pose in poses], device=device, dtype=dtype)
+    env.reset_q_reset_table = torch.tensor([pose.q_reset for pose in poses], device=device, dtype=dtype)
+    env.reset_q_ref_table = torch.tensor([pose.q_ref for pose in poses], device=device, dtype=dtype)
+    env.reset_root_pitch_table = torch.tensor([pose.root_pitch for pose in poses], device=device, dtype=dtype)
+    env.reset_root_height_table = torch.tensor([pose.root_height for pose in poses], device=device, dtype=dtype)
     env.reset_handle_wrenches_sln_table = torch.tensor(
         [pose.handle_wrenches_sln for pose in poses], device=device, dtype=dtype
     )
-    env.reset_pose_index = torch.zeros(
-        env.num_envs, device=device, dtype=torch.long
-    )
-    env.reset_grasp_positions_b_table = torch.zeros(
-        (len(poses), 2, 3), device=device, dtype=dtype
-    )
+    env.reset_pose_index = torch.zeros(env.num_envs, device=device, dtype=torch.long)
+    env.reset_grasp_positions_b_table = torch.zeros((len(poses), 2, 3), device=device, dtype=dtype)
     env._reset_grasp_cached_indices = set()
 
 
@@ -1867,36 +1418,20 @@ def install_reset_pose_batch(env: Any, poses: list[Any]) -> None:
     """Install one immutable reset pose per environment for Stage B batching."""
 
     if len(poses) != env.num_envs:
-        raise ValueError(
-            f"reset pose batch must contain {env.num_envs} poses, got {len(poses)}"
-        )
+        raise ValueError(f"reset pose batch must contain {env.num_envs} poses, got {len(poses)}")
     device = env.device
     dtype = env.action_state.q_ref.dtype
-    env.reset_pose_gradients = torch.tensor(
-        [pose.gradient for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_q_reset_table = torch.tensor(
-        [pose.q_reset for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_q_ref_table = torch.tensor(
-        [pose.q_ref for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_root_pitch_table = torch.tensor(
-        [pose.root_pitch for pose in poses], device=device, dtype=dtype
-    )
-    env.reset_root_height_table = torch.tensor(
-        [pose.root_height for pose in poses], device=device, dtype=dtype
-    )
+    env.reset_pose_gradients = torch.tensor([pose.gradient for pose in poses], device=device, dtype=dtype)
+    env.reset_q_reset_table = torch.tensor([pose.q_reset for pose in poses], device=device, dtype=dtype)
+    env.reset_q_ref_table = torch.tensor([pose.q_ref for pose in poses], device=device, dtype=dtype)
+    env.reset_root_pitch_table = torch.tensor([pose.root_pitch for pose in poses], device=device, dtype=dtype)
+    env.reset_root_height_table = torch.tensor([pose.root_height for pose in poses], device=device, dtype=dtype)
     env.reset_handle_wrenches_sln_table = torch.tensor(
         [pose.handle_wrenches_sln for pose in poses], device=device, dtype=dtype
     )
-    env.reset_candidate_pose_index = torch.arange(
-        env.num_envs, device=device, dtype=torch.long
-    )
+    env.reset_candidate_pose_index = torch.arange(env.num_envs, device=device, dtype=torch.long)
     env.reset_pose_index = env.reset_candidate_pose_index.clone()
-    env.reset_grasp_positions_b_table = torch.zeros(
-        (env.num_envs, 2, 3), device=device, dtype=dtype
-    )
+    env.reset_grasp_positions_b_table = torch.zeros((env.num_envs, 2, 3), device=device, dtype=dtype)
     env._reset_grasp_cached_indices = set()
 
 
@@ -1928,16 +1463,10 @@ def initialize_mdp_state(
     manager.bind_existing()
     env.d6_constraint_manager = manager
     if not hasattr(env, "_rickshaw_physics_hook_action_term"):
-        raise RuntimeError(
-            "exactly one FilteredJointPositionActionCfg must set physics_hook_owner=True"
-        )
+        raise RuntimeError("exactly one FilteredJointPositionActionCfg must set physics_hook_owner=True")
     resolve_task_entities(env, entity_names_cfg)
-    env.nominal_policy_effort_limits = actuator_effort_limits(
-        env.scene["robot"], env.policy_joint_ids
-    ).clone()
-    env.arm_effort_limits = actuator_effort_limits(
-        env.scene["robot"], env.arm_joint_ids
-    ).clone()
+    env.nominal_policy_effort_limits = actuator_effort_limits(env.scene["robot"], env.policy_joint_ids).clone()
+    env.arm_effort_limits = actuator_effort_limits(env.scene["robot"], env.arm_joint_ids).clone()
     robot_body_names = tuple(env.scene["robot"].body_names)
     env.grasp_body_ids = _exact_name_ids(
         robot_body_names,
@@ -1954,32 +1483,20 @@ def initialize_mdp_state(
         raise RuntimeError("the task requires exactly three ActionTerms totaling 29 joints")
     if not all(hasattr(term, "filter_state") for term in action_terms):
         raise RuntimeError("all three action groups must use FilteredJointPositionAction")
-    reference_indices = tuple(
-        index
-        for term in action_terms
-        for index in (term.cfg.reference_indices or ())
-    )
+    reference_indices = tuple(index for term in action_terms for index in (term.cfg.reference_indices or ()))
     if reference_indices != tuple(range(ACTION_DIM)):
-        raise RuntimeError(
-            "ActionTerm reference_indices must partition the persisted q_ref order 0..28"
-        )
-    resolved_action_names = tuple(
-        name for term in action_terms for name in term._joint_names
-    )
+        raise RuntimeError("ActionTerm reference_indices must partition the persisted q_ref order 0..28")
+    resolved_action_names = tuple(name for term in action_terms for name in term._joint_names)
     if resolved_action_names != entity_names_cfg.policy_joint_names:
         raise RuntimeError("ActionTerm joint concatenation differs from persisted checkpoint order")
     resolved_scales: list[torch.Tensor] = []
     for term in action_terms:
         try:
             resolved_scales.append(
-                canonicalize_action_scale(
-                    term._scale, term.action_dim, env.num_envs, device=env.device
-                )
+                canonicalize_action_scale(term._scale, term.action_dim, env.num_envs, device=env.device)
             )
         except ValueError as error:
-            raise RuntimeError(
-                "ActionTerm scale tensor does not match the term action dimension"
-            ) from error
+            raise RuntimeError("ActionTerm scale tensor does not match the term action dimension") from error
     scale = torch.cat(resolved_scales)
     expected_scale = action_scale_vector(device=env.device, dtype=scale.dtype)
     if not torch.allclose(scale, expected_scale, rtol=0.0, atol=1.0e-7):
@@ -1994,13 +1511,9 @@ def initialize_mdp_state(
     env.path_state = PathTrackingState.zeros(num_envs, device=device)
     env.rickshaw_state = RickshawRuntimeState.zeros(num_envs, device=device)
     env.stability_state = StabilityState.zeros(num_envs, device=device)
-    env.action_state = ButterworthActionState.create(
-        torch.zeros((num_envs, ACTION_DIM), device=device)
-    )
+    env.action_state = ButterworthActionState.create(torch.zeros((num_envs, ACTION_DIM), device=device))
     _compile_reset_pose_tables(env)
-    env.reset_policy_joint_pos = torch.zeros(
-        (num_envs, ACTION_DIM), device=device
-    )
+    env.reset_policy_joint_pos = torch.zeros((num_envs, ACTION_DIM), device=device)
     env.c_rr = torch.zeros(num_envs, device=device)
     env.d6_preload_offset_w = torch.zeros((num_envs, 3), device=device)
     env.policy_robot_speed_s = torch.zeros(num_envs, device=device)
@@ -2011,37 +1524,30 @@ def initialize_mdp_state(
     update_slope_frame(env)
     cart = env.scene["rickshaw"]
     initial_v_s = torch.sum(cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
-    initial_pitch = rickshaw_pitch_from_quaternion(
-        cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-    )
-    env.analytic_force_state = AnalyticHandleForceState.initialized(
-        initial_v_s, initial_pitch
-    )
+    initial_pitch = rickshaw_pitch_from_quaternion(cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w)
+    env.analytic_force_state = AnalyticHandleForceState.initialized(initial_v_s, initial_pitch)
     _, cart_com_velocity_w, _ = cart_system_mass_kinematics(env)
-    env.cart_interaction_wrench_state = CartInteractionWrenchState.initialized(
-        cart_com_velocity_w
+    env.cart_interaction_wrench_state = CartInteractionWrenchState.initialized(cart_com_velocity_w)
+    env.cart_interaction_wrench_valid = torch.zeros(num_envs, device=device, dtype=torch.bool)
+    from .observations import (
+        ACTOR_OBSERVATION_NOISE_SCALE,
+        ObservationHistoryState,
+        TEACHER_DYNAMIC_DIM,
     )
-    env.cart_interaction_wrench_valid = torch.zeros(
-        num_envs, device=device, dtype=torch.bool
-    )
-    from .curricula import TerrainCurriculumState
-    from .observations import ObservationHistoryState, TEACHER_DYNAMIC_DIM
     from .terminations import PersistentTerminationState, TerminationCauseState
 
     env.observation_history_state = ObservationHistoryState.zeros(
         num_envs,
         device=device,
     )
-    dynamic_history_enabled = (
-        getattr(env.cfg.observations, "teacher_dynamic_history", None) is not None
-    )
+    dynamic_history_enabled = getattr(env.cfg.observations, "teacher_dynamic_history", None) is not None
     env.teacher_dynamic_history_state = ObservationHistoryState.zeros(
         num_envs,
         observation_dim=TEACHER_DYNAMIC_DIM,
         device=device,
         history_enabled=dynamic_history_enabled,
     )
-    env.curriculum_state = TerrainCurriculumState.zeros(num_envs, device=device)
+    env.actor_observation_noise_scale = torch.tensor(ACTOR_OBSERVATION_NOISE_SCALE, device=device)
     env.termination_state = PersistentTerminationState.zeros(num_envs, device=device)
     env.termination_cause_state = TerminationCauseState.zeros(num_envs, device=device)
     bind_d6_runtime_adapters(env)
@@ -2117,9 +1623,7 @@ def _reset_grasp_positions_w(
                 env.reset_grasp_positions_b_table[pose_index] = local_grasp[sample]
             cached_indices.update(missing)
     local_grasp = env.reset_grasp_positions_b_table[pose_indices]
-    return root_pos[:, None, :] + quat_apply_wxyz(
-        root_quat[:, None, :].expand(-1, 2, -1), local_grasp
-    )
+    return root_pos[:, None, :] + quat_apply_wxyz(root_quat[:, None, :].expand(-1, 2, -1), local_grasp)
 
 
 def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
@@ -2168,9 +1672,7 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
     policy_target = env.action_state.q_ref[env_ids].clone()
     joint_target[:, env.policy_joint_ids] = policy_target
     robot.set_joint_position_target(joint_target, env_ids=env_ids)
-    grasp_position = _reset_grasp_positions_w(
-        env, env_ids, root_pos, root_quat
-    )
+    grasp_position = _reset_grasp_positions_w(env, env_ids, root_pos, root_quat)
     alpha_target = target_pitch_from_hitch_height(env.rickshaw_pose_cfg)
     env.rickshaw_state.pitch[env_ids] = float(alpha_target)
     cart_quat = target_cart_orientation(env.slope_quat_w[env_ids], alpha_target)
@@ -2196,9 +1698,7 @@ def write_closed_chain_reset_state(env: Any, env_ids: torch.Tensor) -> None:
         env.rickshaw_pose_cfg,
     )
     path_position = torch.sum((cart_root - origin) * env.path_tangent_w[env_ids], dim=-1)
-    wheel_phase = wheel_phase_from_path_position(
-        path_position, env.rickshaw_pose_cfg.wheel_radius
-    )
+    wheel_phase = wheel_phase_from_path_position(path_position, env.rickshaw_pose_cfg.wheel_radius)
     cart.write_root_pose_to_sim(torch.cat((cart_root, cart_quat), dim=-1), env_ids=env_ids)
     cart.write_root_velocity_to_sim(torch.zeros_like(root_velocity), env_ids=env_ids)
     wheel_joint_ids = _ensure_wheel_joint_ids(env)
@@ -2224,9 +1724,7 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.rickshaw_state.d6_truth_wrench_w[env_ids] = 0.0
     env.rickshaw_state.hand_force_w[env_ids] = 0.0
     env.rickshaw_state.hand_torque_w[env_ids] = 0.0
-    env.cart_interaction_wrench_state.reset(
-        torch.zeros((env_ids.numel(), 3), device=env.device), env_ids
-    )
+    env.cart_interaction_wrench_state.reset(torch.zeros((env_ids.numel(), 3), device=env.device), env_ids)
     env.cart_interaction_wrench_valid[env_ids] = False
     env.stability_state.fat_valid[env_ids] = False
     env.stability_state.fat_wrench_consistent[env_ids] = False
@@ -2241,16 +1739,12 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
     env.stability_state.support_points_sy[env_ids] = 0.0
     env.stability_state.support_point_mask[env_ids] = False
     env.action_state.reset(env.action_state.q_ref[env_ids], env_ids)
-    env.observation_delay_state.reset(env_ids)
     env.observation_history_state.reset(env_ids)
     env.teacher_dynamic_history_state.reset(env_ids)
     env.termination_state.reset(env_ids)
-    env.curriculum_state.reset(env_ids)
     cart = env.scene["rickshaw"]
     v_s = torch.sum(cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
-    pitch = rickshaw_pitch_from_quaternion(
-        cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-    )
+    pitch = rickshaw_pitch_from_quaternion(cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w)
     env.analytic_force_state.reset(v_s, pitch, env_ids)
     if hasattr(env, "fat2_wrench_consistency_state"):
         env.fat2_wrench_consistency_state.reset(env_ids)
@@ -2259,12 +1753,8 @@ def reset_task_state(env: Any, env_ids: torch.Tensor) -> None:
         env.fat_com_radius_raw[env_ids] = env.fat2_com_radius_state.reference_radius[env_ids]
     if hasattr(env, "zmp_kinematic_state"):
         robot = env.scene["robot"]
-        velocity_s = torch.sum(
-            robot.data.root_com_lin_vel_w * env.path_tangent_w, dim=-1
-        )
-        velocity_n = torch.sum(
-            robot.data.root_com_lin_vel_w * env.path_normal_w, dim=-1
-        )
+        velocity_s = torch.sum(robot.data.root_com_lin_vel_w * env.path_tangent_w, dim=-1)
+        velocity_n = torch.sum(robot.data.root_com_lin_vel_w * env.path_normal_w, dim=-1)
         env.zmp_kinematic_state.reset(velocity_s, velocity_n, env_ids)
 
 
@@ -2320,30 +1810,18 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
 
     Configure this as the first TerminationTerm.  It always returns false; its
     purpose is to provide current-step path, cart, D6, FAT2, ZMP, and terrain
-    curriculum state to the remaining terms in unmodified
+    frame state to the remaining terms in unmodified
     :class:`ManagerBasedRLEnv`.
     """
 
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
-    hitch_position_w = torch.mean(
-        cart.data.body_pos_w[:, env.hitch_body_ids], dim=1
-    )
-    hitch_velocity_w = torch.mean(
-        cart.data.body_lin_vel_w[:, env.hitch_body_ids], dim=1
-    )
-    cart_pitch = rickshaw_pitch_from_quaternion(
-        cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-    )
-    cart_speed_s = torch.sum(
-        cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1
-    )
-    robot_speed_s = torch.sum(
-        robot.data.root_lin_vel_w * env.path_tangent_w, dim=-1
-    )
-    robot_velocity_n = torch.sum(
-        robot.data.root_lin_vel_w * env.path_normal_w, dim=-1
-    )
+    hitch_position_w = torch.mean(cart.data.body_pos_w[:, env.hitch_body_ids], dim=1)
+    hitch_velocity_w = torch.mean(cart.data.body_lin_vel_w[:, env.hitch_body_ids], dim=1)
+    cart_pitch = rickshaw_pitch_from_quaternion(cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w)
+    cart_speed_s = torch.sum(cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
+    robot_speed_s = torch.sum(robot.data.root_lin_vel_w * env.path_tangent_w, dim=-1)
+    robot_velocity_n = torch.sum(robot.data.root_lin_vel_w * env.path_normal_w, dim=-1)
     env.policy_robot_speed_s[:] = robot_speed_s
     env.policy_robot_velocity_n[:] = robot_velocity_n
     cart_kinematics = cart_system_mass_kinematics(env)
@@ -2371,8 +1849,7 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
         geometry_sn=rickshaw_geometry_sn,
     )
     env.rickshaw_state.two_wheel_contact[:] = torch.all(
-        env.rickshaw_state.wheel_normal_force
-        >= cfg.analytic_force.minimum_wheel_normal_force,
+        env.rickshaw_state.wheel_normal_force >= cfg.analytic_force.minimum_wheel_normal_force,
         dim=-1,
     )
     update_fat2_reference(
@@ -2387,9 +1864,6 @@ def refresh_policy_state(env: Any, cfg: PolicyStateUpdateCfg) -> torch.Tensor:
         robot_kinematics=robot_kinematics,
         hitch_w=hitch_position_w,
     )
-    from .curricula import record_curriculum_tracking
-
-    record_curriculum_tracking(env, robot_speed_s)
     return env.no_terminations
 
 
@@ -2434,7 +1908,7 @@ def _advance_policy_command_and_observation(
     advance_speed_reference(env, cfg.speed_reference, command_ids)
     from .observations import actor_observation, dynamic_privileged_observation
 
-    observation = actor_observation(env, active_mask=active)
+    observation = actor_observation(env)
     dynamic = dynamic_privileged_observation(env)
     if initialize_reset:
         if torch.any(env.observation_history_state.initialized[selected_ids]) or torch.any(
@@ -2455,9 +1929,7 @@ def bootstrap_reset_observation(
 ) -> None:
     """Create the policy-rate reset frame after reset kinematics are current."""
 
-    _advance_policy_command_and_observation(
-        env, cfg, env_ids, initialize_reset=True
-    )
+    _advance_policy_command_and_observation(env, cfg, env_ids, initialize_reset=True)
 
 
 __all__ = [
@@ -2473,8 +1945,6 @@ __all__ = [
     "DOMAIN_PARAMETER_NAMES",
     "DOMAIN_RANDOMIZATION_NAMES",
     "DomainRandomizationCfg",
-    "DomainRandomizationScheduleCfg",
-    "DomainRandomizationStage",
     "ResetValidationCfg",
     "SpeedCommandSamplingCfg",
     "StabilityState",
@@ -2486,7 +1956,6 @@ __all__ = [
     "bind_d6_runtime_adapters",
     "compute_path_tracking_errors",
     "d6_spatial_impulse_magnitudes",
-    "domain_epoch_seed",
     "effective_cart_mass_com_bounds",
     "fit_cart_pose_to_hitch_targets",
     "finish_closed_chain_reset",

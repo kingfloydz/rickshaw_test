@@ -85,11 +85,13 @@ def main() -> int:  # noqa: C901
         "--shard-steps",
         type=int,
         default=4,
-        help="Policy steps buffered per shard; four bounds host memory at 4096 environments.",
+        help="Policy steps buffered per shard; four bounds host memory at 8192 environments.",
     )
     parser.add_argument("--max-collection-multiplier", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--storage-dtype", choices=("float16", "float32"), default="float16")
+    parser.add_argument(
+        "--storage-dtype", choices=("float16", "float32"), default="float16"
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--training-iteration",
@@ -125,9 +127,7 @@ def main() -> int:  # noqa: C901
             or not isinstance(checkpoint_iteration, int)
             or checkpoint_iteration < 0
         ):
-            raise RuntimeError(
-                "S0 checkpoint is missing a valid curriculum iteration"
-            )
+            raise RuntimeError("S0 checkpoint is missing a valid curriculum iteration")
         args.training_iteration = checkpoint_iteration
     teacher_training_configuration = dict(
         teacher_checkpoint[TRAINING_CONFIGURATION_KEY]
@@ -138,9 +138,13 @@ def main() -> int:  # noqa: C901
         raise ValueError("rollout task differs from the S0 teacher training task")
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
     output_dir = Path(args.output_dir).resolve()
-    existing = list(output_dir.glob("rollout_*.pt")) + list(output_dir.glob("manifest.json"))
+    existing = list(output_dir.glob("rollout_*.pt")) + list(
+        output_dir.glob("manifest.json")
+    )
     if existing and not args.overwrite:
-        raise FileExistsError(f"rollout output already contains artifacts: {output_dir}")
+        raise FileExistsError(
+            f"rollout output already contains artifacts: {output_dir}"
+        )
     if args.overwrite:
         for path in existing:
             path.unlink()
@@ -172,9 +176,7 @@ def main() -> int:  # noqa: C901
         env_cfg.curriculum = None
         apply_reward_weight_overrides(
             env_cfg,
-            reward_weight_overrides_from_configuration(
-                teacher_training_configuration
-            ),
+            reward_weight_overrides_from_configuration(teacher_training_configuration),
         )
         env_cfg.rewards.fat2_prior_exp.weight = float(
             training_parameters["fat2_weight"]
@@ -186,7 +188,9 @@ def main() -> int:  # noqa: C901
         agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = OnPolicyRunner(
+            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        )
         runner.load(
             os.fspath(teacher_path),
             load_cfg={
@@ -202,7 +206,9 @@ def main() -> int:  # noqa: C901
         fixed_assignment = slope_environment_assignment(
             args.num_envs, device=agent_cfg.device
         )
-        storage_dtype = torch.float16 if args.storage_dtype == "float16" else torch.float32
+        storage_dtype = (
+            torch.float16 if args.storage_dtype == "float16" else torch.float32
+        )
         pending: dict[str, list[torch.Tensor]] = {}
         stage_segments: list[dict] = []
         stage_sample_distribution: dict[str, int] = {}
@@ -228,7 +234,9 @@ def main() -> int:  # noqa: C901
             nonlocal shard_index, collected_samples
             if not pending:
                 return
-            tensors = {name: torch.cat(values, dim=0) for name, values in pending.items()}
+            tensors = {
+                name: torch.cat(values, dim=0) for name, values in pending.items()
+            }
             samples = tensors["current"].shape[0]
             if samples == 0:
                 pending.clear()
@@ -261,7 +269,9 @@ def main() -> int:  # noqa: C901
 
         def assert_fixed_rollout_assignment() -> None:
             terrain = base_env.scene.terrain
-            if not torch.equal(terrain.terrain_levels, fixed_assignment["terrain_level"]):
+            if not torch.equal(
+                terrain.terrain_levels, fixed_assignment["terrain_level"]
+            ):
                 raise RuntimeError("rollout terrain levels changed during collection")
             if not torch.equal(terrain.terrain_types, fixed_assignment["terrain_type"]):
                 raise RuntimeError("rollout terrain types changed during collection")
@@ -290,8 +300,9 @@ def main() -> int:  # noqa: C901
         stage_specs = [("TRAINING", args.training_iteration)]
 
         target_samples = args.num_envs * args.num_steps
-        for segment_index, (expected_stage, curriculum_iteration) in enumerate(stage_specs):
-            base_env.set_domain_randomization_iteration(curriculum_iteration)
+        for segment_index, (expected_stage, curriculum_iteration) in enumerate(
+            stage_specs
+        ):
             actual_global_stage = expected_stage
 
             install_fixed_rollout_assignment()
@@ -316,12 +327,17 @@ def main() -> int:  # noqa: C901
             per_env_stage = {"TRAINING": args.num_envs}
 
             while stage_valid_samples < target_samples:
-                if stage_collection_steps >= args.num_steps * args.max_collection_multiplier:
+                if (
+                    stage_collection_steps
+                    >= args.num_steps * args.max_collection_multiplier
+                ):
                     raise RuntimeError(
                         f"stage {expected_stage} failed to collect {target_samples} valid samples"
                     )
                 assert_fixed_rollout_assignment()
-                valid = torch.ones(args.num_envs, dtype=torch.bool, device=agent_cfg.device)
+                valid = torch.ones(
+                    args.num_envs, dtype=torch.bool, device=agent_cfg.device
+                )
                 valid &= per_environment_samples < args.num_steps
                 valid_ids = torch.nonzero(valid, as_tuple=False).squeeze(-1)
                 selected = valid_ids
@@ -342,9 +358,7 @@ def main() -> int:  # noqa: C901
                         "environment_id": selected.unsqueeze(-1).clone(),
                         "episode_id": episode_ids[selected].unsqueeze(-1).clone(),
                         "slope": base_env.slope[selected].unsqueeze(-1).clone(),
-                        "terrain_level": base_env.scene.terrain.terrain_levels[
-                            selected
-                        ]
+                        "terrain_level": base_env.scene.terrain.terrain_levels[selected]
                         .unsqueeze(-1)
                         .clone(),
                         "terrain_type": base_env.scene.terrain.terrain_types[selected]
@@ -373,13 +387,19 @@ def main() -> int:  # noqa: C901
                         append(name, value)
                         cpu_value = value.detach().to(
                             device="cpu",
-                            dtype=torch.long if name in INTEGER_AUDIT_TENSORS else torch.float32,
+                            dtype=torch.long
+                            if name in INTEGER_AUDIT_TENSORS
+                            else torch.float32,
                         )
                         stage_audit_chunks[name].append(cpu_value)
                         all_audit_chunks[name].append(cpu_value)
                     amount = int(selected.numel())
-                    sample_distribution["TRAINING"] = sample_distribution.get("TRAINING", 0) + amount
-                    stage_sample_distribution["TRAINING"] = stage_sample_distribution.get("TRAINING", 0) + amount
+                    sample_distribution["TRAINING"] = (
+                        sample_distribution.get("TRAINING", 0) + amount
+                    )
+                    stage_sample_distribution["TRAINING"] = (
+                        stage_sample_distribution.get("TRAINING", 0) + amount
+                    )
                     per_environment_samples[selected] += 1
                     stage_valid_samples += int(selected.numel())
                 observation = next_observation.to(agent_cfg.device)
@@ -402,7 +422,8 @@ def main() -> int:  # noqa: C901
                     f"stage {expected_stage} did not collect the exact per-environment quota"
                 )
             segment_audit_tensors = {
-                name: torch.cat(values, dim=0) for name, values in stage_audit_chunks.items()
+                name: torch.cat(values, dim=0)
+                for name, values in stage_audit_chunks.items()
             }
             actual_sample_audit = summarize_segment_samples(
                 segment_audit_tensors,
@@ -492,10 +513,15 @@ def main() -> int:  # noqa: C901
         validate_rollout_stage_coverage(manifest)
         validate_rollout_sample_audit(
             manifest,
-            {name: torch.cat(values, dim=0) for name, values in all_audit_chunks.items()},
+            {
+                name: torch.cat(values, dim=0)
+                for name, values in all_audit_chunks.items()
+            },
         )
         write_json_atomic(output_dir / "manifest.json", manifest)
-        print(f"collected {collected_samples} verified on-policy samples in {output_dir}")
+        print(
+            f"collected {collected_samples} verified on-policy samples in {output_dir}"
+        )
     finally:
         if env is not None:
             env.close()
