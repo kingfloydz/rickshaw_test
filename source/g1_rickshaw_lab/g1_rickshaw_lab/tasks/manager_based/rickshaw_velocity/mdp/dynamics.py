@@ -370,17 +370,26 @@ def articulation_center_of_mass(
     return position, velocity, total_mass
 
 
+def _center_of_mass_from_cached_weights(
+    body_com_pos_w: torch.Tensor,
+    body_com_lin_vel_w: torch.Tensor,
+    weights: torch.Tensor,
+    total_mass: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    position = torch.sum(body_com_pos_w * weights[..., None], dim=1)
+    velocity = torch.sum(body_com_lin_vel_w * weights[..., None], dim=1)
+    return position, velocity, total_mass
+
+
 def robot_system_mass_kinematics(env: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Read current whole-G1 CoM kinematics using startup-validated masses."""
 
     robot = env.scene["robot"]
-    masses = getattr(env, "robot_body_masses", None)
-    if masses is None:
-        raise RuntimeError("startup must install validated env.robot_body_masses")
-    return articulation_center_of_mass(
+    return _center_of_mass_from_cached_weights(
         robot.data.body_com_pos_w,
         robot.data.body_com_lin_vel_w,
-        masses.to(device=robot.device, dtype=robot.data.body_com_pos_w.dtype),
+        env.robot_body_mass_weights,
+        env.robot_total_mass,
     )
 
 
@@ -388,13 +397,11 @@ def cart_system_mass_kinematics(env: Any) -> tuple[torch.Tensor, torch.Tensor, t
     """Read current whole-rickshaw CoM kinematics using sampled body masses."""
 
     cart = env.scene["rickshaw"]
-    masses = getattr(env, "rickshaw_body_masses", None)
-    if masses is None:
-        raise RuntimeError("payload randomization must publish current cart body masses")
-    return articulation_center_of_mass(
+    return _center_of_mass_from_cached_weights(
         cart.data.body_com_pos_w,
         cart.data.body_com_lin_vel_w,
-        masses.to(device=cart.device, dtype=cart.data.body_com_pos_w.dtype),
+        env.rickshaw_body_mass_weights,
+        env.rickshaw_total_mass,
     )
 
 
@@ -460,6 +467,8 @@ def update_cart_interaction_wrench(
     hand_force_w = -force_on_cart_w
     env.rickshaw_state.hand_force_w[:] = hand_force_w
     env.rickshaw_state.hand_torque_w.zero_()
+    # Keep the PhysX truth separate from its diagnostic/checkpoint mirror.
+    env.rickshaw_state.d6_truth_wrench_w[:] = d6_wrench_w
     env.rickshaw_state.d6_wrench_w[:] = d6_wrench_w
     env.cart_interaction_wrench_valid = valid
     return hand_force_w
@@ -1310,8 +1319,14 @@ def convex_support_margin(
     starts = support_points[:, :, None, :]  # [N, i, 1, 2]
     edges = support_points[:, None, :, :] - starts  # [N, i, j, 2]
     lengths = torch.linalg.vector_norm(edges, dim=-1)
-    vectors_to_points = support_points[:, None, None, :, :] - starts[:, :, :, None, :]
-    side = _cross_2d(edges[:, :, :, None, :], vectors_to_points)
+    # Compute the batched cross products directly by component.  This avoids
+    # materializing [N, i, j, k, 2] vectors while preserving the original
+    # unordered-edge convex-hull test.
+    edge_x = edges[..., 0, None]
+    edge_y = edges[..., 1, None]
+    point_x = support_points[:, None, None, :, 0] - support_points[:, :, None, None, 0]
+    point_y = support_points[:, None, None, :, 1] - support_points[:, :, None, None, 1]
+    side = edge_x * point_y - edge_y * point_x
     other_valid = point_mask[:, None, None, :]
     all_left = torch.all((side >= -tolerance) | ~other_valid, dim=-1)
     endpoints_valid = point_mask[:, :, None] & point_mask[:, None, :]
@@ -1355,16 +1370,33 @@ def foot_support_polygon(
         raise ValueError("foot half dimensions must be positive")
     if not math.isfinite(foot_center_offset_x):
         raise ValueError("foot center offset must be finite")
-    local_corners = torch.tensor(
-        (
-            (foot_center_offset_x + foot_half_length, foot_half_width, 0.0),
-            (foot_center_offset_x - foot_half_length, foot_half_width, 0.0),
-            (foot_center_offset_x - foot_half_length, -foot_half_width, 0.0),
-            (foot_center_offset_x + foot_half_length, -foot_half_width, 0.0),
-        ),
-        device=foot_position_w.device,
-        dtype=foot_position_w.dtype,
-    )
+    local_corners = getattr(foot_support_polygon, "_local_corners", None)
+    cache_key = (foot_half_length, foot_half_width, foot_center_offset_x)
+    if (
+        local_corners is None
+        or getattr(foot_support_polygon, "_local_corners_key", None) != cache_key
+        or local_corners.device != foot_position_w.device
+        or local_corners.dtype != foot_position_w.dtype
+    ):
+        local_corners = torch.tensor(
+            (
+                (foot_center_offset_x + foot_half_length, foot_half_width, 0.0),
+                (foot_center_offset_x - foot_half_length, foot_half_width, 0.0),
+                (foot_center_offset_x - foot_half_length, -foot_half_width, 0.0),
+                (foot_center_offset_x + foot_half_length, -foot_half_width, 0.0),
+            ),
+            device=foot_position_w.device,
+            dtype=foot_position_w.dtype,
+        )
+        foot_support_polygon._local_corners = local_corners
+        foot_support_polygon._local_corners_key = cache_key
+        local_center = torch.zeros(
+            (1, 1, 3), device=foot_position_w.device, dtype=foot_position_w.dtype
+        )
+        local_center[..., 0] = foot_center_offset_x
+        foot_support_polygon._local_center = local_center
+    else:
+        local_center = foot_support_polygon._local_center
     local_corners = local_corners.view(1, 1, 4, 3).expand(
         foot_position_w.shape[0], 2, -1, -1
     )
@@ -1377,8 +1409,6 @@ def foot_support_polygon(
     points = torch.stack((corner_s, corner_y), dim=-1).reshape(-1, 8, 2)
     point_mask = foot_contact[:, :, None].expand(-1, -1, 4).reshape(-1, 8)
     contact_count = torch.sum(foot_contact, dim=-1, keepdim=True)
-    local_center = torch.zeros_like(foot_position_w)
-    local_center[..., 0] = foot_center_offset_x
     foot_center_w = foot_position_w + quat_apply_wxyz(foot_quaternion_wxyz, local_center)
     support_center = torch.sum(
         foot_center_w * foot_contact[..., None].to(foot_position_w.dtype), dim=1

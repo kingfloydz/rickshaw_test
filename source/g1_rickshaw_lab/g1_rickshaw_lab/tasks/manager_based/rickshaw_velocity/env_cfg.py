@@ -279,6 +279,14 @@ class RewardsCfg:
     """Reward terms from guide section 11.1."""
 
     track_speed_exp = RewTerm(func=mdp.track_speed_exp, weight=mdp.REWARD_WEIGHTS["track_speed_exp"])
+    track_speed_precise_exp = RewTerm(
+        func=mdp.track_speed_precise_exp,
+        weight=mdp.REWARD_WEIGHTS["track_speed_precise_exp"],
+    )
+    speed_error_pseudo_huber = RewTerm(
+        func=mdp.speed_error_pseudo_huber,
+        weight=mdp.REWARD_WEIGHTS["speed_error_pseudo_huber"],
+    )
     lateral_error_l2 = RewTerm(func=mdp.lateral_error_l2, weight=mdp.REWARD_WEIGHTS["lateral_error_l2"])
     heading_error_l2 = RewTerm(func=mdp.heading_error_l2, weight=mdp.REWARD_WEIGHTS["heading_error_l2"])
     zmp_margin_barrier = RewTerm(
@@ -295,14 +303,22 @@ class RewardsCfg:
         },
     )
     fat2_prior_exp = RewTerm(func=mdp.fat2_prior_exp, weight=mdp.REWARD_WEIGHTS["fat2_prior_exp"])
-    feet_single_stance = RewTerm(
-        func=mdp.feet_single_stance,
-        weight=mdp.REWARD_WEIGHTS["feet_single_stance"],
+    feet_landing = RewTerm(
+        func=mdp.feet_landing,
+        weight=mdp.REWARD_WEIGHTS["feet_landing"],
         params={
             "sensor_cfg": SceneEntityCfg(
                 "robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True
             ),
-            "cap": mdp.FEET_SINGLE_STANCE_CAP_S,
+        },
+    )
+    feet_air_time_excess_l2 = RewTerm(
+        func=mdp.feet_air_time_excess_l2,
+        weight=mdp.REWARD_WEIGHTS["feet_air_time_excess_l2"],
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True
+            ),
         },
     )
     feet_slide = RewTerm(
@@ -321,10 +337,6 @@ class RewardsCfg:
     processed_action_rate_l2 = RewTerm(
         func=mdp.processed_action_rate_l2,
         weight=mdp.REWARD_WEIGHTS["processed_action_rate_l2"],
-    )
-    processed_action_jerk_l2 = RewTerm(
-        func=mdp.processed_action_jerk_l2,
-        weight=mdp.REWARD_WEIGHTS["processed_action_jerk_l2"],
     )
     hip_yaw_roll_reference_l2 = RewTerm(
         func=mdp.hip_yaw_roll_reference_l2,
@@ -435,7 +447,6 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 "control.delay": 0.0,
                 "observation.delay": 0.0,
             },
-            curriculum=mdp.CurriculumScheduleCfg(),
         )
         self.handle_constraint = mdp.HandleConstraintCfg(
             robot_body_paths=tuple(_cal(calibration, "d6.robot_body_paths")),
@@ -634,7 +645,6 @@ class G1RickshawDirectionalSlopePlayEnvCfg(G1RickshawDirectionalSlopeEnvCfg):
         self.scene.num_envs = 64
         self.curriculum = None
         self.domain_randomization.enabled = False
-        self.domain_randomization.curriculum.static_hand_load_iterations = 0
 
 
 def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) -> None:

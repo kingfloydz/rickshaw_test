@@ -20,7 +20,7 @@ from _rollout_audit import (  # noqa: E402
     SLOPE_TERRAIN_TYPES,
     slope_environment_assignment,
 )
-from train_context import _normalize_shard  # noqa: E402
+from train_context import _normalize_shard, seed_s1_training  # noqa: E402
 
 
 def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
@@ -110,3 +110,15 @@ def test_formal_rollout_shard_rejects_aliases_and_legacy_shapes(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="z_star must have shape"):
         _normalize_shard(shape_shard)
+
+
+def test_s1_seed_explicitly_selects_fast_algorithms() -> None:
+    previous = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(True)
+
+        seed_s1_training(42)
+
+        assert not torch.are_deterministic_algorithms_enabled()
+    finally:
+        torch.use_deterministic_algorithms(previous)

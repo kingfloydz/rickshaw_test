@@ -82,6 +82,47 @@ def run_isaaclab_rsl_rl(script_name: str, argv: list[str]) -> None:
             "    env.close()\n    return\n\n" + loop_marker,
             1,
         )
+    if script_name == "play.py" and os.environ.get("G1_RICKSHAW_SKIP_PLAY_EXPORT") == "1":
+        export_marker = "    # export the trained policy to JIT and ONNX formats"
+        loop_marker = "    dt = env.unwrapped.step_dt"
+        export_start = source.find(export_marker)
+        loop_start = source.find(loop_marker, export_start)
+        if export_start < 0 or loop_start < 0:
+            raise RuntimeError(f"Isaac Lab play script has no policy-export block: {script}")
+        source = source[:export_start] + loop_marker + source[loop_start + len(loop_marker) :]
+    if script_name == "play.py" and os.environ.get("G1_RICKSHAW_FOLLOW_ROBOT_CAMERA") == "1":
+        camera_marker = (
+            "    env_cfg.scene.num_envs = args_cli.num_envs "
+            "if args_cli.num_envs is not None else env_cfg.scene.num_envs"
+        )
+        if camera_marker not in source:
+            raise RuntimeError(f"Isaac Lab play script has no camera-setup marker: {script}")
+        camera_setup = (
+            camera_marker
+            + "\n    env_cfg.viewer.origin_type = 'asset_root'"
+            + "\n    env_cfg.viewer.asset_name = 'robot'"
+            + "\n    env_cfg.viewer.eye = (3.5, 5.0, 2.5)"
+            + "\n    env_cfg.viewer.lookat = (-0.8, 0.0, 0.8)"
+        )
+        source = source.replace(camera_marker, camera_setup, 1)
+    if script_name == "play.py" and (
+        slope_frames := os.environ.get("G1_RICKSHAW_SLOPE_FRAMES")
+    ) is not None:
+        try:
+            slope_frames = int(slope_frames)
+        except ValueError as exc:
+            raise RuntimeError("G1_RICKSHAW_SLOPE_FRAMES must be an integer") from exc
+        if slope_frames <= 0:
+            raise RuntimeError("G1_RICKSHAW_SLOPE_FRAMES must be positive")
+        timestep_marker = "            timestep += 1"
+        if timestep_marker not in source:
+            raise RuntimeError(f"Isaac Lab play script has no video-timestep marker: {script}")
+        switch_camera = (
+            timestep_marker
+            + f"\n            slope_index = min((timestep + 1) // {slope_frames}, env.unwrapped.num_envs - 1)"
+            + "\n            env.unwrapped.viewport_camera_controller.set_view_env_index(slope_index)"
+        )
+        source = source.replace(timestep_marker, switch_camera, 1)
     previous = sys.argv
     try:
         sys.argv = [os.fspath(script), *argv]

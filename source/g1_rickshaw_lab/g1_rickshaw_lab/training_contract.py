@@ -50,6 +50,10 @@ from .provenance import (
     load_checkpoint_with_validation,
     validate_checkpoint,
 )
+from .reward_profile import (
+    REWARD_WEIGHT_OVERRIDES_KEY,
+    reward_weight_overrides_from_configuration,
+)
 
 
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -57,7 +61,7 @@ CHECKPOINT_STAGE_KEY = "g1_rickshaw_stage"
 CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
-TRAINING_CONFIGURATION_SCHEMA_VERSION = 7
+TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
 EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -66,7 +70,7 @@ DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
 GUIDE_TRAINING_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 GUIDE_TRAINING_NUM_ENVS = 4096
 TRAINING_ARTIFACT_INTERVAL = 200
-STATIC_HAND_LOAD_ITERATIONS = 2000
+S1_DETERMINISTIC_ALGORITHMS = False
 
 SIGNED_SLOPE_LABELS = SLOPE_LABELS
 ROLLOUT_MANIFEST_SCHEMA_VERSION = 4
@@ -101,7 +105,12 @@ TRAINING_CONFIGURATION_FIELDS = {
 }
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
-        "static_hand_load_iterations": STATIC_HAND_LOAD_ITERATIONS,
+        "domain_randomization_refresh_interval": 200,
+        "domain_randomization_max_scale": 0.6,
+        "domain_randomization_ramp_refreshes": 30,
+        "domain_randomization_friction_scale": 0.5,
+        "delay_randomization_max_probability": 0.25,
+        "delay_randomization_ramp_refreshes": 60,
     },
     "s1_context_distillation": {
         "context_learning_rate": 3.0e-4,
@@ -112,6 +121,7 @@ GUIDE_TRAINING_PARAMETERS = {
         "teacher_actor_initialization": True,
         "rollout_stage_sequence": list(ROLLOUT_STAGE_SEQUENCE),
         "validation_interval": TRAINING_ARTIFACT_INTERVAL,
+        "deterministic_algorithms": S1_DETERMINISTIC_ALGORITHMS,
     },
     "s2_student_ppo": {
         "context_learning_rate": 1.0e-4,
@@ -510,6 +520,14 @@ def require_pinned_rsl_rl() -> str:
     return installed
 
 
+def normalize_rsl_rl_runner_configuration(agent_cfg: Any) -> Any:
+    """Apply Isaac Lab's required RSL-RL 5 configuration migration."""
+
+    from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
+
+    return handle_deprecated_rsl_rl_cfg(agent_cfg, require_pinned_rsl_rl())
+
+
 def collect_runtime_metadata() -> CheckpointMetadata:
     """Collect complete provenance after validating the pinned runtime version."""
 
@@ -680,6 +698,14 @@ def build_s2_bootstrap_checkpoint(
     training_parameters = dict(context_training_configuration["training_parameters"])
     if teacher_training_configuration["training_parameters"] != training_parameters:
         raise ValueError("S0 and S1 training parameters differ")
+    teacher_reward_overrides = reward_weight_overrides_from_configuration(
+        teacher_training_configuration
+    )
+    context_reward_overrides = reward_weight_overrides_from_configuration(
+        context_training_configuration
+    )
+    if teacher_reward_overrides != context_reward_overrides:
+        raise ValueError("S0 and S1 reward profiles differ")
     teacher_metadata = extract_checkpoint_metadata(teacher)
     context_metadata = extract_checkpoint_metadata(context)
     if teacher_metadata.to_mapping() != context_metadata.to_mapping():
@@ -719,7 +745,9 @@ def build_s2_bootstrap_checkpoint(
                 "source_stage": "s1_context_distillation",
                 "source_checkpoint": os.fspath(context_file),
             },
-            "resolved_parameters": {},
+            "resolved_parameters": {
+                REWARD_WEIGHT_OVERRIDES_KEY: context_reward_overrides,
+            },
             "actor_initialized_from_teacher": True,
             "stage_coverage": context_training_configuration["stage_coverage"],
             "training_parameters": training_parameters,
@@ -899,7 +927,7 @@ def _unwrap_env(env: Any) -> Any:
     return env
 
 
-def reset_runner_environment_for_curriculum(env: Any) -> Any:
+def reset_runner_environment_after_domain_refresh(env: Any) -> Any:
     """Full-reset all environments and return the resulting real observation."""
 
     result = env.reset()
@@ -911,7 +939,7 @@ def reset_runner_environment_for_curriculum(env: Any) -> Any:
 
 
 def install_runner_hooks_from_environment() -> None:
-    """Install provenance/curriculum/export hooks into pinned RSL's runner."""
+    """Install provenance and domain-refresh hooks into pinned RSL's runner."""
 
     if os.environ.get("G1_RICKSHAW_RUNNER_HOOK") != "1":
         return
@@ -948,13 +976,6 @@ def install_runner_hooks_from_environment() -> None:
     original_export_jit = OnPolicyRunner.export_policy_to_jit
     original_export_onnx = OnPolicyRunner.export_policy_to_onnx
 
-    def set_curriculum(runner: Any, iteration: int) -> None:
-        env = _unwrap_env(runner.env)
-        callback = getattr(env, "set_curriculum_iteration", None)
-        if not callable(callback):
-            raise RuntimeError("environment does not expose set_curriculum_iteration")
-        callback(int(iteration))
-
     def refresh_domain_randomization(runner: Any, iteration: int) -> bool:
         env = _unwrap_env(runner.env)
         callback = getattr(env, "set_domain_randomization_iteration", None)
@@ -964,7 +985,7 @@ def install_runner_hooks_from_environment() -> None:
             )
         if callback(int(iteration)) is not True:
             return False
-        runner._g1_pending_reset_observation = reset_runner_environment_for_curriculum(
+        runner._g1_pending_reset_observation = reset_runner_environment_after_domain_refresh(
             runner.env
         )
         return True
@@ -1005,12 +1026,16 @@ def install_runner_hooks_from_environment() -> None:
             self._g1_curriculum_start_iteration = 0
         self._g1_stage_policy_steps = 0
         self._g1_curriculum_iteration = self._g1_curriculum_start_iteration
+        self._g1_pending_domain_refresh_iteration = None
         self._g1_pending_reset_observation = None
-        set_curriculum(self, self._g1_curriculum_iteration)
         refresh_domain_randomization(self, self._g1_curriculum_iteration)
         original_act = self.alg.act
 
         def act_after_boundary_reset(observation, *act_args, **act_kwargs):
+            refresh_iteration = self._g1_pending_domain_refresh_iteration
+            if refresh_iteration is not None:
+                refresh_domain_randomization(self, refresh_iteration)
+                self._g1_pending_domain_refresh_iteration = None
             pending = self._g1_pending_reset_observation
             if pending is not None:
                 observation = pending
@@ -1020,7 +1045,7 @@ def install_runner_hooks_from_environment() -> None:
         self.alg.act = act_after_boundary_reset
         original_update = self.alg.update
 
-        def update_with_curriculum(*update_args, **update_kwargs):
+        def update_with_domain_randomization(*update_args, **update_kwargs):
             result = original_update(*update_args, **update_kwargs)
             previous_iteration = self._g1_curriculum_iteration
             self._g1_training_iterations += 1
@@ -1028,15 +1053,16 @@ def install_runner_hooks_from_environment() -> None:
             self._g1_curriculum_iteration = self._g1_curriculum_start_iteration + (
                 self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
             )
-            set_curriculum(self, self._g1_curriculum_iteration)
             if (
                 self._g1_curriculum_iteration // TRAINING_ARTIFACT_INTERVAL
                 != previous_iteration // TRAINING_ARTIFACT_INTERVAL
             ):
-                refresh_domain_randomization(self, self._g1_curriculum_iteration)
+                self._g1_pending_domain_refresh_iteration = (
+                    self._g1_curriculum_iteration
+                )
             return result
 
-        self.alg.update = update_with_curriculum
+        self.alg.update = update_with_domain_randomization
 
     def hooked_learn(self, *args, **kwargs):
         if (
@@ -1120,6 +1146,16 @@ def install_runner_hooks_from_environment() -> None:
             raise RuntimeError(
                 "loaded checkpoint training parameters differ from the active run"
             )
+        if (
+            training_configuration is not None
+            and reward_weight_overrides_from_configuration(
+                loaded_training_configuration
+            )
+            != reward_weight_overrides_from_configuration(training_configuration)
+        ):
+            raise RuntimeError(
+                "loaded checkpoint reward weights differ from the active run"
+            )
         if loaded_stage in {"s2_bootstrap", "s2_student_ppo"}:
             validate_student_checkpoint_architecture(
                 checkpoint,
@@ -1169,8 +1205,8 @@ def install_runner_hooks_from_environment() -> None:
                     "loaded checkpoint curriculum precedes its completed sample budget"
                 )
             self.current_learning_iteration = self._g1_training_iterations
-        set_curriculum(self, self._g1_curriculum_iteration)
-        refresh_domain_randomization(self, self._g1_curriculum_iteration)
+        self._g1_pending_reset_observation = None
+        self._g1_pending_domain_refresh_iteration = self._g1_curriculum_iteration
         return result
 
     def hooked_export_jit(self, path: str, filename: str = "policy.pt"):
@@ -1210,11 +1246,11 @@ __all__ = [
     "ROLLOUT_DEFAULT_NUM_ENVS",
     "ROLLOUT_MANIFEST_SCHEMA_VERSION",
     "ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION",
+    "S1_DETERMINISTIC_ALGORITHMS",
     "ROLLOUT_STAGE_SEQUENCE",
     "TRAINING_CONFIGURATION_KEY",
     "TRAINING_CONFIGURATION_SCHEMA_VERSION",
     "TRAINING_ARTIFACT_INTERVAL",
-    "STATIC_HAND_LOAD_ITERATIONS",
     "SUPPORTED_CONTEXT_DIMS",
     "SUPPORTED_FAT2_WEIGHTS",
     "SUPPORTED_ROLLOUT_STEPS",
@@ -1238,8 +1274,9 @@ __all__ = [
     "load_s0_resume_checkpoint",
     "load_s2_resume_checkpoint",
     "load_stage_checkpoint",
+    "normalize_rsl_rl_runner_configuration",
     "require_pinned_rsl_rl",
-    "reset_runner_environment_for_curriculum",
+    "reset_runner_environment_after_domain_refresh",
     "rollout_scaled_iterations",
     "s0_remaining_learning_iterations",
     "s2_remaining_learning_iterations",

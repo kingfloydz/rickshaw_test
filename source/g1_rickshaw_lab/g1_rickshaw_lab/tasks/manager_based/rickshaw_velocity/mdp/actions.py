@@ -271,8 +271,6 @@ class ControlDelayState:
             torch.int64,
         ):
             raise ValueError("delay_steps must be an integer tensor with shape [N]")
-        if torch.any((delay_steps < 0) | (delay_steps > self.max_delay_steps)):
-            raise ValueError("control delay exceeds the allocated buffer")
         self.buffer[:, :-1] = self.buffer[:, 1:].clone()
         self.buffer[:, -1] = action
         read_index = self.max_delay_steps - delay_steps
@@ -407,7 +405,7 @@ if ISAACLAB_AVAILABLE:
         def apply_actions(self) -> None:
             if self.cfg.physics_hook_owner:
                 self._env._g1_rickshaw_pre_physics_step()
-            # The reset state already includes the full static handle preload.
+            # The reset state already includes the calibrated handle preload.
             # Every substep therefore uses the normal policy controller target.
             self._processed_actions[:] = self._filter_state.target
             super().apply_actions()

@@ -24,6 +24,10 @@ from g1_rickshaw_lab.provenance import (  # noqa: E402
     extract_checkpoint_metadata,
     save_checkpoint_atomic,
 )
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    REWARD_WEIGHT_OVERRIDES_KEY,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.rl import G1RickshawStudentActor, StudentDistillationLoss  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
@@ -31,6 +35,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_STAGE_KEY,
     GUIDE_MAX_ITERATIONS,
     GUIDE_TRAINING_PARAMETERS,
+    S1_DETERMINISTIC_ALGORITHMS,
     extract_gaussian_actor_state,
     load_stage_checkpoint,
     validate_guide_training_configuration,
@@ -89,7 +94,7 @@ def validate_s1_arguments(args: argparse.Namespace) -> None:
 
 
 def seed_s1_training(seed: int) -> torch.Generator:
-    """Seed model initialization and every training-batch draw deterministically."""
+    """Seed model initialization and every training-batch draw."""
 
     if (
         isinstance(seed, bool)
@@ -98,16 +103,14 @@ def seed_s1_training(seed: int) -> torch.Generator:
         or seed > 2**32 - 1
     ):
         raise ValueError("S1 training seed must lie in [0, 2**32-1]")
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True)
-    if hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(S1_DETERMINISTIC_ALGORITHMS)
+    torch.backends.cudnn.deterministic = S1_DETERMINISTIC_ALGORITHMS
+    torch.backends.cudnn.benchmark = not S1_DETERMINISTIC_ALGORITHMS
     return torch.Generator(device="cpu").manual_seed(seed)
 
 
@@ -230,11 +233,13 @@ def initialize_actor_from_checkpoint(
     student.actor.load_state_dict(extract_gaussian_actor_state(checkpoint), strict=True)
 
 
-def _batch(dataset: Mapping[str, torch.Tensor], indices: torch.Tensor, device: torch.device) -> dict[str, torch.Tensor]:
-    return {
-        name: dataset[name][indices].to(device=device, non_blocking=True)
-        for name in REQUIRED_TENSORS
-    }
+def _batch(
+    dataset: Mapping[str, torch.Tensor],
+    indices: torch.Tensor,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    indices = indices.to(device=device, non_blocking=True)
+    return {name: dataset[name][indices] for name in REQUIRED_TENSORS}
 
 
 def _validation_action_kl(
@@ -244,7 +249,7 @@ def _validation_action_kl(
     device: torch.device,
     mini_batch_size: int,
 ) -> float:
-    total = 0.0
+    total = torch.zeros((), device=device, dtype=torch.float64)
     count = 0
     student.eval()
     with torch.no_grad():
@@ -253,11 +258,11 @@ def _validation_action_kl(
             teacher = Independent(Normal(sample["teacher_action_mean"], sample["teacher_action_std"]), 1)
             student_distribution = student(sample["current"], sample["history"])
             divergence = torch.distributions.kl_divergence(teacher, student_distribution)
-            total += float(divergence.sum().cpu())
+            total += divergence.sum().to(dtype=torch.float64)
             count += divergence.numel()
     student.train()
     student.actor.eval()
-    return total / count
+    return float(total.cpu()) / count
 
 
 def train(args: argparse.Namespace) -> Path:
@@ -272,6 +277,9 @@ def train(args: argparse.Namespace) -> Path:
         teacher_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]
     )
     training_parameters = teacher_training_configuration["training_parameters"]
+    reward_weight_overrides = reward_weight_overrides_from_configuration(
+        teacher_training_configuration
+    )
     latent_dim = int(training_parameters["latent_dim"])
     rollout_steps = int(training_parameters["rollout_steps"])
     if teacher_training_configuration["task"] != args.task:
@@ -300,6 +308,8 @@ def train(args: argparse.Namespace) -> Path:
     else:
         device_name = args.device
     device = torch.device(device_name)
+    for name in REQUIRED_TENSORS:
+        dataset[name] = dataset[name].to(device=device)
     student = G1RickshawStudentActor(latent_dim).to(device)
     initialize_actor_from_checkpoint(student, teacher_checkpoint)
 
@@ -340,6 +350,8 @@ def train(args: argparse.Namespace) -> Path:
                 rollout_manifest["num_steps_per_stage"]
             ),
             "teacher_rollout_samples": int(rollout_manifest["num_samples"]),
+            "deterministic_algorithms": S1_DETERMINISTIC_ALGORITHMS,
+            REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
         },
         actor_initialized_from_teacher=True,
         stage_coverage=stage_coverage,
@@ -352,7 +364,7 @@ def train(args: argparse.Namespace) -> Path:
         expected_stage="s1_context_distillation",
     )
     output = Path(args.output)
-    last_metrics: dict[str, float] = {}
+    last_metrics: dict[str, torch.Tensor] = {}
     validation_history: list[dict[str, float | int | bool]] = []
     best_validation_kl = float("inf")
     best_iteration = 0
@@ -396,13 +408,11 @@ def train(args: argparse.Namespace) -> Path:
                 student.context_encoder.parameters(), args.max_grad_norm
             )
             optimizer.step()
-            last_metrics = {
-                name: float(value.detach().cpu()) for name, value in metrics.items()
-            }
+            last_metrics = {name: value.detach() for name, value in metrics.items()}
         if args.log_interval > 0 and iteration % args.log_interval == 0:
             print(
-                f"iter={iteration} loss={last_metrics['loss']:.6f} "
-                f"action_kl={last_metrics['action_kl']:.6f}"
+                f"iter={iteration} loss={float(last_metrics['loss']):.6f} "
+                f"action_kl={float(last_metrics['action_kl']):.6f}"
             )
         if iteration % args.validation_interval == 0 or iteration == args.max_iterations:
             validation_kl = _validation_action_kl(

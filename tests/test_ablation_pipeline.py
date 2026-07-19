@@ -16,7 +16,10 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import run_ablation_pipeline as pipeline
-from finetune_student import _validate_resume_lineage
+from finetune_student import (
+    _validate_resume_lineage,
+    _validate_resume_training_configuration,
+)
 
 
 RUN_NAMES = [
@@ -72,6 +75,7 @@ def test_exact_eight_gpu_plan_has_no_side_effects(
         zip(RUN_NAMES, range(8), strict=True)
     )
     assert plan["tensorboard_logdir"] == str((output_dir / "runs").resolve())
+    assert plan["reward_weight_overrides"] == {}
     assert not output_dir.exists()
 
 
@@ -124,6 +128,144 @@ def test_teacher_command_binds_every_controlled_parameter(
     assert any(value.startswith("hydra.run.dir=") for value in command)
 
 
+def test_ablation_freezes_reward_profile_in_teacher_command(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        task="task",
+        num_envs=4096,
+        seed=42,
+        reward_weight_overrides={
+            "zmp_margin_barrier": -3.0,
+            "feet_slide": -0.2,
+        },
+    )
+
+    command = pipeline._teacher_command(
+        pipeline.RUNS_BY_NAME["baseline"], args, tmp_path / "baseline", None
+    )
+
+    values = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--reward-weight"
+    ]
+    assert values == ["zmp_margin_barrier=-3.0", "feet_slide=-0.2"]
+
+
+def test_worker_environment_isolates_the_selected_physical_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "7")
+
+    environment = pipeline._gpu_environment(4)
+
+    assert environment["CUDA_VISIBLE_DEVICES"] == "4"
+    assert pipeline.LOGICAL_CUDA_DEVICE == "cuda:0"
+
+
+def test_ablation_worker_combines_physical_isolation_with_logical_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    teacher = pipeline.CheckpointRecord(tmp_path / "teacher.pt", 6000, True)
+    student = pipeline.CheckpointRecord(tmp_path / "student.pt", 6000, True)
+    s0_calls = 0
+
+    def checkpoint(_root, _spec, *, stage, **_identity):
+        nonlocal s0_calls
+        if stage == "s0_teacher":
+            s0_calls += 1
+            return None if s0_calls == 1 else teacher
+        return student
+
+    launches: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(pipeline, "_ppo_checkpoint", checkpoint)
+    monkeypatch.setattr(pipeline, "_valid_diagnostic", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(pipeline, "_valid_s1_checkpoint", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        pipeline,
+        "_run_command",
+        lambda command, *, environment, **_kwargs: launches.append(
+            (list(command), dict(environment))
+        ),
+    )
+    args = argparse.Namespace(
+        output_dir=tmp_path / "output",
+        task="task",
+        seed=42,
+        num_envs=4096,
+        reward_weight_overrides={},
+        evaluation_num_envs=380,
+        episodes_per_slope=100,
+        evaluation_seeds=(42, 43, 44, 45, 46),
+    )
+
+    pipeline._run_one_pipeline(
+        pipeline.RUNS_BY_NAME["baseline"],
+        gpu=pipeline.GpuInfo(4, "H200", 140_000),
+        args=args,
+        registry=pipeline.ProcessRegistry(),
+        stop_event=threading.Event(),
+    )
+
+    assert len(launches) == 1
+    command, environment = launches[0]
+    assert environment["CUDA_VISIBLE_DEVICES"] == "4"
+    assert command[command.index("--device") + 1] == "cuda:0"
+
+
+def test_s0_diagnostic_failure_does_not_block_s1_training(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    teacher = pipeline.CheckpointRecord(tmp_path / "teacher.pt", 6000, True)
+    student = pipeline.CheckpointRecord(tmp_path / "student.pt", 2000, True)
+    s1_validation_calls = 0
+    launches: list[list[str]] = []
+
+    def checkpoint(_root, _spec, *, stage, **_identity):
+        return teacher if stage == "s0_teacher" else student
+
+    def valid_s1(*_args, **_kwargs):
+        nonlocal s1_validation_calls
+        s1_validation_calls += 1
+        return s1_validation_calls > 1
+
+    def valid_diagnostic(path, *_args, **_kwargs):
+        return path.name != "s0.json"
+
+    def run_command(command, **_kwargs):
+        bound = list(command)
+        launches.append(bound)
+        if "evaluate_policy.py" in bound[1] and "s0.json" in " ".join(bound):
+            raise RuntimeError("S0 diagnostic did not pass")
+
+    monkeypatch.setattr(pipeline, "_ppo_checkpoint", checkpoint)
+    monkeypatch.setattr(pipeline, "_valid_s1_checkpoint", valid_s1)
+    monkeypatch.setattr(pipeline, "_rollout_manifest_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(pipeline, "_valid_diagnostic", valid_diagnostic)
+    monkeypatch.setattr(pipeline, "_run_command", run_command)
+    args = argparse.Namespace(
+        output_dir=tmp_path / "output",
+        task="task",
+        seed=42,
+        num_envs=4096,
+        reward_weight_overrides={},
+        evaluation_num_envs=380,
+        episodes_per_slope=100,
+        evaluation_seeds=(42, 43, 44, 45, 46),
+    )
+
+    result = pipeline._run_one_pipeline(
+        pipeline.RUNS_BY_NAME["baseline"],
+        gpu=pipeline.GpuInfo(0, "H200", 140_000),
+        args=args,
+        registry=pipeline.ProcessRegistry(),
+        stop_event=threading.Event(),
+    )
+
+    assert any(command[1].endswith("train_context.py") for command in launches)
+    assert result["diagnostics"]["s0_recorded"] is False
+    assert "continuing with the next training stage" in capsys.readouterr().out
+
+
 def test_requested_gpu_inventory_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pipeline,
@@ -159,6 +301,39 @@ def test_eight_workers_use_the_planned_gpu_mapping(
     assert sorted(calls) == sorted(zip(RUN_NAMES, range(8), strict=True))
     summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
     assert [result["run"] for result in summary["runs"]] == RUN_NAMES
+
+
+def test_one_run_failure_does_not_cancel_an_independent_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gpus = [pipeline.GpuInfo(index, "H200", 140_000) for index in range(2)]
+    monkeypatch.setattr(pipeline, "_select_gpus", lambda _indices: gpus)
+    monkeypatch.setattr(pipeline, "_validate_runtime_inputs", lambda _args: None)
+    completed: list[str] = []
+
+    def run_one(spec, **_kwargs):
+        if spec.name == "baseline":
+            raise RuntimeError("expected failure")
+        completed.append(spec.name)
+        return {"run": spec.name}
+
+    monkeypatch.setattr(pipeline, "_run_one_pipeline", run_one)
+    arguments = [
+        "--output-dir",
+        os.fspath(tmp_path / "pipeline"),
+        "--runs",
+        "baseline",
+        "fat2_weight_0.0",
+        "--gpus",
+        "0",
+        "1",
+        "--resume",
+    ]
+
+    with pytest.raises(RuntimeError, match="baseline: expected failure"):
+        pipeline.main(arguments)
+
+    assert completed == ["fat2_weight_0.0"]
 
 
 def test_non_resume_rejects_a_nonempty_output_directory(
@@ -307,6 +482,25 @@ def test_s2_launcher_rejects_a_different_resume_lineage(tmp_path: Path) -> None:
         _validate_resume_lineage(checkpoint, tmp_path / "other.pt", context)
 
 
+def test_s2_launcher_rejects_a_different_resume_reward_profile() -> None:
+    parameters = {"fat2_weight": 0.1, "rollout_steps": 48, "latent_dim": 16}
+    source = {
+        "training_parameters": parameters,
+        "resolved_parameters": {
+            "reward_weight_overrides": {"zmp_margin_barrier": -3.0}
+        },
+    }
+    matching = json.loads(json.dumps(source))
+    different = json.loads(json.dumps(source))
+    different["resolved_parameters"]["reward_weight_overrides"] = {
+        "zmp_margin_barrier": -2.0
+    }
+
+    _validate_resume_training_configuration(matching, source)
+    with pytest.raises(ValueError, match="cannot change reward weights"):
+        _validate_resume_training_configuration(different, source)
+
+
 def test_rollout_resume_requires_a_complete_matching_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -407,6 +601,7 @@ def test_s1_resume_matches_the_training_invocation(
                 "task": "task",
                 "seed": 42,
                 "num_envs": None,
+                "resolved_parameters": {"deterministic_algorithms": False},
             },
             pipeline.CHECKPOINT_LINEAGE_KEY: {
                 "teacher_checkpoint": str(teacher.resolve())

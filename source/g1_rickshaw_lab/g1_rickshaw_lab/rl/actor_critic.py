@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import math
 
 import torch
 from torch import nn
@@ -24,6 +25,9 @@ LOWER_BODY_ACTION_DIM = 12
 CRITIC_PRIVILEGE_DIM = CRITIC_PRIVILEGED_DIM
 ACTOR_HIDDEN_DIMS = (512, 256, 128)
 CRITIC_HIDDEN_DIMS = (256, 128)
+MIN_ACTION_STD = 0.05
+LOWER_BODY_MAX_ACTION_STD = 0.8
+UPPER_BODY_MAX_ACTION_STD = 0.5
 
 
 def _build_mlp(
@@ -63,6 +67,12 @@ class GaussianActor(nn.Module):
         initial_std[:LOWER_BODY_ACTION_DIM] = 0.4
         self.log_std = nn.Parameter(initial_std.log())
 
+    def _bounded_log_std(self) -> torch.Tensor:
+        maximum = torch.full_like(self.log_std, UPPER_BODY_MAX_ACTION_STD)
+        maximum[:LOWER_BODY_ACTION_DIM] = LOWER_BODY_MAX_ACTION_STD
+        minimum = self.log_std.new_full(self.log_std.shape, math.log(MIN_ACTION_STD))
+        return torch.minimum(torch.maximum(self.log_std, minimum), torch.log(maximum))
+
     def distribution(
         self, current: torch.Tensor, context: torch.Tensor
     ) -> Independent:
@@ -71,7 +81,7 @@ class GaussianActor(nn.Module):
         if current.shape[0] != context.shape[0]:
             raise ValueError("current and context batch dimensions differ")
         mean = self.network(torch.cat((current, context), dim=-1))
-        std = self.log_std.exp().to(dtype=mean.dtype).expand_as(mean)
+        std = self._bounded_log_std().exp().to(dtype=mean.dtype).expand_as(mean)
         return Independent(Normal(mean, std, validate_args=False), 1)
 
     def forward(self, current: torch.Tensor, context: torch.Tensor) -> Independent:
@@ -89,7 +99,7 @@ class GaussianActor(nn.Module):
 
     @property
     def std(self) -> torch.Tensor:
-        return self.log_std.exp()
+        return self._bounded_log_std().exp()
 
 
 class PrivilegedCritic(nn.Module):
@@ -157,6 +167,9 @@ __all__ = [
     "CRITIC_HIDDEN_DIMS",
     "CURRENT_OBSERVATION_DIM",
     "LOWER_BODY_ACTION_DIM",
+    "MIN_ACTION_STD",
+    "LOWER_BODY_MAX_ACTION_STD",
+    "UPPER_BODY_MAX_ACTION_STD",
     "G1RickshawStudentActor",
     "GaussianActor",
     "PrivilegedCritic",

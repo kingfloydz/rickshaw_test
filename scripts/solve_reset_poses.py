@@ -3218,7 +3218,7 @@ def _initial_alignment(env) -> dict[str, torch.Tensor]:
         dtype=hitch.dtype,
     ).view(1, 2, 3)
     relative_to_origin = grasp - origins[:, None, :]
-    expected_preload = env.static_d6_preload_offset_w[:, None, :]
+    expected_preload = env.d6_preload_offset_w[:, None, :]
     actual_preload = hitch - grasp
     return {
         "grasp_hitch_position_error_m": torch.linalg.vector_norm(grasp - hitch, dim=-1),
@@ -3451,10 +3451,6 @@ def _validate_round(
     cfg.domain_randomization = replace(
         cfg.domain_randomization,
         enabled=False,
-        curriculum=replace(
-            cfg.domain_randomization.curriculum,
-            static_hand_load_iterations=0,
-        ),
     )
     cfg.events.initialize_domain.params = {"cfg": cfg.domain_randomization}
     reset_library = _bind_reset_pose_library(cfg, reset_pose_path)

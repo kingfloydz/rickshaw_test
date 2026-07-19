@@ -1,4 +1,4 @@
-"""Pure regression tests for curriculum, domain physics, and safety contracts."""
+"""Pure regression tests for domain randomization, physics, and safety contracts."""
 
 from __future__ import annotations
 
@@ -11,11 +11,6 @@ import torch
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actuation import (
     actuator_effort_limits,
-)
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
-    CurriculumRuntimeState,
-    CurriculumScheduleCfg,
-    CurriculumStage,
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     CommandState,
@@ -79,7 +74,6 @@ def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
         ranges=ranges,
         nominal=nominal,
         calibration={},
-        curriculum=CurriculumScheduleCfg(),
     )
 
 
@@ -106,6 +100,26 @@ def test_disabled_domain_uses_nominal_values_and_never_changes_by_epoch() -> Non
     torch.testing.assert_close(first_error, second_error)
 
 
+def test_domain_scale_keeps_nominal_center_and_shrinks_full_ranges() -> None:
+    cfg = _domain_cfg()
+    nominal, nominal_error = sample_domain_parameters(cfg, 32, scale=0.0)
+    for name, values in nominal.items():
+        torch.testing.assert_close(values, torch.full_like(values, cfg.nominal[name]))
+    assert torch.count_nonzero(nominal_error) == 0
+
+    narrow, _ = sample_domain_parameters(
+        cfg,
+        32,
+        generator=torch.Generator().manual_seed(11),
+        scale=0.5,
+    )
+    for name, values in narrow.items():
+        low, high = cfg.ranges[name]
+        nominal_value = cfg.nominal[name]
+        assert torch.all(values >= nominal_value + 0.5 * (low - nominal_value))
+        assert torch.all(values <= nominal_value + 0.5 * (high - nominal_value))
+
+
 def test_domain_epoch_seed_supports_resume_without_sampling_prior_epochs() -> None:
     cfg = _domain_cfg()
     direct = torch.Generator().manual_seed(domain_epoch_seed(123, 4))
@@ -121,12 +135,10 @@ def test_domain_iteration_refreshes_once_per_epoch_and_supports_direct_resume(
     monkeypatch,
 ) -> None:
     cfg = _domain_cfg()
-    calls: list[int] = []
+    calls: list[tuple[int, float]] = []
 
-    monkeypatch.setattr(events_module, "install_balanced_slope_assignment", lambda _env: None)
-
-    def apply_epoch(env, _cfg, epoch: int) -> None:
-        calls.append(epoch)
+    def apply_epoch(env, _cfg, epoch: int, *, scale: float) -> None:
+        calls.append((epoch, scale))
         env.domain_randomization_epoch = epoch
 
     monkeypatch.setattr(events_module, "_apply_domain_epoch", apply_epoch)
@@ -142,30 +154,16 @@ def test_domain_iteration_refreshes_once_per_epoch_and_supports_direct_resume(
     )
     initialize_domain_randomization(env, None, cfg)
 
-    assert calls == [0]
-    assert env.set_domain_randomization_iteration(199) is False
-    assert calls == [0]
-    assert env.set_domain_randomization_iteration(200) is True
-    assert calls == [0, 1]
-    assert env.set_domain_randomization_iteration(200) is False
-    assert calls == [0, 1]
-    assert env.set_domain_randomization_iteration(600) is True
-    assert calls == [0, 1, 3]
-    with pytest.raises(ValueError, match="backwards"):
-        env.set_domain_randomization_iteration(400)
-
-
-def test_curriculum_switches_only_reset_environments_to_training() -> None:
-    strata = torch.arange(30)
-    state = CurriculumRuntimeState.create(
-        strata, torch.zeros_like(strata), CurriculumScheduleCfg()
-    )
-    assert state.set_iteration(1999) == CurriculumStage.STATIC_HAND_LOAD
-    assert state.set_iteration(2000) == CurriculumStage.TRAINING
-    assert torch.all(state.stage_per_environment() == int(CurriculumStage.STATIC_HAND_LOAD))
-    reset_ids = torch.tensor([0, 3, 7])
-    state.activate(reset_ids)
-    assert torch.all(state.stage_per_environment()[reset_ids] == int(CurriculumStage.TRAINING))
+    assert calls == [(0, 0.0)]
+    assert env.set_domain_randomization_iteration(1999) is False
+    assert calls == [(0, 0.0)]
+    assert env.set_domain_randomization_iteration(2000) is True
+    assert calls == [(0, 0.0), (10, 0.5)]
+    assert env.set_domain_randomization_iteration(2000) is False
+    assert env.set_domain_randomization_iteration(3999) is True
+    assert calls == [(0, 0.0), (10, 0.5), (19, 0.5)]
+    assert env.set_domain_randomization_iteration(4000) is True
+    assert calls == [(0, 0.0), (10, 0.5), (19, 0.5), (20, 1.0)]
 
 
 def test_nominal_actuator_domain_preserves_configured_gains_and_binds_limits() -> None:

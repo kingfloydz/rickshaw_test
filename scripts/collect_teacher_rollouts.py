@@ -21,11 +21,16 @@ from _isaaclab_wrappers import (
 add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import atomic_torch_save, extract_checkpoint_metadata  # noqa: E402
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    apply_reward_weight_overrides,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     DISTILLATION_ROLLOUT_STEPS,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
+    normalize_rsl_rl_runner_configuration,
     require_pinned_rsl_rl,
     validate_rollout_stage_coverage,
 )
@@ -90,7 +95,7 @@ def main() -> int:  # noqa: C901
         "--training-iteration",
         type=int,
         default=None,
-        help="Override the S0 checkpoint curriculum iteration.",
+        help="Override the S0 checkpoint domain-randomization iteration.",
     )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -165,6 +170,12 @@ def main() -> int:  # noqa: C901
         # Rollout samples bind immutable slopes. This prevents auto-resets
         # from advancing terrain difficulty during a short segment.
         env_cfg.curriculum = None
+        apply_reward_weight_overrides(
+            env_cfg,
+            reward_weight_overrides_from_configuration(
+                teacher_training_configuration
+            ),
+        )
         env_cfg.rewards.fat2_prior_exp.weight = float(
             training_parameters["fat2_weight"]
         )
@@ -172,6 +183,7 @@ def main() -> int:  # noqa: C901
         agent_cfg.seed = args.seed
         agent_cfg.device = device
         agent_cfg.actor.latent_dim = latent_dim
+        agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -236,13 +248,6 @@ def main() -> int:  # noqa: C901
             collected_samples += samples
             pending.clear()
 
-        def stage_name(value: int) -> str:
-            enum_type = type(base_env.curriculum_runtime_state.stage)
-            for item in enum_type:
-                if int(item) == int(value):
-                    return item.name
-            raise RuntimeError(f"unknown curriculum stage value {value}")
-
         def install_fixed_rollout_assignment() -> None:
             """Install the deterministic configured-slope allocation before reset."""
 
@@ -253,11 +258,6 @@ def main() -> int:  # noqa: C901
             terrain.terrain_types.copy_(terrain_types)
             terrain.env_origins.copy_(terrain.terrain_origins[levels, terrain_types])
             mdp.update_slope_frame(base_env)
-            state = base_env.curriculum_runtime_state
-            base_env.curriculum_stage_per_env.copy_(state.stage_per_environment())
-            curriculum_log = getattr(base_env, "extras", {}).get("curriculum")
-            if isinstance(curriculum_log, dict):
-                curriculum_log["distribution"] = state.distribution()
 
         def assert_fixed_rollout_assignment() -> None:
             terrain = base_env.scene.terrain
@@ -272,11 +272,6 @@ def main() -> int:  # noqa: C901
                 rtol=0.0,
             ):
                 raise RuntimeError("rollout slopes changed during collection")
-            if not torch.equal(
-                base_env.curriculum_stage_per_env,
-                base_env.curriculum_runtime_state.stage_per_environment(),
-            ):
-                raise RuntimeError("rollout per-environment curriculum stage changed")
 
         def reset_at_physx_fixed_point() -> object:
             observation, _ = env.reset()
@@ -296,13 +291,8 @@ def main() -> int:  # noqa: C901
 
         target_samples = args.num_envs * args.num_steps
         for segment_index, (expected_stage, curriculum_iteration) in enumerate(stage_specs):
-            base_env.set_curriculum_iteration(curriculum_iteration)
             base_env.set_domain_randomization_iteration(curriculum_iteration)
-            actual_global_stage = base_env.curriculum_runtime_state.stage.name
-            if actual_global_stage != expected_stage:
-                raise RuntimeError(
-                    f"requested rollout stage {expected_stage} resolved to {actual_global_stage}"
-                )
+            actual_global_stage = expected_stage
 
             install_fixed_rollout_assignment()
             observation = reset_at_physx_fixed_point()
@@ -323,12 +313,7 @@ def main() -> int:  # noqa: C901
                 dtype=torch.long,
             )
             next_episode_id += args.num_envs
-            per_env_stage: dict[str, int] = {}
-            for value, count in zip(
-                *torch.unique(base_env.curriculum_stage_per_env, return_counts=True),
-                strict=True,
-            ):
-                per_env_stage[stage_name(int(value))] = int(count)
+            per_env_stage = {"TRAINING": args.num_envs}
 
             while stage_valid_samples < target_samples:
                 if stage_collection_steps >= args.num_steps * args.max_collection_multiplier:
@@ -343,9 +328,11 @@ def main() -> int:  # noqa: C901
                 audit_values = None
                 if selected.numel() > 0:
                     audit_values = {
-                        "curriculum_stage": base_env.curriculum_stage_per_env[selected]
-                        .unsqueeze(-1)
-                        .clone(),
+                        "curriculum_stage": torch.ones(
+                            (selected.numel(), 1),
+                            device=agent_cfg.device,
+                            dtype=torch.long,
+                        ),
                         "collection_segment": torch.full(
                             (selected.numel(), 1),
                             segment_index,
@@ -390,15 +377,9 @@ def main() -> int:  # noqa: C901
                         )
                         stage_audit_chunks[name].append(cpu_value)
                         all_audit_chunks[name].append(cpu_value)
-                    selected_stages = audit_values["curriculum_stage"].reshape(-1)
-                    for value, count in zip(
-                        *torch.unique(selected_stages, return_counts=True),
-                        strict=True,
-                    ):
-                        name = stage_name(int(value))
-                        amount = int(count)
-                        sample_distribution[name] = sample_distribution.get(name, 0) + amount
-                        stage_sample_distribution[name] = stage_sample_distribution.get(name, 0) + amount
+                    amount = int(selected.numel())
+                    sample_distribution["TRAINING"] = sample_distribution.get("TRAINING", 0) + amount
+                    stage_sample_distribution["TRAINING"] = stage_sample_distribution.get("TRAINING", 0) + amount
                     per_environment_samples[selected] += 1
                     stage_valid_samples += int(selected.numel())
                 observation = next_observation.to(agent_cfg.device)
@@ -459,7 +440,7 @@ def main() -> int:  # noqa: C901
                     "actual_sample_audit": actual_sample_audit,
                 }
             )
-            # Keep every shard within one reset-separated curriculum segment.
+            # Keep every shard within one reset-separated training segment.
             flush()
         flush()
 

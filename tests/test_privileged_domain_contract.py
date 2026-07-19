@@ -11,10 +11,6 @@ import torch
 from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import events as events_module
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.actions import ACTION_DIM
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
-    CurriculumScheduleCfg,
-    CurriculumStage,
-)
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     DOMAIN_PARAMETER_NAMES,
     DomainRandomizationCfg,
@@ -61,7 +57,6 @@ def _domain_cfg(*, enabled: bool = True) -> DomainRandomizationCfg:
         ranges=ranges,
         nominal=nominal,
         calibration={},
-        curriculum=CurriculumScheduleCfg(),
         refresh_interval_iterations=200,
     )
 
@@ -194,9 +189,6 @@ def _dynamic_env() -> SimpleNamespace:
         path_tangent_w=tangent,
         path_lateral_w=lateral,
         path_normal_w=normal,
-        curriculum_stage_per_env=torch.tensor(
-            (int(CurriculumStage.STATIC_HAND_LOAD), int(CurriculumStage.TRAINING))
-        ),
         scene={
             "robot": SimpleNamespace(
                 data=SimpleNamespace(root_lin_vel_w=torch.tensor(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0))))
@@ -210,7 +202,8 @@ def _dynamic_env() -> SimpleNamespace:
         rickshaw_state=SimpleNamespace(
             pitch=torch.tensor((0.1, 0.2)),
             wheel_normal_force=torch.tensor(((20.0, 21.0), (22.0, 23.0))),
-            d6_wrench_w=wrench,
+            d6_truth_wrench_w=wrench,
+            d6_wrench_w=-wrench,
             d6_residual=torch.tensor((0.01, 0.02)),
         ),
     )
@@ -223,7 +216,7 @@ def test_dynamic_privilege_uses_sln_frame_and_force_then_torque_per_hand() -> No
         (
             (
                 2.0, 3.0, 1.0,
-                0.0, 0.0, 0.0,
+                8.0, 9.0, 7.0,
                 0.1,
                 20.0, 21.0,
                 2.0, 3.0, 1.0, 5.0, 6.0, 4.0,
@@ -241,6 +234,14 @@ def test_dynamic_privilege_uses_sln_frame_and_force_then_torque_per_hand() -> No
     )
     assert result.shape == (2, TEACHER_DYNAMIC_DIM)
     torch.testing.assert_close(result, expected)
+
+
+def test_dynamic_privilege_requires_d6_truth() -> None:
+    env = _dynamic_env()
+    del env.rickshaw_state.d6_truth_wrench_w
+
+    with pytest.raises(AttributeError, match="d6_truth_wrench_w"):
+        dynamic_privileged_observation(env)
 
 
 def test_dynamic_history_partial_reset_isolated_and_bootstraps_real_frames() -> None:
@@ -332,6 +333,10 @@ def test_epoch_sampling_is_deterministic_and_nominal_mode_ignores_seed() -> None
     torch.testing.assert_close(first_error, repeated_error, rtol=0.0, atol=0.0)
     assert any(not torch.equal(first_values[name], next_values[name]) for name in first_values)
     assert not torch.equal(first_error, next_error)
+    for name in ("control.delay", "observation.delay"):
+        torch.testing.assert_close(
+            first_values[name], torch.full_like(first_values[name], cfg.nominal[name])
+        )
 
     fixed = replace(cfg, enabled=False)
     fixed_a, fixed_error_a = _sample_epoch(fixed, 1, 0)
@@ -354,10 +359,8 @@ def test_domain_iteration_repeated_inside_epoch_is_a_strict_noop(monkeypatch) ->
         extras={},
         applied_epochs=[],
     )
-    monkeypatch.setattr(events_module, "install_balanced_slope_assignment", lambda _env: None)
-
-    def fake_apply(target, _cfg, epoch: int) -> None:
-        target.applied_epochs.append(epoch)
+    def fake_apply(target, _cfg, epoch: int, *, scale: float) -> None:
+        target.applied_epochs.append((epoch, scale))
         target.domain_randomization_epoch = epoch
         target.domain_randomization_initialized = True
         target.normalized_teacher_static_domain = torch.full(
@@ -369,12 +372,12 @@ def test_domain_iteration_repeated_inside_epoch_is_a_strict_noop(monkeypatch) ->
     epoch_zero = env.normalized_teacher_static_domain.clone()
 
     assert env.set_domain_randomization_iteration(199) is False
-    assert env.applied_epochs == [0]
+    assert env.applied_epochs == [(0, 0.0)]
     torch.testing.assert_close(env.normalized_teacher_static_domain, epoch_zero)
 
     assert env.set_domain_randomization_iteration(200) is True
-    assert env.applied_epochs == [0, 1]
+    assert env.applied_epochs == [(0, 0.0), (1, 1.0 / 30.0)]
     epoch_one = env.normalized_teacher_static_domain.clone()
     assert env.set_domain_randomization_iteration(200) is False
-    assert env.applied_epochs == [0, 1]
+    assert env.applied_epochs == [(0, 0.0), (1, 1.0 / 30.0)]
     torch.testing.assert_close(env.normalized_teacher_static_domain, epoch_one)

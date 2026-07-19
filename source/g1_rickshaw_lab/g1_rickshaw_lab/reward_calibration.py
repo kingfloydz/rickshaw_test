@@ -15,10 +15,15 @@ from typing import Any
 from .slope_contract import SLOPE_GRADIENTS
 
 
-REWARD_CALIBRATION_SCHEMA_VERSION = 4
-RAW_REWARD_SAMPLE_SCHEMA_VERSION = 4
+REWARD_CALIBRATION_SCHEMA_VERSION = 5
+RAW_REWARD_SAMPLE_SCHEMA_VERSION = 5
 RAW_REWARD_SAMPLE_KIND = "isaaclab_reward_manager_unweighted_terms"
-SPEED_TERM = "track_speed_exp"
+SPEED_REFERENCE_TERM = "track_speed_exp"
+SPEED_TERMS = (
+    "track_speed_exp",
+    "track_speed_precise_exp",
+    "speed_error_pseudo_huber",
+)
 TERMINATION_TERM = "termination"
 BALANCE_LIMIT_RATIO = 0.5
 NORMAL_SAMPLE_DEFINITION = "post-RewardManager step; terminated=false; timeout=false"
@@ -26,18 +31,20 @@ SIGNED_C1_SLOPES = SLOPE_GRADIENTS
 
 GUIDE_REWARD_TERMS = (
     "track_speed_exp",
+    "track_speed_precise_exp",
+    "speed_error_pseudo_huber",
     "lateral_error_l2",
     "heading_error_l2",
     "zmp_margin_barrier",
     "hitch_height_exp",
     "hitch_height_recovery_l2",
     "fat2_prior_exp",
-    "feet_single_stance",
+    "feet_landing",
+    "feet_air_time_excess_l2",
     "feet_slide",
     "terrain_normal_velocity_l2",
     "joint_power_l1",
     "processed_action_rate_l2",
-    "processed_action_jerk_l2",
     "hip_yaw_roll_reference_l2",
     "pelvis_height_limits_l2",
     "joint_position_limits",
@@ -45,7 +52,9 @@ GUIDE_REWARD_TERMS = (
 )
 
 GUIDE_PHYSICAL_SCALES = {
-    "speed_error_sigma_mps": 0.35,
+    "speed_error_sigma_mps": 0.5,
+    "speed_precise_error_sigma_mps": 0.25,
+    "speed_pseudo_huber_scale_mps": 0.5,
     "lateral_error_scale_m": 0.30,
     "heading_error_scale_rad": 0.30,
     "zmp_margin_m": 0.02,
@@ -53,13 +62,14 @@ GUIDE_PHYSICAL_SCALES = {
     "hitch_height_recovery_deadband_m": 0.05,
     "hitch_height_recovery_scale_m": 0.05,
     "fat2_sigma_rad": 0.12,
-    "processed_action_rate_scale_rad": 0.05,
-    "processed_action_jerk_scale_rad": 0.03,
+    "processed_action_rate_normalizer": 1.0,
     "hip_yaw_roll_reference_scale_rad": 0.20,
-    "pelvis_height_bounds_m": [0.65, 0.80],
+    "pelvis_height_bounds_m": [0.58, 0.87],
     "pelvis_height_error_scale_m": 0.05,
-    "feet_single_stance_cap_s": 0.4,
-    "feet_single_stance_normalizer_s": 1.0,
+    "feet_landing_target_air_time_s": 0.30,
+    "feet_landing_sigma_s": 0.12,
+    "feet_max_air_time_s": 0.50,
+    "feet_air_time_excess_scale_s": 0.20,
     "feet_slide_normalizer_mps": 1.0,
     "terrain_normal_velocity_scale_mps": 0.25,
     "joint_power_normalizer_w": 1.0,
@@ -67,19 +77,21 @@ GUIDE_PHYSICAL_SCALES = {
 }
 
 GUIDE_REWARD_NORMALIZATION_SCALES = {
-    "track_speed_exp": {"scale": 0.35, "unit": "m/s"},
+    "track_speed_exp": {"scale": 0.5, "unit": "m/s"},
+    "track_speed_precise_exp": {"scale": 0.25, "unit": "m/s"},
+    "speed_error_pseudo_huber": {"scale": 0.5, "unit": "m/s"},
     "lateral_error_l2": {"scale": 0.30, "unit": "m"},
     "heading_error_l2": {"scale": 0.30, "unit": "rad"},
     "zmp_margin_barrier": {"scale": 0.02, "unit": "m"},
     "hitch_height_exp": {"scale": 0.02, "unit": "m"},
     "hitch_height_recovery_l2": {"scale": 0.05, "unit": "m"},
     "fat2_prior_exp": {"scale": 0.12, "unit": "rad"},
-    "feet_single_stance": {"scale": 1.0, "unit": "s"},
+    "feet_landing": {"scale": 0.12, "unit": "s"},
+    "feet_air_time_excess_l2": {"scale": 0.20, "unit": "s"},
     "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {"scale": 0.25, "unit": "m/s"},
     "joint_power_l1": {"scale": 1.0, "unit": "W"},
-    "processed_action_rate_l2": {"scale": 0.05, "unit": "rad"},
-    "processed_action_jerk_l2": {"scale": 0.03, "unit": "rad"},
+    "processed_action_rate_l2": {"scale": 1.0, "unit": "normalized_action"},
     "hip_yaw_roll_reference_l2": {"scale": 0.20, "unit": "rad"},
     "pelvis_height_limits_l2": {"scale": 0.05, "unit": "m"},
     "joint_position_limits": {"scale": 1.0, "unit": "rad"},
@@ -286,13 +298,15 @@ def _calibrate_reward_terms_unstratified(
     if not 0.0 < ratio < 1.0:
         raise RewardCalibrationError("limit_ratio must lie in (0, 1)")
     weights, sample_count = _validate_term_contract(raw_terms, term_weights)
-    if weights[SPEED_TERM] <= 0.0:
+    if weights[SPEED_REFERENCE_TERM] <= 0.0:
         raise RewardCalibrationError("track_speed_exp must retain a positive reference weight")
     summaries = {
         name: summarize_unweighted_samples(raw_terms[name], term_name=name)
         for name in GUIDE_REWARD_TERMS
     }
-    speed_weighted_p90 = weights[SPEED_TERM] * float(summaries[SPEED_TERM]["p90"])
+    speed_weighted_p90 = weights[SPEED_REFERENCE_TERM] * float(
+        summaries[SPEED_REFERENCE_TERM]["p90"]
+    )
     if speed_weighted_p90 <= 0.0:
         raise RewardCalibrationError("track_speed_exp p90 must provide a positive calibration reference")
     speed_reference = abs(speed_weighted_p90)
@@ -304,8 +318,8 @@ def _calibrate_reward_terms_unstratified(
         raw_p90 = float(summaries[name]["p90"])
         weighted_p90 = weight * raw_p90
         exempt_reason: str | None = None
-        if name == SPEED_TERM:
-            exempt_reason = "speed_reference_term"
+        if name in SPEED_TERMS:
+            exempt_reason = "speed_term"
         elif name == TERMINATION_TERM:
             exempt_reason = "guide_termination_exception"
         passed = True if exempt_reason is not None else abs(weighted_p90) <= cap + 1.0e-12
@@ -331,7 +345,7 @@ def _calibrate_reward_terms_unstratified(
         "status": "passed" if not failures else "failed",
         "normal_sample_count": sample_count,
         "balance_rule": {
-            "reference_term": SPEED_TERM,
+            "reference_term": SPEED_REFERENCE_TERM,
             "reference_weighted_p90": speed_weighted_p90,
             "reference_abs_p90": speed_reference,
             "limit_ratio": ratio,

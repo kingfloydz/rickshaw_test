@@ -35,6 +35,10 @@ from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     slope_label,
     validate_s1_baseline_diagnostic_report,
 )
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    apply_reward_weight_overrides,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
     SLOPE_TERRAIN_LEVELS,
@@ -45,6 +49,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_STAGE_KEY,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
+    normalize_rsl_rl_runner_configuration,
     require_pinned_rsl_rl,
 )
 from g1_rickshaw_lab.validation import (  # noqa: E402
@@ -59,7 +64,7 @@ SUPPORTED_STAGES = {
     "s1_context_distillation",
     "s2_student_ppo",
 }
-CURRICULUM_NAMES = ("training",)
+EVALUATION_STAGE = "training"
 
 
 class PolicyHandle:
@@ -101,7 +106,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS)
     parser.add_argument("--episodes-per-slope", type=int, default=100)
     parser.add_argument("--seeds", type=int, nargs="+", default=(42, 43, 44, 45, 46))
-    parser.add_argument("--curriculum-stages", nargs="+", choices=CURRICULUM_NAMES, default=("training",))
     parser.add_argument("--max-policy-steps-per-seed", type=int, default=6000)
     AppLauncher.add_app_launcher_args(parser)
     return parser
@@ -124,29 +128,23 @@ def _validate_args(args: argparse.Namespace, stage: str) -> None:
         )
     if len(set(args.seeds)) != len(args.seeds):
         raise ValueError("fixed seeds must be unique")
-    if len(set(args.curriculum_stages)) != len(args.curriculum_stages):
-        raise ValueError("curriculum stages must be unique")
     if args.s1_baseline_report is not None and stage != "s2_student_ppo":
         raise ValueError("--s1-baseline-report applies only to S2 diagnostics")
-    if (
-        stage == "s2_student_ppo"
-        and args.s1_baseline_report is not None
-        and list(args.curriculum_stages) != ["training"]
-    ):
-        raise ValueError("S2 return comparison requires TRAINING evaluation")
-def _configure_fixed_stage(env_cfg: Any, stage_name: str, fat2_weight: float | None) -> None:
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
-    if stage_name != "training":
-        raise ValueError(f"unknown evaluation stage {stage_name!r}")
+
+def _configure_evaluation(
+    env_cfg: Any,
+    fat2_weight: float | None,
+    reward_weight_overrides: Mapping[str, float],
+) -> None:
     env_cfg.curriculum = None
     env_cfg.scene.terrain.terrain_generator.curriculum = True
     env_cfg.domain_randomization = replace(
         env_cfg.domain_randomization,
         enabled=False,
-        curriculum=mdp.CurriculumScheduleCfg(static_hand_load_iterations=0),
     )
     env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
+    apply_reward_weight_overrides(env_cfg, reward_weight_overrides)
     if fat2_weight is not None:
         env_cfg.rewards.fat2_prior_exp.weight = float(fat2_weight)
 
@@ -177,19 +175,6 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
             "fixed evaluation terrain does not resolve to every configured slope"
         )
 
-    cfg = base_env.cfg.domain_randomization.curriculum
-    base_env.curriculum_runtime_state = mdp.CurriculumRuntimeState.create(
-        columns, torch.sign(expected).to(dtype=torch.long), cfg
-    )
-    base_env.curriculum_runtime_state.set_iteration(
-        cfg.static_hand_load_iterations
-    )
-    base_env.curriculum_runtime_state.activate(
-        torch.arange(base_env.num_envs, device=base_env.device, dtype=torch.long)
-    )
-    base_env.curriculum_stage_per_env = (
-        base_env.curriculum_runtime_state.stage_per_environment()
-    )
     return slots
 
 
@@ -292,7 +277,7 @@ def _load_rsl_runner_cfg(
     agent_cfg = load_cfg_from_registry(task, registry_key)
     agent_cfg.device = device
     agent_cfg.actor.latent_dim = latent_dim
-    return agent_cfg
+    return normalize_rsl_rl_runner_configuration(agent_cfg)
 
 
 def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  # noqa: C901
@@ -394,16 +379,13 @@ def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  #
 
 
 def _labels(base_env: Any, env_ids: Any) -> tuple[list[str], list[str], list[str]]:
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
-
-    stages = base_env.curriculum_stage_per_env[env_ids].detach().cpu().tolist()
-    stage_names = {int(item): item.name for item in mdp.CurriculumStage}
+    stages = ["TRAINING"] * int(env_ids.numel())
     phases = command_phase_labels(
         base_env.command_state.v_ref[env_ids].detach().cpu().numpy(),
         base_env.command_state.a_ref[env_ids].detach().cpu().numpy(),
     )
     return (
-        [stage_names[int(value)] for value in stages],
+        stages,
         ["RANDOM"] * len(stages),
         phases,
     )
@@ -660,6 +642,9 @@ def main() -> int:  # noqa: C901
     fat2_weight = float(training_parameters["fat2_weight"])
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
+    reward_weight_overrides = reward_weight_overrides_from_configuration(
+        training_configuration
+    )
     _validate_args(args, stage)
     is_student = stage != "s0_teacher"
 
@@ -681,6 +666,8 @@ def main() -> int:  # noqa: C901
             baseline_parameters.get("latent_dim") != latent_dim
             or baseline_parameters.get("rollout_steps") != rollout_steps
             or baseline_parameters.get("fat2_weight") != fat2_weight
+            or baseline_parameters.get("reward_weight_overrides", {})
+            != reward_weight_overrides
         ):
             raise ValueError("S1 baseline uses different training parameters")
         s1_baseline_binding = {
@@ -698,6 +685,10 @@ def main() -> int:  # noqa: C901
         if (
             teacher_checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
             != training_parameters
+            or reward_weight_overrides_from_configuration(
+                teacher_checkpoint[TRAINING_CONFIGURATION_KEY]
+            )
+            != reward_weight_overrides
         ):
             raise ValueError("teacher checkpoint uses different training parameters")
 
@@ -715,59 +706,56 @@ def main() -> int:  # noqa: C901
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
 
         device = args.device
-        for curriculum_name in args.curriculum_stages:
-            raw_env = None
-            env = None
-            try:
-                env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
-                env_cfg.seed = args.seeds[0]
-                _configure_fixed_stage(env_cfg, curriculum_name, fat2_weight)
-                if is_student and teacher_path is None:
-                    env_cfg.observations.teacher_dynamic_history = None
-                    env_cfg.observations.teacher_static = None
-                agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-                agent_cfg = _load_rsl_runner_cfg(
-                    args.task, agent_key, device, latent_dim
-                )
-                raw_env = gym.make(args.task, cfg=env_cfg)
-                env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
-                base_env = raw_env.unwrapped
-                slope_slots = _assign_fixed_slopes(base_env)
+        raw_env = None
+        env = None
+        try:
+            env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
+            env_cfg.seed = args.seeds[0]
+            _configure_evaluation(env_cfg, fat2_weight, reward_weight_overrides)
+            if is_student and teacher_path is None:
+                env_cfg.observations.teacher_dynamic_history = None
+                env_cfg.observations.teacher_static = None
+            agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
+            agent_cfg = _load_rsl_runner_cfg(args.task, agent_key, device, latent_dim)
+            raw_env = gym.make(args.task, cfg=env_cfg)
+            env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
+            base_env = raw_env.unwrapped
+            slope_slots = _assign_fixed_slopes(base_env)
 
-                policy, keepalive = _load_policy(
-                    env, checkpoint_path, checkpoint, stage, device, args.task
+            policy, keepalive = _load_policy(
+                env, checkpoint_path, checkpoint, stage, device, args.task
+            )
+            teacher: PolicyHandle | None = None
+            if is_student and teacher_path is not None:
+                teacher, teacher_keepalive = _load_teacher_policy(
+                    env, teacher_path, device, args.task
                 )
-                teacher: PolicyHandle | None = None
-                if is_student and teacher_path is not None:
-                    teacher, teacher_keepalive = _load_teacher_policy(
-                        env, teacher_path, device, args.task
-                    )
-                    keepalive.extend(teacher_keepalive)
-                del keepalive  # Actors/runners remain reachable through PolicyHandle objects.
+                keepalive.extend(teacher_keepalive)
+            del keepalive  # Actors/runners remain reachable through PolicyHandle objects.
 
-                baseline_accumulator, baseline_return = _run_mode(
-                    env,
-                    base_env,
-                    slope_slots,
-                    policy,
-                    teacher,
-                    seeds=list(args.seeds),
-                    episodes_per_slope=args.episodes_per_slope,
-                    max_steps_per_seed=args.max_policy_steps_per_seed,
-                )
-                metrics, per_slope = baseline_accumulator.summary()
-                stratified = baseline_accumulator.stratified_summary()
-                stage_reports[curriculum_name] = {
-                    "metrics": metrics,
-                    "per_slope": per_slope,
-                    "stratified": stratified,
-                    "return": baseline_return,
-                }
-            finally:
-                if env is not None:
-                    env.close()
-                elif raw_env is not None:
-                    raw_env.close()
+            baseline_accumulator, baseline_return = _run_mode(
+                env,
+                base_env,
+                slope_slots,
+                policy,
+                teacher,
+                seeds=list(args.seeds),
+                episodes_per_slope=args.episodes_per_slope,
+                max_steps_per_seed=args.max_policy_steps_per_seed,
+            )
+            metrics, per_slope = baseline_accumulator.summary()
+            stratified = baseline_accumulator.stratified_summary()
+            stage_reports[EVALUATION_STAGE] = {
+                "metrics": metrics,
+                "per_slope": per_slope,
+                "stratified": stratified,
+                "return": baseline_return,
+            }
+        finally:
+            if env is not None:
+                env.close()
+            elif raw_env is not None:
+                raw_env.close()
     except BaseException:
         # Process teardown releases Kit resources. Closing SimulationApp here
         # can terminate the interpreter and hide the original exception.
@@ -775,9 +763,9 @@ def main() -> int:  # noqa: C901
 
     if is_student and teacher_checkpoint is None:
         omitted_diagnostics.append("teacher_student_action_kl")
-    for name, stage_report in stage_reports.items():
-        if stage_report["metrics"]["episodes"]["completed"] != len(SIGNED_SLOPES) * args.episodes_per_slope:
-            raise RuntimeError(f"{name} episode quota is incomplete")
+    stage_report = stage_reports[EVALUATION_STAGE]
+    if stage_report["metrics"]["episodes"]["completed"] != len(SIGNED_SLOPES) * args.episodes_per_slope:
+        raise RuntimeError("training evaluation episode quota is incomplete")
 
     if stage == "s2_student_ppo":
         if s1_baseline_returns is None:
@@ -806,12 +794,13 @@ def main() -> int:  # noqa: C901
             "signed_slopes": list(SIGNED_SLOPES),
             "episodes_per_slope_per_stage": args.episodes_per_slope,
             "num_envs": args.num_envs,
-            "curriculum_stages": list(args.curriculum_stages),
+            "curriculum_stages": [EVALUATION_STAGE],
             "command_protocol": FORMAL_EVALUATION_COMMAND_PROTOCOL,
             "cross_case_protocol": FORMAL_EVALUATION_CROSS_CASE_PROTOCOL,
             "fat2_weight": fat2_weight,
             "rollout_steps": rollout_steps,
             "latent_dim": latent_dim,
+            "reward_weight_overrides": reward_weight_overrides,
         },
         "metric_definitions": METRIC_DEFINITIONS,
         "stages": stage_reports,

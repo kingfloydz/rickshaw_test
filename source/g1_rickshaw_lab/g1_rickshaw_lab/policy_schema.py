@@ -8,7 +8,18 @@ from typing import Final
 ACTOR_OBSERVATION_DIM: Final[int] = 96
 HISTORY_LENGTH: Final[int] = 61
 DEFAULT_CONTEXT_DIM: Final[int] = 16
-SUPPORTED_CONTEXT_DIMS: Final[tuple[int, ...]] = (8, 16, 24, 32)
+SUPPORTED_CONTEXT_DIMS: Final[tuple[int, ...]] = (
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    24,
+    32,
+)
 TEACHER_DYNAMIC_DIM: Final[int] = 21
 TEACHER_STATIC_DIM: Final[int] = 40
 CRITIC_PRIVILEGED_DIM: Final[int] = 64

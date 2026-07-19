@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import torch
 
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import SpeedReferenceCfg
-from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import CurriculumStage
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     CommandState,
     SpeedCommandSamplingCfg,
@@ -81,13 +80,10 @@ def _fake_env() -> SimpleNamespace:
         path_tangent_w=torch.tensor([[1.0, 0.0, 0.0]] * num_envs),
         path_lateral_w=torch.tensor([[0.0, 1.0, 0.0]] * num_envs),
         path_normal_w=torch.tensor([[0.0, 0.0, 1.0]] * num_envs),
-        curriculum_stage_per_env=torch.full(
-            (num_envs,), int(CurriculumStage.TRAINING), dtype=torch.long
-        ),
         rickshaw_state=SimpleNamespace(
             pitch=torch.tensor([0.1, 0.2]),
             wheel_normal_force=torch.tensor([[10.0, 11.0], [12.0, 13.0]]),
-            d6_wrench_w=torch.zeros((num_envs, 2, 6)),
+            d6_truth_wrench_w=torch.zeros((num_envs, 2, 6)),
         ),
         policy_joint_ids=torch.arange(joint_count),
         command_state=CommandState(
@@ -110,7 +106,8 @@ def _fake_env() -> SimpleNamespace:
         teacher_dynamic_history_state=dynamic_history,
         observation_delay_state=ObservationDelayState.zeros(num_envs, 2),
         observation_delay_steps=torch.tensor([2, 2], dtype=torch.long),
-        _actor_observation_cache=torch.zeros((num_envs, ACTOR_OBSERVATION_DIM)),
+        all_env_ids=torch.arange(num_envs),
+        all_env_mask=torch.ones(num_envs, dtype=torch.bool),
     )
 
 
@@ -177,8 +174,4 @@ def test_explicit_reset_bootstrap_matches_automatic_reset_frame() -> None:
     torch.testing.assert_close(
         explicit_env.teacher_dynamic_history_state.history[reset_ids],
         dynamic_reset_frame[:, None, :].expand(-1, HISTORY_LENGTH, -1),
-    )
-    torch.testing.assert_close(
-        explicit_env._actor_observation_cache,
-        explicit_env.observation_history_state.current,
     )

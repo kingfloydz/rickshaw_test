@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -26,6 +26,10 @@ from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
     SLOPE_COUNT,
 )
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    parse_reward_weight_arguments,
+    reward_weight_overrides_from_configuration,
+)
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_LINEAGE_KEY,
     DISTILLATION_ROLLOUT_STEPS,
@@ -34,6 +38,8 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     GUIDE_TRAINING_TASK,
     ROLLOUT_DEFAULT_NUM_ENVS,
     ROLLOUT_MANIFEST_SCHEMA_VERSION,
+    S1_DETERMINISTIC_ALGORITHMS,
+    SUPPORTED_FAT2_WEIGHTS,
     TRAINING_CONFIGURATION_KEY,
     guide_max_iterations,
     load_stage_checkpoint,
@@ -44,6 +50,7 @@ from g1_rickshaw_lab.validation import write_json_atomic  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = REPOSITORY_ROOT / "outputs" / "ablation_pipeline"
 EVALUATION_SEEDS = (42, 43, 44, 45, 46)
+LOGICAL_CUDA_DEVICE = "cuda:0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +79,11 @@ UNIQUE_RUNS = (
     RunSpec("latent_dim_24", 0.1, 48, 24),
     RunSpec("latent_dim_32", 0.1, 48, 32),
 )
-RUNS_BY_NAME = {spec.name: spec for spec in UNIQUE_RUNS}
+LATENT_DIM_RUNS = tuple(
+    RunSpec(f"latent_dim_{latent_dim}", 0.1, 48, latent_dim)
+    for latent_dim in (6, 10, 12, 14, 16, 18, 20)
+)
+RUNS_BY_NAME = {spec.name: spec for spec in (*UNIQUE_RUNS, *LATENT_DIM_RUNS)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +152,7 @@ def _parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=tuple(RUNS_BY_NAME),
         default=None,
-        help="Unique training configurations; defaults to all eight.",
+        help="Training configurations; defaults to the original eight-run matrix.",
     )
     parser.add_argument("--gpus", nargs="+", type=int, required=True)
     parser.add_argument("--resume", action="store_true")
@@ -154,6 +165,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-envs", type=int, default=GUIDE_TRAINING_NUM_ENVS)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--fat2-weight",
+        type=float,
+        choices=SUPPORTED_FAT2_WEIGHTS,
+        default=None,
+        help="Override FAT2 weight for every selected run.",
+    )
+    parser.add_argument(
+        "--reward-weight",
+        action="append",
+        default=[],
+        metavar="TERM=WEIGHT",
+        help="Frozen non-FAT2 reward weight; repeat once per term.",
+    )
+    parser.add_argument(
         "--evaluation-num-envs", type=int, default=FORMAL_EVALUATION_NUM_ENVS
     )
     parser.add_argument("--episodes-per-slope", type=int, default=100)
@@ -164,7 +189,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> list[RunSpec]:
-    run_names = list(RUNS_BY_NAME) if args.runs is None else list(args.runs)
+    args.reward_weight_overrides = parse_reward_weight_arguments(
+        args.reward_weight
+    )
+    run_names = (
+        [spec.name for spec in UNIQUE_RUNS]
+        if args.runs is None
+        else list(args.runs)
+    )
     if len(run_names) != len(set(run_names)):
         raise ValueError("--runs must not contain duplicates")
     if not args.gpus or len(args.gpus) != len(set(args.gpus)) or min(args.gpus) < 0:
@@ -186,7 +218,10 @@ def _validate_args(args: argparse.Namespace) -> list[RunSpec]:
         raise ValueError(
             f"--episodes-per-slope must be positive and divisible by {quota}"
         )
-    return [RUNS_BY_NAME[name] for name in run_names]
+    specs = [RUNS_BY_NAME[name] for name in run_names]
+    if args.fat2_weight is not None:
+        specs = [replace(spec, fat2_weight=args.fat2_weight) for spec in specs]
+    return specs
 
 
 def _plan(args: argparse.Namespace, specs: Sequence[RunSpec]) -> dict[str, Any]:
@@ -197,6 +232,7 @@ def _plan(args: argparse.Namespace, specs: Sequence[RunSpec]) -> dict[str, Any]:
         "tensorboard_logdir": os.fspath((args.output_dir / "runs").resolve()),
         "resume": bool(args.resume),
         "num_envs": args.num_envs,
+        "reward_weight_overrides": args.reward_weight_overrides,
         "evaluation": {
             "num_envs": args.evaluation_num_envs,
             "episodes_per_slope": args.episodes_per_slope,
@@ -314,6 +350,49 @@ def _run_command(
         )
 
 
+def _run_optional_diagnostic(
+    command: Sequence[str],
+    *,
+    environment: Mapping[str, str],
+    log_path: Path,
+    label: str,
+    stage: str,
+    is_current: Callable[[], bool],
+    registry: ProcessRegistry,
+    stop_event: threading.Event,
+) -> bool:
+    """Record a diagnostic when possible without gating later training stages."""
+
+    if is_current():
+        return True
+    try:
+        _run_command(
+            command,
+            environment=environment,
+            log_path=log_path,
+            label=label,
+            registry=registry,
+            stop_event=stop_event,
+        )
+    except PipelineCancelled:
+        raise
+    except RuntimeError as exc:
+        print(
+            f"[WARNING] {label} {stage} diagnostic failed; "
+            f"continuing with the next training stage: {exc}",
+            flush=True,
+        )
+        return False
+    if is_current():
+        return True
+    print(
+        f"[WARNING] {label} {stage} diagnostic produced no current report; "
+        "continuing with the next training stage",
+        flush=True,
+    )
+    return False
+
+
 def _same_path(value: Any, expected: Path) -> bool:
     return isinstance(value, str) and Path(value).resolve() == expected.resolve()
 
@@ -340,6 +419,7 @@ def _ppo_checkpoint(
     task: str,
     seed: int,
     num_envs: int,
+    reward_weight_overrides: Mapping[str, float] | None = None,
     teacher: Path | None = None,
     context: Path | None = None,
 ) -> CheckpointRecord | None:
@@ -357,6 +437,12 @@ def _ppo_checkpoint(
                 continue
             if not _training_invocation_matches(
                 configuration, task=task, seed=seed, num_envs=num_envs
+            ):
+                continue
+            if (
+                reward_weight_overrides is not None
+                and reward_weight_overrides_from_configuration(configuration)
+                != reward_weight_overrides
             ):
                 continue
             if configuration["max_iterations"] != target:
@@ -390,6 +476,7 @@ def _valid_s1_checkpoint(
     *,
     task: str,
     seed: int,
+    reward_weight_overrides: Mapping[str, float] | None = None,
 ) -> bool:
     if not path.is_file():
         return False
@@ -408,10 +495,17 @@ def _valid_s1_checkpoint(
             and _training_invocation_matches(
                 configuration, task=task, seed=seed, num_envs=None
             )
+            and (
+                reward_weight_overrides is None
+                or reward_weight_overrides_from_configuration(configuration)
+                == reward_weight_overrides
+            )
             and configuration["max_iterations"]
             == GUIDE_MAX_ITERATIONS["s1_context_distillation"]
             and checkpoint["training"]["completed_iterations"]
             == GUIDE_MAX_ITERATIONS["s1_context_distillation"]
+            and configuration["resolved_parameters"]["deterministic_algorithms"]
+            is S1_DETERMINISTIC_ALGORITHMS
             and _same_path(lineage.get("teacher_checkpoint"), teacher)
         )
     except (OSError, RuntimeError, TypeError, ValueError, KeyError):
@@ -426,6 +520,7 @@ def _valid_diagnostic(
     evaluation_num_envs: int,
     episodes_per_slope: int,
     evaluation_seeds: Sequence[int],
+    reward_weight_overrides: Mapping[str, float] | None = None,
     teacher: Path | None = None,
     s1_baseline: Path | None = None,
 ) -> bool:
@@ -455,6 +550,11 @@ def _valid_diagnostic(
             != episodes_per_slope
             or evaluation.get("fixed_seeds") != list(evaluation_seeds)
             or evaluation.get("curriculum_stages") != ["training"]
+            or (
+                reward_weight_overrides is not None
+                and evaluation.get("reward_weight_overrides", {})
+                != reward_weight_overrides
+            )
         ):
             return False
         if teacher is not None:
@@ -490,6 +590,7 @@ def _rollout_manifest_matches(
     task: str,
     seed: int,
     num_envs: int,
+    reward_weight_overrides: Mapping[str, float] | None = None,
 ) -> bool:
     manifest_path = rollout_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -527,6 +628,11 @@ def _rollout_manifest_matches(
             and _training_invocation_matches(
                 configuration, task=task, seed=seed, num_envs=num_envs
             )
+            and (
+                reward_weight_overrides is None
+                or reward_weight_overrides_from_configuration(configuration)
+                == reward_weight_overrides
+            )
             and manifest.get("num_envs") == ROLLOUT_DEFAULT_NUM_ENVS
             and manifest.get("num_steps_per_stage") == DISTILLATION_ROLLOUT_STEPS
         )
@@ -555,13 +661,17 @@ def _teacher_command(
         str(spec.latent_dim),
         "--seed",
         str(args.seed),
+    ]
+    for name, weight in getattr(args, "reward_weight_overrides", {}).items():
+        command.extend(("--reward-weight", f"{name}={weight!r}"))
+    command.extend([
         "--run_name",
         f"{spec.name}-s0",
         "--device",
-        "cuda:0",
+        LOGICAL_CUDA_DEVICE,
         "--headless",
         f"hydra.run.dir={run_dir / 'hydra' / 's0'}",
-    ]
+    ])
     if resume is None:
         command.extend(("--experiment-dir", os.fspath(run_dir / "s0")))
     else:
@@ -593,7 +703,7 @@ def _evaluation_command(
         "--seeds",
         *(str(seed) for seed in args.evaluation_seeds),
         "--device",
-        "cuda:0",
+        LOGICAL_CUDA_DEVICE,
         "--headless",
     ]
     if teacher is not None:
@@ -621,13 +731,19 @@ def _run_one_pipeline(
         "task": args.task,
         "seed": args.seed,
         "num_envs": args.num_envs,
+        "reward_weight_overrides": args.reward_weight_overrides,
     }
-    s1_identity = {"task": args.task, "seed": args.seed}
+    s1_identity = {
+        "task": args.task,
+        "seed": args.seed,
+        "reward_weight_overrides": args.reward_weight_overrides,
+    }
     diagnostic_identity = {
         "task": args.task,
         "evaluation_num_envs": args.evaluation_num_envs,
         "episodes_per_slope": args.episodes_per_slope,
         "evaluation_seeds": args.evaluation_seeds,
+        "reward_weight_overrides": args.reward_weight_overrides,
     }
 
     teacher_record = _ppo_checkpoint(
@@ -651,17 +767,18 @@ def _run_one_pipeline(
     teacher = teacher_record.path
 
     s0_report = diagnostics / "s0.json"
-    if not _valid_diagnostic(s0_report, teacher, **diagnostic_identity):
-        _run_command(
-            _evaluation_command(args, teacher, s0_report),
-            environment=environment,
-            log_path=logs / "02_s0_diagnostic.log",
-            label=label,
-            registry=registry,
-            stop_event=stop_event,
-        )
-    if not _valid_diagnostic(s0_report, teacher, **diagnostic_identity):
-        raise RuntimeError(f"{label} produced no current S0 diagnostic")
+    s0_diagnostic_recorded = _run_optional_diagnostic(
+        _evaluation_command(args, teacher, s0_report),
+        environment=environment,
+        log_path=logs / "02_s0_diagnostic.log",
+        label=label,
+        stage="S0",
+        is_current=lambda: _valid_diagnostic(
+            s0_report, teacher, **diagnostic_identity
+        ),
+        registry=registry,
+        stop_event=stop_event,
+    )
 
     context = run_dir / "s1_context.pt"
     if not _valid_s1_checkpoint(context, spec, teacher, **s1_identity):
@@ -683,7 +800,7 @@ def _run_one_pipeline(
                 "--seed",
                 str(args.seed),
                 "--device",
-                "cuda:0",
+                LOGICAL_CUDA_DEVICE,
                 "--headless",
             ]
             if rollout_dir.exists() and any(rollout_dir.iterdir()):
@@ -713,7 +830,7 @@ def _run_one_pipeline(
                 "--output",
                 os.fspath(context),
                 "--device",
-                "cuda:0",
+                LOGICAL_CUDA_DEVICE,
                 "--training-seed",
                 str(args.seed),
             ],
@@ -727,27 +844,21 @@ def _run_one_pipeline(
         raise RuntimeError(f"{label} produced no complete S1 checkpoint")
 
     s1_report = diagnostics / "s1.json"
-    if not _valid_diagnostic(
-        s1_report,
-        context,
-        teacher=teacher,
-        **diagnostic_identity,
-    ):
-        _run_command(
-            _evaluation_command(args, context, s1_report, teacher=teacher),
-            environment=environment,
-            log_path=logs / "05_s1_diagnostic.log",
-            label=label,
-            registry=registry,
-            stop_event=stop_event,
-        )
-    if not _valid_diagnostic(
-        s1_report,
-        context,
-        teacher=teacher,
-        **diagnostic_identity,
-    ):
-        raise RuntimeError(f"{label} produced no current S1 diagnostic")
+    s1_diagnostic_recorded = _run_optional_diagnostic(
+        _evaluation_command(args, context, s1_report, teacher=teacher),
+        environment=environment,
+        log_path=logs / "05_s1_diagnostic.log",
+        label=label,
+        stage="S1",
+        is_current=lambda: _valid_diagnostic(
+            s1_report,
+            context,
+            teacher=teacher,
+            **diagnostic_identity,
+        ),
+        registry=registry,
+        stop_event=stop_event,
+    )
 
     s2_record = _ppo_checkpoint(
         run_dir / "s2",
@@ -776,7 +887,7 @@ def _run_one_pipeline(
             "--run_name",
             f"{spec.name}-s2",
             "--device",
-            "cuda:0",
+            LOGICAL_CUDA_DEVICE,
             "--headless",
             f"hydra.run.dir={run_dir / 'hydra' / 's2'}",
         ]
@@ -802,40 +913,40 @@ def _run_one_pipeline(
         raise RuntimeError(f"{label} produced no complete S2 checkpoint")
 
     s2_report = diagnostics / "s2.json"
-    if not _valid_diagnostic(
-        s2_report,
-        s2_record.path,
-        teacher=teacher,
-        s1_baseline=s1_report,
-        **diagnostic_identity,
-    ):
-        _run_command(
-            _evaluation_command(
-                args,
-                s2_record.path,
-                s2_report,
-                teacher=teacher,
-                s1_baseline=s1_report,
-            ),
-            environment=environment,
-            log_path=logs / "07_s2_diagnostic.log",
-            label=label,
-            registry=registry,
-            stop_event=stop_event,
-        )
-    if not _valid_diagnostic(
-        s2_report,
-        s2_record.path,
-        teacher=teacher,
-        s1_baseline=s1_report,
-        **diagnostic_identity,
-    ):
-        raise RuntimeError(f"{label} produced no current S2 diagnostic")
+    s1_baseline = s1_report if s1_diagnostic_recorded else None
+    s2_diagnostic_recorded = _run_optional_diagnostic(
+        _evaluation_command(
+            args,
+            s2_record.path,
+            s2_report,
+            teacher=teacher,
+            s1_baseline=s1_baseline,
+        ),
+        environment=environment,
+        log_path=logs / "07_s2_diagnostic.log",
+        label=label,
+        stage="S2",
+        is_current=lambda: _valid_diagnostic(
+            s2_report,
+            s2_record.path,
+            teacher=teacher,
+            s1_baseline=s1_baseline,
+            **diagnostic_identity,
+        ),
+        registry=registry,
+        stop_event=stop_event,
+    )
 
     result = {
         "run": spec.name,
         "gpu": gpu.index,
         "training_parameters": spec.training_parameters,
+        "reward_weight_overrides": args.reward_weight_overrides,
+        "diagnostics": {
+            "s0_recorded": s0_diagnostic_recorded,
+            "s1_recorded": s1_diagnostic_recorded,
+            "s2_recorded": s2_diagnostic_recorded,
+        },
         "artifacts": {
             "s0_checkpoint": os.fspath(teacher),
             "s0_diagnostic": os.fspath(s0_report.resolve()),
@@ -902,11 +1013,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return
             except Exception as exc:  # noqa: BLE001
                 with result_lock:
-                    if not stop_event.is_set():
-                        failures.append((spec.name, str(exc)))
-                stop_event.set()
-                registry.terminate_all()
-                return
+                    failures.append((spec.name, str(exc)))
+                continue
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
