@@ -10,6 +10,8 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "source" / "g1_rickshaw_lab"
 DEFAULT_ISAACLAB_ROOT = REPOSITORY_ROOT.parent / "IsaacLab"
+FOLLOW_CAMERA_EYE = (0.0, 4.2, 1.4)
+FOLLOW_CAMERA_LOOKAT = (0.0, 0.0, 0.85)
 
 
 def add_project_source_to_path() -> None:
@@ -101,8 +103,8 @@ def run_isaaclab_rsl_rl(script_name: str, argv: list[str]) -> None:
             camera_marker
             + "\n    env_cfg.viewer.origin_type = 'asset_root'"
             + "\n    env_cfg.viewer.asset_name = 'robot'"
-            + "\n    env_cfg.viewer.eye = (3.5, 5.0, 2.5)"
-            + "\n    env_cfg.viewer.lookat = (-0.8, 0.0, 0.8)"
+            + f"\n    env_cfg.viewer.eye = {FOLLOW_CAMERA_EYE!r}"
+            + f"\n    env_cfg.viewer.lookat = {FOLLOW_CAMERA_LOOKAT!r}"
         )
         source = source.replace(camera_marker, camera_setup, 1)
     if script_name == "play.py" and (
@@ -119,8 +121,17 @@ def run_isaaclab_rsl_rl(script_name: str, argv: list[str]) -> None:
             raise RuntimeError(f"Isaac Lab play script has no video-timestep marker: {script}")
         switch_camera = (
             timestep_marker
-            + f"\n            slope_index = min((timestep + 1) // {slope_frames}, env.unwrapped.num_envs - 1)"
-            + "\n            env.unwrapped.viewport_camera_controller.set_view_env_index(slope_index)"
+            + f"\n            camera_env_index = min((timestep + 1) // {slope_frames}, env.unwrapped.num_envs - 1)"
+            + "\n            env.unwrapped.viewport_camera_controller.set_view_env_index(camera_env_index)"
+            + "\n            robot_position = env.unwrapped.scene['robot'].data.root_pos_w[camera_env_index]"
+            + "\n            rickshaw_position = env.unwrapped.scene['rickshaw'].data.root_pos_w[camera_env_index]"
+            + "\n            camera_target = 0.5 * (robot_position + rickshaw_position)"
+            + "\n            camera_target[2] = torch.maximum(camera_target[2], camera_target.new_tensor(0.85))"
+            + f"\n            camera_position = camera_target + camera_target.new_tensor({FOLLOW_CAMERA_EYE!r})"
+            + "\n            env.unwrapped.sim.set_camera_view("
+            + "\n                tuple(float(value) for value in camera_position.detach().cpu()),"
+            + "\n                tuple(float(value) for value in camera_target.detach().cpu()),"
+            + "\n            )"
         )
         source = source.replace(timestep_marker, switch_camera, 1)
     previous = sys.argv

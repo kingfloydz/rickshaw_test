@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
-
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+from _isaaclab_wrappers import FOLLOW_CAMERA_EYE, FOLLOW_CAMERA_LOOKAT  # noqa: E402
 from render_teacher_all_slopes import (  # noqa: E402
     DEFAULT_FRAMES_PER_SLOPE,
+    RENDER_ORDERED_SLOPES_ENV,
     slope_index_for_frame,
 )
 
@@ -32,3 +33,12 @@ def test_slope_frame_mapping_rejects_invalid_values(
 ) -> None:
     with pytest.raises(ValueError):
         slope_index_for_frame(frame, frames_per_slope)
+
+
+def test_renderer_requests_canonical_slope_order() -> None:
+    assert RENDER_ORDERED_SLOPES_ENV == "G1_RICKSHAW_RENDER_ORDERED_SLOPES"
+
+
+def test_follow_camera_matches_the_reset_renderer_side_view() -> None:
+    assert FOLLOW_CAMERA_EYE == (0.0, 4.2, 1.4)
+    assert FOLLOW_CAMERA_LOOKAT == (0.0, 0.0, 0.85)

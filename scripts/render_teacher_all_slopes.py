@@ -31,6 +31,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
 
 DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 DEFAULT_FRAMES_PER_SLOPE = 1000
+RENDER_ORDERED_SLOPES_ENV = "G1_RICKSHAW_RENDER_ORDERED_SLOPES"
 
 
 def slope_index_for_frame(frame_index: int, frames_per_slope: int) -> int:
@@ -238,6 +239,7 @@ def main() -> int:
             "G1_RICKSHAW_SKIP_PLAY_EXPORT": "1",
             "G1_RICKSHAW_FOLLOW_ROBOT_CAMERA": "1",
             "G1_RICKSHAW_SLOPE_FRAMES": str(args.frames_per_slope),
+            RENDER_ORDERED_SLOPES_ENV: "1",
         }
     )
     launcher_arguments = [

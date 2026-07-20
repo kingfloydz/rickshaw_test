@@ -67,3 +67,26 @@ def test_startup_randomizes_environment_mapping_without_changing_balance() -> No
         terrain.env_origins,
         terrain.terrain_origins[terrain.terrain_levels, terrain.terrain_types],
     )
+
+
+def test_startup_can_keep_canonical_environment_order_for_rendering() -> None:
+    num_envs = SLOPE_COUNT
+    terrain_origins = torch.arange(
+        TERRAIN_NUM_ROWS * TERRAIN_NUM_COLS * 3, dtype=torch.float32
+    ).reshape(TERRAIN_NUM_ROWS, TERRAIN_NUM_COLS, 3)
+    terrain = SimpleNamespace(
+        terrain_levels=torch.zeros(num_envs, dtype=torch.long),
+        terrain_types=torch.zeros(num_envs, dtype=torch.long),
+        terrain_origins=terrain_origins,
+        env_origins=torch.zeros((num_envs, 3)),
+    )
+    env = SimpleNamespace(
+        num_envs=num_envs,
+        device="cpu",
+        scene=SimpleNamespace(terrain=terrain),
+    )
+
+    randomize_startup_slopes(env, None, shuffle=False)
+
+    assert terrain.terrain_levels.tolist() == list(SLOPE_TERRAIN_LEVELS)
+    assert terrain.terrain_types.tolist() == list(SLOPE_TERRAIN_TYPES)

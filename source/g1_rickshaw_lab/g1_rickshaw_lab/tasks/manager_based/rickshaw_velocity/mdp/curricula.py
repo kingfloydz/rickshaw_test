@@ -29,11 +29,20 @@ def balanced_slope_assignment(
     return slots, levels, terrain_types
 
 
-def randomize_startup_slopes(env: Any, env_ids: Any) -> None:
-    """Randomly map an exactly balanced slope set to all environments."""
+def randomize_startup_slopes(
+    env: Any,
+    env_ids: Any,
+    *,
+    shuffle: bool = True,
+) -> None:
+    """Map an exactly balanced slope set to all environments."""
 
     del env_ids
-    _, levels, terrain_types = balanced_slope_assignment(env.num_envs, device=env.device, shuffle=True)
+    _, levels, terrain_types = balanced_slope_assignment(
+        env.num_envs,
+        device=env.device,
+        shuffle=shuffle,
+    )
     terrain = env.scene.terrain
     terrain.terrain_levels.copy_(levels)
     terrain.terrain_types.copy_(terrain_types)

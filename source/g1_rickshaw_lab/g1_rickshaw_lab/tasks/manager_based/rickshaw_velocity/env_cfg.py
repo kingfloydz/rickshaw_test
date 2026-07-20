@@ -38,7 +38,6 @@ from . import mdp
 from .closed_chain import ReplicatedDualD6SpawnerCfg
 from .terrain_cfg import DIRECTIONAL_SLOPES_CFG
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 DEFAULT_FEASIBILITY_PATH = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
 DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
@@ -398,6 +397,9 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.__dict__["__reset_pose_library"] = value
 
     def __post_init__(self):
+        self.events.randomize_slopes.params = {
+            "shuffle": os.environ.get("G1_RICKSHAW_RENDER_ORDERED_SLOPES") != "1"
+        }
         feasibility_path = _configured_path("G1_RICKSHAW_FEASIBILITY_ENVELOPE", Path(self.feasibility_path))
         reset_pose_path = _configured_path("G1_RICKSHAW_RESET_POSES", Path(self.reset_pose_path))
         envelope = load_feasibility_envelope(feasibility_path)
