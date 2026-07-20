@@ -62,7 +62,7 @@ def test_unique_runs_are_the_requested_controlled_matrix() -> None:
     assert [spec.name for spec in pipeline.UNIQUE_RUNS] == RUN_NAMES
     assert [spec.training_parameters for spec in pipeline.UNIQUE_RUNS] == [
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 48,
                 "latent_dim": 16,
                 "history_length": 61,
@@ -83,35 +83,35 @@ def test_unique_runs_are_the_requested_controlled_matrix() -> None:
                 "stability_reward_curriculum": False,
         },
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 24,
                 "latent_dim": 16,
                 "history_length": 61,
                 "stability_reward_curriculum": False,
         },
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 64,
                 "latent_dim": 16,
                 "history_length": 61,
                 "stability_reward_curriculum": False,
         },
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 48,
                 "latent_dim": 8,
                 "history_length": 61,
                 "stability_reward_curriculum": False,
         },
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 48,
                 "latent_dim": 24,
                 "history_length": 61,
                 "stability_reward_curriculum": False,
         },
         {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
                 "rollout_steps": 48,
                 "latent_dim": 32,
                 "history_length": 61,
@@ -124,7 +124,7 @@ def test_stability_curriculum_matrix_covers_all_latent_dimensions() -> None:
     specs = [pipeline.RUNS_BY_NAME[name] for name in STABILITY_RUN_NAMES]
 
     assert [spec.latent_dim for spec in specs] == [6, 8, 10, 12, 14, 16, 18, 20]
-    assert all(spec.fat2_weight == 0.1 for spec in specs)
+    assert all(spec.fat2_weight == 0.0 for spec in specs)
     assert all(spec.stability_reward_curriculum for spec in specs)
 
 
@@ -132,7 +132,7 @@ def test_latent_dim_4_is_registered() -> None:
     spec = pipeline.RUNS_BY_NAME["latent_dim_4"]
 
     assert spec.latent_dim == 4
-    assert spec.fat2_weight == 0.1
+    assert spec.fat2_weight == 0.0
     assert spec.rollout_steps == 48
     assert spec.stability_reward_curriculum is False
 
@@ -145,7 +145,7 @@ def test_tcn_history_matrix_covers_requested_lengths_and_latents() -> None:
         for history_length in (61, 91)
         for latent_dim in (8, 12, 16, 24)
     ]
-    assert all(spec.fat2_weight == 0.1 for spec in specs)
+    assert all(spec.fat2_weight == 0.0 for spec in specs)
     assert all(spec.rollout_steps == 48 for spec in specs)
     assert all(not spec.stability_reward_curriculum for spec in specs)
 
@@ -205,10 +205,10 @@ def test_exact_cli_plan_runs_in_a_clean_subprocess(tmp_path: Path) -> None:
     (
         ("fat2_weight_0.0", "0.0", "48", "16"),
         ("fat2_weight_0.2", "0.2", "48", "16"),
-        ("rollout_steps_24", "0.1", "24", "16"),
-        ("rollout_steps_64", "0.1", "64", "16"),
-        ("latent_dim_8", "0.1", "48", "8"),
-        ("latent_dim_32", "0.1", "48", "32"),
+        ("rollout_steps_24", "0.0", "24", "16"),
+        ("rollout_steps_64", "0.0", "64", "16"),
+        ("latent_dim_8", "0.0", "48", "8"),
+        ("latent_dim_32", "0.0", "48", "32"),
     ),
 )
 def test_teacher_command_binds_every_controlled_parameter(

@@ -13,8 +13,8 @@ from .artifact_io import utc_timestamp, write_json_atomic
 from .reward_profile import GUIDE_REWARD_TERMS
 from .slope_contract import SLOPE_GRADIENTS
 
-REWARD_CALIBRATION_SCHEMA_VERSION = 6
-RAW_REWARD_SAMPLE_SCHEMA_VERSION = 6
+REWARD_CALIBRATION_SCHEMA_VERSION = 7
+RAW_REWARD_SAMPLE_SCHEMA_VERSION = 7
 RAW_REWARD_SAMPLE_KIND = "isaaclab_reward_manager_unweighted_terms"
 SPEED_REFERENCE_TERM = "track_speed_exp"
 SPEED_TERMS = ("track_speed_exp",)
@@ -36,10 +36,12 @@ GUIDE_PHYSICAL_SCALES = {
     "hip_yaw_roll_reference_scale_rad": 0.20,
     "pelvis_height_bounds_m": [0.58, 0.87],
     "pelvis_height_error_scale_m": 0.05,
-    "feet_landing_target_air_time_s": 0.30,
-    "feet_landing_sigma_s": 0.12,
-    "feet_max_air_time_s": 0.50,
-    "feet_air_time_excess_scale_s": 0.20,
+    "gait_period_s": 0.80,
+    "gait_phase_offsets": [0.0, 0.5],
+    "gait_stance_threshold": 0.55,
+    "foot_clearance_target_m": 0.07,
+    "foot_clearance_std_m": 0.05,
+    "foot_clearance_tanh_mult": 2.0,
     "feet_slide_normalizer_mps": 1.0,
     "terrain_normal_velocity_scale_mps": 0.25,
     "joint_power_normalizer_w": 1.0,
@@ -54,8 +56,8 @@ GUIDE_REWARD_NORMALIZATION_SCALES = {
     "hitch_height_exp": {"scale": 0.02, "unit": "m"},
     "hitch_height_recovery_l2": {"scale": 0.05, "unit": "m"},
     "fat2_prior_exp": {"scale": 0.12, "unit": "rad"},
-    "feet_landing": {"scale": 0.12, "unit": "s"},
-    "feet_air_time_excess_l2": {"scale": 0.20, "unit": "s"},
+    "feet_gait": {"scale": 0.80, "unit": "s"},
+    "feet_clearance": {"scale": 0.07, "unit": "m"},
     "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {"scale": 0.25, "unit": "m/s"},
     "joint_power_l1": {"scale": 1.0, "unit": "W"},

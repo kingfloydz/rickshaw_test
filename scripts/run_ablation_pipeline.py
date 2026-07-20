@@ -74,23 +74,23 @@ class RunSpec:
 
 
 UNIQUE_RUNS = (
-    RunSpec("baseline", 0.1, 48, 16),
+    RunSpec("baseline", 0.0, 48, 16),
     RunSpec("fat2_weight_0.0", 0.0, 48, 16),
     RunSpec("fat2_weight_0.2", 0.2, 48, 16),
-    RunSpec("rollout_steps_24", 0.1, 24, 16),
-    RunSpec("rollout_steps_64", 0.1, 64, 16),
-    RunSpec("latent_dim_8", 0.1, 48, 8),
-    RunSpec("latent_dim_24", 0.1, 48, 24),
-    RunSpec("latent_dim_32", 0.1, 48, 32),
+    RunSpec("rollout_steps_24", 0.0, 24, 16),
+    RunSpec("rollout_steps_64", 0.0, 64, 16),
+    RunSpec("latent_dim_8", 0.0, 48, 8),
+    RunSpec("latent_dim_24", 0.0, 48, 24),
+    RunSpec("latent_dim_32", 0.0, 48, 32),
 )
 LATENT_DIM_RUNS = tuple(
-    RunSpec(f"latent_dim_{latent_dim}", 0.1, 48, latent_dim)
+    RunSpec(f"latent_dim_{latent_dim}", 0.0, 48, latent_dim)
     for latent_dim in (4, 6, 10, 12, 14, 16, 18, 20)
 )
 STABILITY_CURRICULUM_RUNS = tuple(
     RunSpec(
         f"latent_dim_{latent_dim}_stability_curriculum",
-        0.1,
+        0.0,
         48,
         latent_dim,
         True,
@@ -100,7 +100,7 @@ STABILITY_CURRICULUM_RUNS = tuple(
 TCN_HISTORY_RUNS = tuple(
     RunSpec(
         f"tcn_history_{history_length}_latent_dim_{latent_dim}",
-        0.1,
+        0.0,
         48,
         latent_dim,
         False,

@@ -1,3 +1,0 @@
-- agent.num_steps_per_env=48
-- env.rewards.fat2_prior_exp.weight=0.2
-- env.observations.history=null

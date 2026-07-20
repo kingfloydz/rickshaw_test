@@ -287,19 +287,17 @@ class RewardsCfg:
         },
     )
     fat2_prior_exp = RewTerm(func=mdp.fat2_prior_exp, weight=mdp.REWARD_WEIGHTS["fat2_prior_exp"])
-    feet_landing = RewTerm(
-        func=mdp.feet_landing,
-        weight=mdp.REWARD_WEIGHTS["feet_landing"],
+    feet_gait = RewTerm(
+        func=mdp.feet_gait,
+        weight=mdp.REWARD_WEIGHTS["feet_gait"],
         params={
             "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
         },
     )
-    feet_air_time_excess_l2 = RewTerm(
-        func=mdp.feet_air_time_excess_l2,
-        weight=mdp.REWARD_WEIGHTS["feet_air_time_excess_l2"],
-        params={
-            "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
-        },
+    feet_clearance = RewTerm(
+        func=mdp.feet_clearance,
+        weight=mdp.REWARD_WEIGHTS["feet_clearance"],
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=list(FOOT_BODY_NAMES), preserve_order=True)},
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,

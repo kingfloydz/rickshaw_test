@@ -86,7 +86,7 @@ TRAINING_PARAMETER_KEYS = (
     "stability_reward_curriculum",
 )
 DEFAULT_TRAINING_PARAMETERS = {
-    "fat2_weight": 0.1,
+    "fat2_weight": 0.0,
     "rollout_steps": 48,
     "latent_dim": DEFAULT_CONTEXT_DIM,
     "history_length": HISTORY_LENGTH,

@@ -652,7 +652,7 @@ p_{zmp,s}=c_s+
 [(h_s-c_s)F_{h,n}-(h_n-c_n)F_{h,s}]-\tau_h}{R_n}
 \]
 
-`R_n<=min_ground_reaction` 时 ZMP 无效并触发安全计数。双支撑 polygon 取两脚四角点的 convex hull，单支撑取接触脚 polygon；在坡面二维坐标中计算 ZMP 到所有边的最小有符号距离 `d_zmp`。D6 wrench 用于训练期 ZMP，解析 `T_s/T_n` 用于独立校验；二者均不进入 actor。FAT2、ZMP margin 和 torso orientation 不得同时使用大权重；默认以 ZMP margin 为主项，FAT2 保持小权重先验。
+`R_n<=min_ground_reaction` 时 ZMP 无效并触发安全计数。双支撑 polygon 取两脚四角点的 convex hull，单支撑取接触脚 polygon；在坡面二维坐标中计算 ZMP 到所有边的最小有符号距离 `d_zmp`。D6 wrench 用于训练期 ZMP，解析 `T_s/T_n` 用于独立校验；二者均不进入 actor。FAT2、ZMP margin 和 torso orientation 不得同时使用大权重；FAT2 与 ZMP 奖励核默认保留但权重为零，需要时通过受控实验显式启用。
 
 以下值在资产读取或标定前保持 `MISSING`：payload mass/CoM、`c_rr` 范围、`I_O,y`、`theta_max` 和 D6 gains/limits。它们必须由 `validate_feasibility.py` 和第 13 节验收确定，不能通过 PPO 自动“补偿”不可行参数。FAT2 sigma/weight 和 ZMP margin 使用第 11.1 节的明确初值，并按第 11.2 节定标。
 
@@ -821,10 +821,10 @@ algorithm = RslRlPpoAlgorithmCfg(
 | 任务     | `speed_error_pseudo_huber`   |    `-0.5` | `sqrt(1+((v_ref-v_robot,s)/0.50)^2)-1`           |
 | 任务     | `lateral_error_l2`           |    `-0.5` | `(e_y/0.30 m)^2`                                 |
 | 任务     | `heading_error_l2`           |    `-0.5` | `(e_psi/0.30 rad)^2`                             |
-| 稳定     | `zmp_margin_barrier`         |    `-2.0` | `(relu(0.02-d_zmp)/0.02)^2`                      |
+| 稳定     | `zmp_margin_barrier`         |     `0.0` | `(relu(0.02-d_zmp)/0.02)^2`                      |
 | 车辆     | `hitch_height_exp`           |    `+0.5` | `exp(-((H-H_target)/0.02)^2)`，仅双轮接触有效    |
 | 车辆     | `hitch_height_recovery_l2`   |   `-0.25` | 以 `0.05 m` deadband/scale 归一化，单位区间内平方、区间外线性增长 |
-| 先验     | `fat2_prior_exp`             |    `+0.1` | 第 7.3 节，`sigma=0.12 rad`，仅 `fat_valid` 有效 |
+| 先验     | `fat2_prior_exp`             |     `0.0` | 第 7.3 节，`sigma=0.12 rad`，仅 `fat_valid` 有效 |
 | 步态     | `feet_landing`               |   `+0.25` | 单脚 `first_contact` 时按上一段 air time 结算；奖励要求 `v_robot>0.1` 且速度误差 `<0.3 m/s`，过长摆动在落脚时惩罚 |
 | 步态     | `feet_air_time_excess_l2`    |   `-0.25` | 当前 air time 超过 `0.50 s` 后惩罚，避免单脚长期悬空 |
 | 步态     | `feet_slide`                 |   `-0.20` | 对所有接触足累计坡面切向速度，双脚蹭地会叠加     |
@@ -896,7 +896,7 @@ def pelvis_height_limits_l2(env):
 
 禁用上游 `track_lin_vel_xy_exp`、固定零 yaw-rate tracking、`flat_orientation_l2`、world-frame `lin_vel_z_l2`、raw action-rate、joint acceleration penalty 和单独 joint torque penalty。后两项已由 power 和 normalized processed rate 覆盖；processed jerk 只作为诊断指标。
 
-不为 wheel contact、wheel height、D6 residual、D6 asymmetry、arm saturation、overspeed 或 cart pitch-rate设置额外 dense reward；这些量进入 barrier、termination 和日志。机器人 pelvis 高度是独立的姿态可行域约束：以坡面法向距离计算，区间内不计分，只惩罚越界距离，避免与目标高度跟踪重复。hip yaw/roll 只以小权重跟随各坡度静力学 `q_ref`，不约束承担牵引姿态的 hip pitch。FAT2 权重默认 `+0.1`，受控消融支持 `0.0/0.1/0.2`，其余训练配置不变。
+不为 wheel contact、wheel height、D6 residual、D6 asymmetry、arm saturation、overspeed 或 cart pitch-rate设置额外 dense reward；这些量进入 barrier、termination 和日志。机器人 pelvis 高度是独立的姿态可行域约束：以坡面法向距离计算，区间内不计分，只惩罚越界距离，避免与目标高度跟踪重复。hip yaw/roll 只以小权重跟随各坡度静力学 `q_ref`，不约束承担牵引姿态的 hip pitch。FAT2 与 ZMP 权重默认均为 `0.0`；FAT2 受控消融仍支持 `0.0/0.1/0.2`，ZMP 可通过奖励权重覆盖显式启用。
 
 ### 11.2 Reward 定标
 

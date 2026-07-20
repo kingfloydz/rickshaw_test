@@ -324,8 +324,8 @@ def test_reward_report_uses_one_stable_path(tmp_path: Path) -> None:
 def test_reward_normalization_constants_match_runtime() -> None:
     assert rewards.REWARD_NORMALIZATION_SCALES == GUIDE_REWARD_NORMALIZATION_SCALES
     assert set(rewards.REWARD_WEIGHTS) == set(GUIDE_REWARD_TERMS)
-    assert rewards.REWARD_WEIGHTS["zmp_margin_barrier"] == pytest.approx(-2.0)
-    assert rewards.REWARD_WEIGHTS["fat2_prior_exp"] == pytest.approx(0.1)
+    assert rewards.REWARD_WEIGHTS["zmp_margin_barrier"] == pytest.approx(0.0)
+    assert rewards.REWARD_WEIGHTS["fat2_prior_exp"] == pytest.approx(0.0)
     power = rewards.joint_power_l1_value(
         torch.tensor([[2.0, -3.0]]), torch.tensor([[4.0, 5.0]])
     )

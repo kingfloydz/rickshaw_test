@@ -4,7 +4,7 @@ fixed:
   num_envs: 8192
   rollout_steps: 48
   latent_dim: 16
-  fat2_weight: 0.1
+  fat2_weight: 0.0
   max_iterations: 4000
 factors:
   zmp:

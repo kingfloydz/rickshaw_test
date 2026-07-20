@@ -9,15 +9,15 @@ import torch
 from g1_rickshaw_lab.policy_schema import ACTION_SCALE
 
 REWARD_WEIGHTS = {
-    "track_speed_exp": 1.0,
+    "track_speed_exp": 1.5,
     "lateral_error_l2": -0.5,
     "heading_error_l2": -0.5,
-    "zmp_margin_barrier": -2.0,
+    "zmp_margin_barrier": 0.0,
     "hitch_height_exp": 0.5,
     "hitch_height_recovery_l2": -0.25,
-    "fat2_prior_exp": 0.1,
-    "feet_landing": 0.25,
-    "feet_air_time_excess_l2": -0.25,
+    "fat2_prior_exp": 0.0,
+    "feet_gait": 0.5,
+    "feet_clearance": 0.75,
     "feet_slide": -0.20,
     "terrain_normal_velocity_l2": -0.25,
     "joint_power_l1": -2.0e-4,
@@ -37,11 +37,13 @@ HITCH_HEIGHT_ERROR_SCALE_M = 0.02
 HITCH_HEIGHT_RECOVERY_DEADBAND_M = 0.05
 HITCH_HEIGHT_RECOVERY_SCALE_M = 0.05
 FAT2_ERROR_SCALE_RAD = 0.12
-FEET_LANDING_TARGET_AIR_TIME_S = 0.30
-FEET_LANDING_SIGMA_S = 0.12
-FEET_MAX_AIR_TIME_S = 0.50
-FEET_AIR_TIME_EXCESS_SCALE_S = 0.20
 MOVING_COMMAND_THRESHOLD_MPS = 0.05
+GAIT_PERIOD_S = 0.80
+GAIT_PHASE_OFFSETS = (0.0, 0.5)
+GAIT_STANCE_THRESHOLD = 0.55
+FOOT_CLEARANCE_TARGET_M = 0.07
+FOOT_CLEARANCE_STD_M = 0.05
+FOOT_CLEARANCE_TANH_MULT = 2.0
 FEET_SLIDE_NORMALIZER_MPS = 1.0
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
@@ -62,14 +64,8 @@ REWARD_NORMALIZATION_SCALES = {
         "unit": "m",
     },
     "fat2_prior_exp": {"scale": FAT2_ERROR_SCALE_RAD, "unit": "rad"},
-    "feet_landing": {
-        "scale": FEET_LANDING_SIGMA_S,
-        "unit": "s",
-    },
-    "feet_air_time_excess_l2": {
-        "scale": FEET_AIR_TIME_EXCESS_SCALE_S,
-        "unit": "s",
-    },
+    "feet_gait": {"scale": GAIT_PERIOD_S, "unit": "s"},
+    "feet_clearance": {"scale": FOOT_CLEARANCE_TARGET_M, "unit": "m"},
     "feet_slide": {"scale": FEET_SLIDE_NORMALIZER_MPS, "unit": "m/s"},
     "terrain_normal_velocity_l2": {
         "scale": TERRAIN_NORMAL_VELOCITY_SCALE_MPS,
@@ -194,37 +190,37 @@ def hip_yaw_roll_reference_l2_value(
     return torch.mean(torch.square((joint_position - reference_position) / scale), dim=-1)
 
 
-def feet_landing_value(
-    first_contact: torch.Tensor,
-    last_air_time: torch.Tensor,
+def feet_gait_value(
+    episode_time_s: torch.Tensor,
+    is_contact: torch.Tensor,
     v_ref: torch.Tensor,
+    *,
+    period: float = GAIT_PERIOD_S,
+    offsets: tuple[float, float] = GAIT_PHASE_OFFSETS,
+    threshold: float = GAIT_STANCE_THRESHOLD,
 ) -> torch.Tensor:
-    """Score the previous swing only when exactly one foot lands this step."""
-
-    contact = first_contact.to(last_air_time.dtype)
-    single_landing = torch.sum(first_contact, dim=-1) == 1
+    global_phase = torch.remainder(episode_time_s, period) / period
+    offsets_tensor = episode_time_s.new_tensor(offsets)
+    phase = torch.remainder(global_phase[:, None] + offsets_tensor[None, :], 1.0)
+    desired_contact = phase < threshold
+    contact_match = ~(desired_contact ^ is_contact)
     moving = torch.abs(v_ref) > MOVING_COMMAND_THRESHOLD_MPS
-    landing_kernel = torch.exp(
-        -torch.square(
-            (last_air_time - FEET_LANDING_TARGET_AIR_TIME_S) / FEET_LANDING_SIGMA_S
-        )
-    )
-    overlong = torch.square(
-        torch.relu(last_air_time - FEET_MAX_AIR_TIME_S)
-        / FEET_AIR_TIME_EXCESS_SCALE_S
-    )
-    gated_kernel = landing_kernel * moving[:, None].to(last_air_time.dtype)
-    return torch.sum(contact * (gated_kernel - overlong), dim=-1) * single_landing.to(
-        last_air_time.dtype
-    )
+    return torch.sum(contact_match.to(episode_time_s.dtype), dim=-1) * moving.to(episode_time_s.dtype)
 
 
-def feet_air_time_excess_l2_value(current_air_time: torch.Tensor) -> torch.Tensor:
-    excess = (
-        torch.relu(current_air_time - FEET_MAX_AIR_TIME_S)
-        / FEET_AIR_TIME_EXCESS_SCALE_S
-    )
-    return torch.sum(torch.square(excess), dim=-1)
+def foot_clearance_reward_value(
+    foot_height: torch.Tensor,
+    foot_speed: torch.Tensor,
+    v_ref: torch.Tensor,
+    *,
+    target_height: float = FOOT_CLEARANCE_TARGET_M,
+    std: float = FOOT_CLEARANCE_STD_M,
+    tanh_mult: float = FOOT_CLEARANCE_TANH_MULT,
+) -> torch.Tensor:
+    height_error = torch.square(foot_height - target_height)
+    swing_weight = torch.tanh(tanh_mult * foot_speed)
+    reward = torch.exp(-torch.sum(height_error * swing_weight, dim=-1) / std)
+    return reward * (torch.abs(v_ref) > MOVING_COMMAND_THRESHOLD_MPS).to(reward.dtype)
 
 
 def pelvis_height_limits_l2_value(
@@ -301,29 +297,41 @@ def _resolve_body_ids(entity_cfg: Any | None, fallback: Any) -> Any:
     return fallback
 
 
-def feet_landing(
+def feet_gait(
     env: Any,
     sensor_cfg: Any | None = None,
 ) -> torch.Tensor:
-    """Reward a clean landing while a moving command is active."""
+    """Match foot contact to a fixed alternating 0.8-second gait."""
 
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
     body_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    return feet_landing_value(
-        sensor.compute_first_contact(env.step_dt)[:, body_ids],
-        sensor.data.last_air_time[:, body_ids],
+    is_contact = sensor.data.current_contact_time[:, body_ids] > 0.0
+    return feet_gait_value(
+        env.episode_length_buf.to(dtype=env.path_tangent_w.dtype) * env.step_dt,
+        is_contact,
         env.command_state.v_ref,
     )
 
 
-def feet_air_time_excess_l2(
-    env: Any, sensor_cfg: Any | None = None
+def feet_clearance(
+    env: Any,
+    asset_cfg: Any | None = None,
 ) -> torch.Tensor:
-    sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
-    sensor = env.scene[sensor_name]
-    body_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    return feet_air_time_excess_l2_value(sensor.data.current_air_time[:, body_ids])
+    asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
+    robot = env.scene[asset_name]
+    body_ids = _resolve_body_ids(asset_cfg, env.foot_body_ids)
+    terrain_origin_w = env.scene.terrain.env_origins
+    foot_position = robot.data.body_pos_w[:, body_ids]
+    foot_velocity = robot.data.body_lin_vel_w[:, body_ids]
+    foot_height = torch.sum(
+        (foot_position - terrain_origin_w[:, None, :]) * env.path_normal_w[:, None, :],
+        dim=-1,
+    )
+    velocity_s = torch.sum(foot_velocity * env.path_tangent_w[:, None, :], dim=-1)
+    velocity_l = torch.sum(foot_velocity * env.path_lateral_w[:, None, :], dim=-1)
+    foot_speed = torch.sqrt(torch.square(velocity_s) + torch.square(velocity_l))
+    return foot_clearance_reward_value(foot_height, foot_speed, env.command_state.v_ref)
 
 
 def feet_slide(
@@ -442,10 +450,12 @@ def termination(env: Any) -> torch.Tensor:
 
 __all__ = [
     "FAT2_ERROR_SCALE_RAD",
-    "FEET_AIR_TIME_EXCESS_SCALE_S",
-    "FEET_LANDING_SIGMA_S",
-    "FEET_LANDING_TARGET_AIR_TIME_S",
-    "FEET_MAX_AIR_TIME_S",
+    "FOOT_CLEARANCE_STD_M",
+    "FOOT_CLEARANCE_TARGET_M",
+    "FOOT_CLEARANCE_TANH_MULT",
+    "GAIT_PERIOD_S",
+    "GAIT_PHASE_OFFSETS",
+    "GAIT_STANCE_THRESHOLD",
     "FEET_SLIDE_NORMALIZER_MPS",
     "HEADING_ERROR_SCALE_RAD",
     "HIP_YAW_ROLL_POLICY_INDICES",
@@ -466,10 +476,10 @@ __all__ = [
     "ZMP_MARGIN_SCALE_M",
     "fat2_prior_exp",
     "fat2_prior_exp_value",
-    "feet_air_time_excess_l2",
-    "feet_air_time_excess_l2_value",
-    "feet_landing",
-    "feet_landing_value",
+    "feet_clearance",
+    "foot_clearance_reward_value",
+    "feet_gait",
+    "feet_gait_value",
     "feet_slide",
     "heading_error_l2",
     "heading_error_l2_value",
