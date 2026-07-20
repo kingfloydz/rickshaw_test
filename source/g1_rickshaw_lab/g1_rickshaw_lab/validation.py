@@ -7,17 +7,18 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .artifact_io import utc_timestamp, write_json_atomic
 from .configuration import RESET_TORQUE_LIMIT_FRACTION, SLOPE_GRADIENTS
+from .project_paths import PROJECT_ROOT
 
 VALIDATION_REPORT_SCHEMA_VERSION = 3
 FEASIBILITY_MINIMUM_PASS_FRACTION = 0.99
 VALIDATION_TOOLS = ("validate_feasibility", "validate_dynamics")
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+REPOSITORY_ROOT = PROJECT_ROOT
 ASSET_DEPENDENCY_SUFFIXES = frozenset({".urdf", ".usd", ".stl", ".yaml"})
 VALIDATION_SIGNED_SLOPES = SLOPE_GRADIENTS
 MAX_WRENCH_RELATIVE_TOLERANCE = 0.35
@@ -355,26 +356,6 @@ def assert_safety_thresholds_match(
             for left, right in zip(actual_values, expected_values, strict=True)
         ):
             raise ValueError(f"{label}.{name}={actual!r} does not match independent authority value {expected!r}")
-
-
-def utc_timestamp() -> str:
-    """Return a stable UTC timestamp suitable for JSON artifacts."""
-
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def write_json_atomic(path: str | Path, value: Mapping[str, Any]) -> Path:
-    """Atomically write a deterministic JSON report."""
-
-    output = Path(path).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(output)
-    return output
 
 
 def write_yaml_atomic(path: str | Path, value: Mapping[str, Any]) -> Path:

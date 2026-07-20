@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
 from _isaaclab_wrappers import (
     add_project_source_to_path,
@@ -23,27 +22,22 @@ from g1_rickshaw_lab.reward_profile import (  # noqa: E402
     reward_weight_hydra_overrides,
     reward_weight_overrides_from_configuration,
 )
+from g1_rickshaw_lab.rl.runner import RunnerContext  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     CHECKPOINT_LINEAGE_KEY,
     GUIDE_TRAINING_NUM_ENVS,
     GUIDE_TRAINING_PARAMETERS,
     GUIDE_TRAINING_TASK,
+    TRAINING_CONFIGURATION_KEY as TRAINING_CONFIGURATION_CHECKPOINT_KEY,
+    build_training_configuration,
     build_s2_bootstrap_checkpoint,
+    cli_value,
     guide_max_iterations,
     load_s2_resume_checkpoint,
     load_stage_checkpoint,
     training_artifact_interval,
-    validate_guide_training_configuration,
 )
-
-from _training_configuration import (  # noqa: E402
-    TRAINING_CONFIGURATION_CHECKPOINT_KEY,
-    build_training_configuration,
-    cli_value,
-    publish_training_configuration,
-)
-
 
 DEFAULT_TASK = GUIDE_TRAINING_TASK
 STUDENT_AGENT_KEY = "rsl_rl_student_cfg_entry_point"
@@ -59,17 +53,12 @@ def _validate_resume_lineage(checkpoint: dict, teacher: Path, context: Path) -> 
         raise ValueError("S2 resume checkpoint belongs to a different S0/S1 lineage")
 
 
-def _validate_resume_training_configuration(
-    resume_configuration: dict, source_configuration: dict
-) -> None:
-    if (
-        resume_configuration["training_parameters"]
-        != source_configuration["training_parameters"]
-    ):
+def _validate_resume_training_configuration(resume_configuration: dict, source_configuration: dict) -> None:
+    if resume_configuration["training_parameters"] != source_configuration["training_parameters"]:
         raise ValueError("S2 resume cannot change FAT2, latent_dim, or rollout_steps")
-    if reward_weight_overrides_from_configuration(
-        resume_configuration
-    ) != reward_weight_overrides_from_configuration(source_configuration):
+    if reward_weight_overrides_from_configuration(resume_configuration) != reward_weight_overrides_from_configuration(
+        source_configuration
+    ):
         raise ValueError("S2 resume cannot change reward weights")
 
 
@@ -97,30 +86,20 @@ def main() -> int:
         "--load_run",
         "--checkpoint",
     )
-    if any(
-        token == flag or token.startswith(flag + "=")
-        for token in remaining
-        for flag in owned_resume_flags
-    ):
+    if any(token == flag or token.startswith(flag + "=") for token in remaining for flag in owned_resume_flags):
         raise ValueError("S2 owns its agent, experiment root, and resume selection")
     context_checkpoint = load_stage_checkpoint(
         context,
         expected_stage="s1_context_distillation",
         validate_runtime=True,
     )
-    s1_training_configuration = dict(
-        context_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY]
-    )
+    s1_training_configuration = dict(context_checkpoint[TRAINING_CONFIGURATION_CHECKPOINT_KEY])
     training_parameters = s1_training_configuration["training_parameters"]
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
     fat2_weight = float(training_parameters["fat2_weight"])
-    stability_reward_curriculum = bool(
-        training_parameters["stability_reward_curriculum"]
-    )
-    reward_weight_overrides = reward_weight_overrides_from_configuration(
-        s1_training_configuration
-    )
+    stability_reward_curriculum = bool(training_parameters["stability_reward_curriculum"])
+    reward_weight_overrides = reward_weight_overrides_from_configuration(s1_training_configuration)
     resume_checkpoint_path: Path | None = None
     if args.resume_checkpoint is None:
         checkpoint = build_s2_bootstrap_checkpoint(teacher, context)
@@ -153,11 +132,6 @@ def main() -> int:
         load_run = "^" + re.escape(resume_checkpoint_path.parent.name) + "$"
         load_checkpoint_name = "^" + re.escape(resume_checkpoint_path.name) + "$"
 
-    os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
-    os.environ["G1_RICKSHAW_TASK"] = args.task
-    os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s2_student_ppo"
-    os.environ["G1_RICKSHAW_CURRICULUM_START_ITERATION"] = str(curriculum_iteration)
-    os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = json.dumps(lineage, sort_keys=True)
     seed = cli_value(
         remaining,
         "--seed",
@@ -193,22 +167,21 @@ def main() -> int:
             "teacher_checkpoint": os.fspath(teacher.resolve()),
             "context_checkpoint": os.fspath(context.resolve()),
         },
-        actor_initialized_from_teacher=bool(
-            s1_training_configuration.get("actor_initialized_from_teacher")
-        ),
+        actor_initialized_from_teacher=bool(s1_training_configuration.get("actor_initialized_from_teacher")),
         stage_coverage=s1_training_configuration.get("stage_coverage"),
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
         rollout_steps=rollout_steps,
         stability_reward_curriculum=stability_reward_curriculum,
     )
-    validate_guide_training_configuration(
-        training_configuration,
-        expected_stage="s2_student_ppo",
+    runner_context = RunnerContext.training(
+        stage="s2_student_ppo",
+        training_configuration=training_configuration,
+        lineage=lineage,
+        curriculum_start_iteration=curriculum_iteration,
     )
-    publish_training_configuration(training_configuration)
     run_isaaclab_rsl_rl(
-        "train.py",
+        "train",
         [
             "--task",
             args.task,
@@ -238,6 +211,7 @@ def main() -> int:
             "env.observations.teacher_dynamic_history=null",
             "env.observations.teacher_static=null",
         ],
+        runner_context=runner_context,
     )
     return 0
 

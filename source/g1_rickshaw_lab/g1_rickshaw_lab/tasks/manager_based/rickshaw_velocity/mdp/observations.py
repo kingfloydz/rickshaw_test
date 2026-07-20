@@ -18,7 +18,6 @@ from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
 
 from .actions import ACTION_DIM
 
-
 TEACHER_STATIC_DOMAIN_DIM = TEACHER_STATIC_DIM - 1
 SLOPE_LOWER = min(SLOPE_GRADIENTS)
 SLOPE_UPPER = max(SLOPE_GRADIENTS)
@@ -121,14 +120,42 @@ def assemble_actor_observation(
         if value.shape != batch_shape:
             raise ValueError(f"{name} must have batch shape {batch_shape}")
 
-    position_error = joint_position - q_ref
-    task_scale = torch.tensor(
-        TASK_SIGNAL_SCALE,
-        device=base_angular_velocity_b.device,
-        dtype=base_angular_velocity_b.dtype,
+    return _assemble_actor_observation(
+        base_angular_velocity_b,
+        projected_gravity_b,
+        v_ref,
+        lateral_error,
+        heading_error,
+        joint_position,
+        q_ref,
+        joint_velocity_value,
+        previous_processed_action,
     )
-    task = torch.stack((v_ref, lateral_error, wrap_to_pi(heading_error)), dim=-1) * task_scale
-    observation = torch.cat(
+
+
+def _assemble_actor_observation(
+    base_angular_velocity_b: torch.Tensor,
+    projected_gravity_b: torch.Tensor,
+    v_ref: torch.Tensor,
+    lateral_error: torch.Tensor,
+    heading_error: torch.Tensor,
+    joint_position: torch.Tensor,
+    q_ref: torch.Tensor,
+    joint_velocity_value: torch.Tensor,
+    previous_processed_action: torch.Tensor,
+) -> torch.Tensor:
+    """Hot-path observation assembly after startup schema validation."""
+
+    position_error = joint_position - q_ref
+    task = torch.stack(
+        (
+            v_ref * TASK_SIGNAL_SCALE[0],
+            lateral_error * TASK_SIGNAL_SCALE[1],
+            wrap_to_pi(heading_error) * TASK_SIGNAL_SCALE[2],
+        ),
+        dim=-1,
+    )
+    return torch.cat(
         (
             base_angular_velocity_b * BASE_ANGULAR_VELOCITY_SCALE,
             projected_gravity_b * PROJECTED_GRAVITY_SCALE,
@@ -139,9 +166,6 @@ def assemble_actor_observation(
         ),
         dim=-1,
     )
-    if observation.shape[-1] != ACTOR_OBSERVATION_DIM:
-        raise RuntimeError(f"actor observation is {observation.shape[-1]}-D, expected {ACTOR_OBSERVATION_DIM}-D")
-    return observation
 
 
 @dataclass
@@ -308,7 +332,7 @@ def actor_observation(
     ids = _policy_joint_ids(env, asset_cfg)
     # Component manager functions above are scaled; this call uses the pure
     # assembler so there is a single schema assertion and no double scaling.
-    observation = assemble_actor_observation(
+    observation = _assemble_actor_observation(
         asset.data.root_ang_vel_b,
         asset.data.projected_gravity_b,
         env.command_state.v_ref,
@@ -350,8 +374,6 @@ def actor_observation_history(env: Any) -> torch.Tensor:
     result = env.observation_history_state.history
     if result is None:
         raise RuntimeError("actor history observation is disabled for this environment")
-    if result.shape[1:] != (HISTORY_LENGTH, ACTOR_OBSERVATION_DIM):
-        raise RuntimeError(f"actor history schema must be [N,{HISTORY_LENGTH},{ACTOR_OBSERVATION_DIM}]")
     return result
 
 
@@ -365,17 +387,12 @@ def teacher_static(env: Any, expected_dim: int | None = None) -> torch.Tensor:
         if _is_observation_shape_probe(env):
             return _shape_placeholder(env, TEACHER_STATIC_DIM)
         raise RuntimeError("teacher static privilege requested before domain initialization")
-    if domain.shape != (env.num_envs, TEACHER_STATIC_DOMAIN_DIM):
-        raise ValueError(f"normalized teacher static domain must have shape [N,{TEACHER_STATIC_DOMAIN_DIM}]")
     slope = torch.clamp(
         2.0 * (env.slope[:, None] - SLOPE_LOWER) / (SLOPE_UPPER - SLOPE_LOWER) - 1.0,
         -1.0,
         1.0,
     )
-    result = torch.cat((domain, slope), dim=-1)
-    if result.shape != (env.num_envs, TEACHER_STATIC_DIM):
-        raise RuntimeError(f"teacher static privilege must have shape [N,{TEACHER_STATIC_DIM}]")
-    return result
+    return torch.cat((domain, slope), dim=-1)
 
 
 def _slope_components(env: Any, vector_w: torch.Tensor) -> torch.Tensor:
@@ -392,14 +409,6 @@ def _slope_components(env: Any, vector_w: torch.Tensor) -> torch.Tensor:
 def dynamic_privileged_observation(env: Any) -> torch.Tensor:
     """Assemble the raw 21-D dynamic teacher/critic state in the slope frame."""
 
-    required = (
-        "path_tangent_w",
-        "path_lateral_w",
-        "path_normal_w",
-        "rickshaw_state",
-    )
-    if not all(hasattr(env, name) for name in required):
-        raise RuntimeError("dynamic privilege requested before MDP startup")
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     cart_velocity_w = cart.data.root_lin_vel_w
@@ -418,8 +427,6 @@ def dynamic_privileged_observation(env: Any) -> torch.Tensor:
         ),
         dim=-1,
     )
-    if result.shape != (env.num_envs, TEACHER_DYNAMIC_DIM):
-        raise RuntimeError(f"dynamic privilege must have shape [N,{TEACHER_DYNAMIC_DIM}]")
     return result
 
 
@@ -433,12 +440,8 @@ def teacher_dynamic_history(env: Any, expected_dim: int | None = None) -> torch.
         if _is_observation_shape_probe(env):
             return _shape_placeholder(env, HISTORY_LENGTH, TEACHER_DYNAMIC_DIM)
         raise RuntimeError("teacher dynamic history requested before MDP startup")
-    if state.history is None or state.history.shape != (
-        env.num_envs,
-        HISTORY_LENGTH,
-        TEACHER_DYNAMIC_DIM,
-    ):
-        raise RuntimeError(f"teacher dynamic history must have shape [N,{HISTORY_LENGTH},{TEACHER_DYNAMIC_DIM}]")
+    if state.history is None:
+        raise RuntimeError("teacher dynamic history is disabled for this environment")
     return state.history
 
 
@@ -462,8 +465,6 @@ def critic_privileged_state(env: Any, expected_dim: int | None = None) -> torch.
         ),
         dim=-1,
     )
-    if result.shape != (env.num_envs, CRITIC_PRIVILEGED_DIM):
-        raise RuntimeError(f"critic privilege must have shape [N,{CRITIC_PRIVILEGED_DIM}]")
     return result
 
 

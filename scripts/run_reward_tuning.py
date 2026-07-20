@@ -40,7 +40,6 @@ from g1_rickshaw_lab.reward_tuning import (  # noqa: E402
     policy_diagnostic_rank_metrics,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
-    CHECKPOINT_STAGE_KEY,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )

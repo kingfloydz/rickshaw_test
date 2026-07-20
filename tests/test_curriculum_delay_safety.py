@@ -17,6 +17,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     SpeedCommandSamplingCfg,
     advance_speed_command_resampling,
     initialize_domain_randomization,
+    resample_speed_command,
     sample_domain_parameters,
 )
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations import (
@@ -120,6 +121,18 @@ def test_speed_command_resamples_on_the_ten_second_timer() -> None:
         env.command_state.resampling_elapsed_s, torch.tensor([0.0, 9.98])
     )
     assert advance_speed_command_resampling(env, cfg).tolist() == [1]
+
+
+def test_speed_command_defaults_to_the_first_curriculum_level() -> None:
+    cfg = SpeedCommandSamplingCfg(standing_fraction=0.0)
+    env = SimpleNamespace(
+        command_state=CommandState.zeros(1024),
+    )
+
+    resample_speed_command(env, torch.arange(1024), cfg)
+
+    assert torch.all(env.command_state.v_sample >= 0.0)
+    assert torch.all(env.command_state.v_sample <= 0.1)
 
 
 def test_arm_hardware_limit_is_a_strict_ten_step_persistent_gate() -> None:

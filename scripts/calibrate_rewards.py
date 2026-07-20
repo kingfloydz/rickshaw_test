@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 from typing import Any
 
 from _isaaclab_wrappers import add_isaaclab_sources_to_path, add_project_source_to_path
@@ -19,6 +18,7 @@ from _isaaclab_wrappers import add_isaaclab_sources_to_path, add_project_source_
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 add_project_source_to_path()
 
+from g1_rickshaw_lab.provenance import atomic_torch_save  # noqa: E402
 from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     C1_NOMINAL_PHYSICS_FIELDS,
     GUIDE_REWARD_NORMALIZATION_SCALES,
@@ -55,8 +55,6 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
-    SLOPE_TERRAIN_LEVELS,
-    SLOPE_TERRAIN_TYPES,
 )
 
 
@@ -131,25 +129,9 @@ def _load_torch_mapping(path: Path) -> dict[str, Any]:
 
 
 def _write_raw_samples(output_dir: Path, artifact: dict[str, Any]) -> Path:
-    import torch
-
-    output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=output_dir, prefix=".reward_samples.", suffix=".tmp"
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        torch.save(artifact, temporary)
-        with temporary.open("rb+") as stream:
-            os.fsync(stream.fileno())
-        destination = output_dir / "reward_samples.pt"
-        os.replace(temporary, destination)
-        return destination
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    destination = output_dir.resolve() / "reward_samples.pt"
+    atomic_torch_save(artifact, destination)
+    return destination
 
 
 def _checkpoint_header(
@@ -203,17 +185,11 @@ def _assign_fixed_slopes(base_env: Any):
     import torch
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
-    slots = torch.arange(base_env.num_envs, device=base_env.device) % len(SIGNED_SLOPES)
-    levels = torch.tensor(
-        SLOPE_TERRAIN_LEVELS, device=base_env.device, dtype=torch.long
-    )[slots]
-    columns = torch.tensor(
-        SLOPE_TERRAIN_TYPES, device=base_env.device, dtype=torch.long
-    )[slots]
-    terrain = base_env.scene.terrain
-    terrain.terrain_levels[:] = levels
-    terrain.terrain_types[:] = columns
-    terrain.env_origins[:] = terrain.terrain_origins[levels, columns]
+    slots, levels, columns = mdp.balanced_slope_assignment(
+        base_env.num_envs,
+        device=base_env.device,
+    )
+    mdp.apply_terrain_assignment(base_env, levels, columns)
     mdp.update_slope_frame(base_env)
     expected = torch.tensor(SIGNED_SLOPES, device=base_env.device)[slots]
     if not torch.allclose(base_env.slope, expected, atol=1.0e-7, rtol=0.0):
@@ -311,10 +287,12 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     import gymnasium as gym
     import torch
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-    from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
+    from isaaclab_tasks.utils import load_cfg_from_registry
     from rsl_rl.runners import OnPolicyRunner
 
-    import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import (
+        G1RickshawDirectionalSlopeEnvCfg,
+    )
 
     checkpoint, _checkpoint_payload, training_configuration = _checkpoint_header(
         args.checkpoint
@@ -325,7 +303,12 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
             "reward calibration task differs from the checkpoint training task"
         )
     device = args.device
-    env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
+    env_cfg = G1RickshawDirectionalSlopeEnvCfg(
+        feasibility_path=os.fspath(args.feasibility_envelope.resolve()),
+        reset_pose_path=os.fspath(args.reset_poses.resolve()),
+    )
+    env_cfg.sim.device = device
+    env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = args.seed
     _configure_training(env_cfg)
     training_parameters = training_configuration["training_parameters"]
@@ -489,12 +472,6 @@ def main() -> int:
             artifact = _load_torch_mapping(args.samples)
             sample_path = args.samples
         else:
-            os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(
-                args.feasibility_envelope.resolve()
-            )
-            os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(
-                args.reset_poses.resolve()
-            )
             from isaaclab.app import AppLauncher
 
             args.headless = True

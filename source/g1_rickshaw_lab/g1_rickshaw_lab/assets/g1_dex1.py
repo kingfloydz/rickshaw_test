@@ -8,15 +8,14 @@ tests can run in a normal Python environment.
 
 from __future__ import annotations
 
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Iterable, Sequence
-import xml.etree.ElementTree as ET
 
+from g1_rickshaw_lab.project_paths import ASSET_ROOT
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-ASSET_ROOT = REPOSITORY_ROOT / "assets"
 G1_DEX1_ASSET_DIR = ASSET_ROOT / "g1_dex1"
 G1_DEX1_URDF_PATH = G1_DEX1_ASSET_DIR / "g1_29dof_mode_15_with_dex1_1.urdf"
 G1_DEX1_USD_PATH = G1_DEX1_ASSET_DIR / "g1_29dof_mode_15_with_dex1_1.usd"
@@ -207,17 +206,14 @@ def partition_joint_names(joint_names: Iterable[str]) -> JointPartition:
     actual_counts = {key: len(value) for key, value in groups.items()}
     if actual_counts != EXPECTED_GROUP_COUNTS:
         raise AssetValidationError(
-            f"Unexpected G1+Dex joint partition: {actual_counts}; "
-            f"expected {EXPECTED_GROUP_COUNTS}"
+            f"Unexpected G1+Dex joint partition: {actual_counts}; expected {EXPECTED_GROUP_COUNTS}"
         )
 
     flattened = lower_ids + waist_ids + arm_ids + dex_ids
     if len(flattened) != len(set(flattened)):
         raise AssetValidationError("G1/Dex joint regex groups overlap")
     if len(flattened) != COMBINED_DOF_COUNT:
-        raise AssetValidationError(
-            f"Expected {COMBINED_DOF_COUNT} classified joints, got {len(flattened)}"
-        )
+        raise AssetValidationError(f"Expected {COMBINED_DOF_COUNT} classified joints, got {len(flattened)}")
 
     def selected(indices: tuple[int, ...]) -> tuple[str, ...]:
         return tuple(names[index] for index in indices)
@@ -291,9 +287,7 @@ def validate_g1_urdf_inertials(
         if mass_element is not None:
             actual = float(mass_element.attrib["value"])
             if abs(actual - RETAINED_SENSOR_LINK_MASS) > mass_tolerance:
-                issues.append(
-                    f"{name}: expected frame mass {RETAINED_SENSOR_LINK_MASS}, got {actual}"
-                )
+                issues.append(f"{name}: expected frame mass {RETAINED_SENSOR_LINK_MASS}, got {actual}")
 
     if abs(total_mass - G1_TOTAL_MASS) > mass_tolerance:
         issues.append(f"whole-robot mass: expected {G1_TOTAL_MASS}, got {total_mass}")

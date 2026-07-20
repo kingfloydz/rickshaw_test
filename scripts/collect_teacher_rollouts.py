@@ -259,12 +259,9 @@ def main() -> int:  # noqa: C901
         def install_fixed_rollout_assignment() -> None:
             """Install the deterministic configured-slope allocation before reset."""
 
-            terrain = base_env.scene.terrain
             levels = fixed_assignment["terrain_level"]
             terrain_types = fixed_assignment["terrain_type"]
-            terrain.terrain_levels.copy_(levels)
-            terrain.terrain_types.copy_(terrain_types)
-            terrain.env_origins.copy_(terrain.terrain_origins[levels, terrain_types])
+            mdp.apply_terrain_assignment(base_env, levels, terrain_types)
             mdp.update_slope_frame(base_env)
 
         def assert_fixed_rollout_assignment() -> None:

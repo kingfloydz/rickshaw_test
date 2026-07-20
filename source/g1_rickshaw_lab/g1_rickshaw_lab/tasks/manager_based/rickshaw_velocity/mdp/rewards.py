@@ -8,11 +8,8 @@ import torch
 
 from g1_rickshaw_lab.policy_schema import ACTION_SCALE
 
-
 REWARD_WEIGHTS = {
     "track_speed_exp": 1.0,
-    "track_speed_precise_exp": 2.0,
-    "speed_error_pseudo_huber": -0.5,
     "lateral_error_l2": -0.5,
     "heading_error_l2": -0.5,
     "zmp_margin_barrier": -2.0,
@@ -33,8 +30,6 @@ REWARD_WEIGHTS = {
 
 # Every reward callable returns a dimensionless value; SI scales are explicit.
 SPEED_ERROR_SCALE_MPS = 0.5
-SPEED_PRECISE_ERROR_SCALE_MPS = 0.25
-SPEED_PSEUDO_HUBER_SCALE_MPS = 0.5
 LATERAL_ERROR_SCALE_M = 0.30
 HEADING_ERROR_SCALE_RAD = 0.30
 ZMP_MARGIN_SCALE_M = 0.02
@@ -46,7 +41,7 @@ FEET_LANDING_TARGET_AIR_TIME_S = 0.30
 FEET_LANDING_SIGMA_S = 0.12
 FEET_MAX_AIR_TIME_S = 0.50
 FEET_AIR_TIME_EXCESS_SCALE_S = 0.20
-FEET_LANDING_TRACKING_ERROR_MPS = 0.30
+MOVING_COMMAND_THRESHOLD_MPS = 0.05
 FEET_SLIDE_NORMALIZER_MPS = 1.0
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
@@ -58,14 +53,6 @@ JOINT_LIMIT_NORMALIZER_RAD = 1.0
 
 REWARD_NORMALIZATION_SCALES = {
     "track_speed_exp": {"scale": SPEED_ERROR_SCALE_MPS, "unit": "m/s"},
-    "track_speed_precise_exp": {
-        "scale": SPEED_PRECISE_ERROR_SCALE_MPS,
-        "unit": "m/s",
-    },
-    "speed_error_pseudo_huber": {
-        "scale": SPEED_PSEUDO_HUBER_SCALE_MPS,
-        "unit": "m/s",
-    },
     "lateral_error_l2": {"scale": LATERAL_ERROR_SCALE_M, "unit": "m"},
     "heading_error_l2": {"scale": HEADING_ERROR_SCALE_RAD, "unit": "rad"},
     "zmp_margin_barrier": {"scale": ZMP_MARGIN_SCALE_M, "unit": "m"},
@@ -106,23 +93,13 @@ REWARD_NORMALIZATION_SCALES = {
 }
 
 
-def track_speed_exp_value(v_ref: torch.Tensor, v_robot_s: torch.Tensor) -> torch.Tensor:
-    return torch.exp(-torch.square((v_ref - v_robot_s) / SPEED_ERROR_SCALE_MPS))
-
-
-def track_speed_precise_exp_value(
-    v_ref: torch.Tensor, v_robot_s: torch.Tensor
+def track_speed_exp_value(
+    v_ref: torch.Tensor,
+    v_robot_s: torch.Tensor,
+    v_robot_l: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.exp(
-        -torch.square((v_ref - v_robot_s) / SPEED_PRECISE_ERROR_SCALE_MPS)
-    )
-
-
-def speed_error_pseudo_huber_value(
-    v_ref: torch.Tensor, v_robot_s: torch.Tensor
-) -> torch.Tensor:
-    normalized_error = (v_ref - v_robot_s) / SPEED_PSEUDO_HUBER_SCALE_MPS
-    return torch.sqrt(1.0 + torch.square(normalized_error)) - 1.0
+    velocity_error = torch.square(v_ref - v_robot_s) + torch.square(v_robot_l)
+    return torch.exp(-velocity_error / SPEED_ERROR_SCALE_MPS**2)
 
 
 def lateral_error_l2_value(lateral_error: torch.Tensor) -> torch.Tensor:
@@ -221,13 +198,12 @@ def feet_landing_value(
     first_contact: torch.Tensor,
     last_air_time: torch.Tensor,
     v_ref: torch.Tensor,
-    v_robot_s: torch.Tensor,
 ) -> torch.Tensor:
     """Score the previous swing only when exactly one foot lands this step."""
 
     contact = first_contact.to(last_air_time.dtype)
     single_landing = torch.sum(first_contact, dim=-1) == 1
-    tracking = (v_robot_s > 0.1) & (torch.abs(v_ref - v_robot_s) < FEET_LANDING_TRACKING_ERROR_MPS)
+    moving = torch.abs(v_ref) > MOVING_COMMAND_THRESHOLD_MPS
     landing_kernel = torch.exp(
         -torch.square(
             (last_air_time - FEET_LANDING_TARGET_AIR_TIME_S) / FEET_LANDING_SIGMA_S
@@ -237,7 +213,7 @@ def feet_landing_value(
         torch.relu(last_air_time - FEET_MAX_AIR_TIME_S)
         / FEET_AIR_TIME_EXCESS_SCALE_S
     )
-    gated_kernel = landing_kernel * tracking[:, None].to(last_air_time.dtype)
+    gated_kernel = landing_kernel * moving[:, None].to(last_air_time.dtype)
     return torch.sum(contact * (gated_kernel - overlong), dim=-1) * single_landing.to(
         last_air_time.dtype
     )
@@ -268,18 +244,10 @@ def pelvis_height_limits_l2_value(
 
 
 def track_speed_exp(env: Any) -> torch.Tensor:
-    return track_speed_exp_value(env.command_state.v_ref, env.policy_robot_speed_s)
-
-
-def track_speed_precise_exp(env: Any) -> torch.Tensor:
-    return track_speed_precise_exp_value(
-        env.command_state.v_ref, env.policy_robot_speed_s
-    )
-
-
-def speed_error_pseudo_huber(env: Any) -> torch.Tensor:
-    return speed_error_pseudo_huber_value(
-        env.command_state.v_ref, env.policy_robot_speed_s
+    return track_speed_exp_value(
+        env.command_state.v_ref,
+        env.policy_robot_speed_s,
+        env.policy_robot_speed_l,
     )
 
 
@@ -337,7 +305,7 @@ def feet_landing(
     env: Any,
     sensor_cfg: Any | None = None,
 ) -> torch.Tensor:
-    """Reward a clean landing event while actual speed tracks the reference."""
+    """Reward a clean landing while a moving command is active."""
 
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
@@ -346,7 +314,6 @@ def feet_landing(
         sensor.compute_first_contact(env.step_dt)[:, body_ids],
         sensor.data.last_air_time[:, body_ids],
         env.command_state.v_ref,
-        env.policy_robot_speed_s,
     )
 
 
@@ -494,8 +461,7 @@ __all__ = [
     "REWARD_NORMALIZATION_SCALES",
     "REWARD_WEIGHTS",
     "SPEED_ERROR_SCALE_MPS",
-    "SPEED_PRECISE_ERROR_SCALE_MPS",
-    "SPEED_PSEUDO_HUBER_SCALE_MPS",
+    "MOVING_COMMAND_THRESHOLD_MPS",
     "TERRAIN_NORMAL_VELOCITY_SCALE_MPS",
     "ZMP_MARGIN_SCALE_M",
     "fat2_prior_exp",
@@ -527,10 +493,6 @@ __all__ = [
     "terrain_normal_velocity_l2_value",
     "track_speed_exp",
     "track_speed_exp_value",
-    "track_speed_precise_exp",
-    "track_speed_precise_exp_value",
-    "speed_error_pseudo_huber",
-    "speed_error_pseudo_huber_value",
     "zmp_margin_barrier",
     "zmp_margin_barrier_value",
 ]

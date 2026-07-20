@@ -71,7 +71,6 @@ from g1_rickshaw_lab.configuration import (  # noqa: E402
     load_feasibility_envelope,
     load_reset_pose_library,
 )
-from g1_rickshaw_lab.slope_contract import terrain_index_for_gradient  # noqa: E402
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import env_cfg as task_cfg  # noqa: E402
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp  # noqa: E402
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import GRAVITY  # noqa: E402
@@ -154,13 +153,7 @@ class DynamicsValidationEnvCfg(task_cfg.G1RickshawDirectionalSlopePlayEnvCfg):
 
 def _set_slopes(env) -> None:
     slopes = (0.0, 0.0, *CONDITION_SLOPES)
-    indices = [terrain_index_for_gradient(slope) for slope in slopes]
-    levels = torch.tensor([item[0] for item in indices], device=env.device)
-    columns = torch.tensor([item[1] for item in indices], device=env.device)
-    terrain = env.scene.terrain
-    terrain.terrain_levels.copy_(levels)
-    terrain.terrain_types.copy_(columns)
-    terrain.env_origins.copy_(terrain.terrain_origins[levels, columns])
+    mdp.assign_terrain_slopes(env, slopes)
 
 
 def _linear_slope(time: torch.Tensor, value: torch.Tensor) -> float:
@@ -225,9 +218,10 @@ def _run() -> tuple[dict[str, object], list[str], dict[str, object]]:
 
     feasibility_path = args.feasibility.resolve()
     reset_pose_path = args.reset_poses.resolve()
-    os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(feasibility_path)
-    os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(reset_pose_path)
-    cfg = DynamicsValidationEnvCfg()
+    cfg = DynamicsValidationEnvCfg(
+        feasibility_path=os.fspath(feasibility_path),
+        reset_pose_path=os.fspath(reset_pose_path),
+    )
     if Path(cfg.feasibility_path).resolve() != feasibility_path:
         raise RuntimeError("environment did not load the requested feasibility envelope")
     if Path(cfg.reset_pose_path).resolve() != reset_pose_path:

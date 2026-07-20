@@ -25,7 +25,6 @@ from g1_rickshaw_lab.configuration import (  # noqa: E402
     load_feasibility_envelope,
     load_reset_pose_library,
 )
-from g1_rickshaw_lab.slope_contract import terrain_index_for_gradient  # noqa: E402
 from g1_rickshaw_lab.validation import (  # noqa: E402
     FEASIBILITY_MEASUREMENT_SOURCES,
     FEASIBILITY_MINIMUM_PASS_FRACTION,
@@ -469,9 +468,10 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
     else:
         plan = full_plan
 
-    os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(candidate_path)
-    os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(reset_pose_path)
-    cfg = G1RickshawDirectionalSlopePlayEnvCfg()
+    cfg = G1RickshawDirectionalSlopePlayEnvCfg(
+        feasibility_path=os.fspath(candidate_path),
+        reset_pose_path=os.fspath(reset_pose_path),
+    )
     if Path(cfg.feasibility_path).resolve() != candidate_path:
         raise RuntimeError("environment did not load the requested candidate envelope")
     if Path(cfg.reset_pose_path).resolve() != reset_pose_path:
@@ -885,13 +885,7 @@ def _run_scan_in_kit(args: argparse.Namespace, app_args: argparse.Namespace) -> 
         return rows
 
     try:
-        indices = [terrain_index_for_gradient(slope) for slope in SLOPE_GRADIENTS]
-        levels = torch.tensor([item[0] for item in indices], device=base.device)
-        columns = torch.tensor([item[1] for item in indices], device=base.device)
-        terrain = base.scene.terrain
-        terrain.terrain_levels.copy_(levels)
-        terrain.terrain_types.copy_(columns)
-        terrain.env_origins.copy_(terrain.terrain_origins[levels, columns])
+        mdp.assign_terrain_slopes(base, SLOPE_GRADIENTS)
         env.reset(seed=args.seed)
 
         with torch.inference_mode():

@@ -15,5 +15,4 @@ keywords = ["isaaclab", "unitree", "g1", "locomotion", "rickshaw"]
 reloadable = false
 
 [[python.module]]
-name = "g1_rickshaw_lab"
-
+name = "g1_rickshaw_lab.tasks"

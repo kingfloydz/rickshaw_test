@@ -55,6 +55,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.events import (
     D6ConstraintManager,
     HandleConstraintCfg,
     RickshawPoseTargetCfg,
+    SpeedCommandSamplingCfg,
     _write_effective_terrain_friction_to_physx,
     _write_payload_to_physx,
     d6_spatial_impulse_magnitudes,
@@ -501,6 +502,9 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     env = SimpleNamespace(
         device="cpu",
         action_manager=SimpleNamespace(_terms={"lower": action_term}),
+        cfg=SimpleNamespace(
+            policy_update=SimpleNamespace(command_sampling=SpeedCommandSamplingCfg()),
+        ),
     )
     monkeypatch.setattr(
         events_module,
@@ -510,7 +514,7 @@ def test_closed_chain_reset_finishes_on_normal_controller(monkeypatch) -> None:
     monkeypatch.setattr(
         events_module,
         "resample_speed_command",
-        lambda _env, ids: command_samples.append(ids.clone()),
+        lambda _env, ids, _cfg: command_samples.append(ids.clone()),
     )
 
     finish_closed_chain_reset(env, env_ids)

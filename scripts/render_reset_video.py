@@ -8,27 +8,19 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-import sys
 
+from _isaaclab_wrappers import (
+    REPOSITORY_ROOT,
+    add_isaaclab_sources_to_path,
+    add_project_source_to_path,
+)
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "source" / "g1_rickshaw_lab"
-ISAACLAB_ROOT = Path(os.environ.get("ISAACLAB_PATH", ROOT.parent / "IsaacLab"))
-for path in (
-    SOURCE,
-    ISAACLAB_ROOT / "source" / "isaaclab",
-    ISAACLAB_ROOT / "source" / "isaaclab_assets",
-    ISAACLAB_ROOT / "source" / "isaaclab_tasks",
-    ISAACLAB_ROOT / "source" / "isaaclab_rl",
-):
-    if path.is_dir() and str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+ROOT = REPOSITORY_ROOT
+add_isaaclab_sources_to_path()
+add_project_source_to_path()
 
 from isaaclab.app import AppLauncher  # noqa: E402
-from g1_rickshaw_lab.slope_contract import (  # noqa: E402
-    SLOPE_GRADIENTS,
-    terrain_index_for_gradient,
-)
+from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS  # noqa: E402
 
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -49,23 +41,6 @@ if args.width <= 0 or args.height <= 0:
 args.enable_cameras = True
 launcher = AppLauncher(args)
 simulation_app = launcher.app
-
-
-def _terrain_indices(slopes: tuple[float, ...]) -> tuple[list[int], list[int]]:
-    indices = tuple(terrain_index_for_gradient(slope) for slope in slopes)
-    return [level for level, _ in indices], [terrain_type for _, terrain_type in indices]
-
-
-def _assign_slopes(base, slopes: tuple[float, ...]) -> None:
-    import torch
-
-    levels, columns = _terrain_indices(slopes)
-    terrain = base.scene.terrain
-    level_tensor = torch.tensor(levels, device=base.device, dtype=torch.long)
-    column_tensor = torch.tensor(columns, device=base.device, dtype=torch.long)
-    terrain.terrain_levels.copy_(level_tensor)
-    terrain.terrain_types.copy_(column_tensor)
-    terrain.env_origins.copy_(terrain.terrain_origins[level_tensor, column_tensor])
 
 
 def _slope_label(slope: float) -> str:
@@ -105,6 +80,9 @@ def main() -> None:
         G1RickshawDirectionalSlopePlayEnvCfg,
         PLAY_TASK_ID,
     )
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
+        assign_terrain_slopes,
+    )
 
     cfg = G1RickshawDirectionalSlopePlayEnvCfg()
     cfg.scene.num_envs = len(SLOPE_GRADIENTS)
@@ -139,10 +117,10 @@ def main() -> None:
     manifest: list[dict[str, object]] = []
 
     try:
-        _assign_slopes(base, SLOPE_GRADIENTS)
+        assign_terrain_slopes(base, SLOPE_GRADIENTS)
         for index, slope in enumerate(SLOPE_GRADIENTS):
             env.reset(seed=args.seed)
-            _assign_slopes(base, SLOPE_GRADIENTS)
+            assign_terrain_slopes(base, SLOPE_GRADIENTS)
             env.reset(seed=args.seed)
 
             robot_pos = base.scene["robot"].data.root_pos_w[index].detach().cpu().numpy()

@@ -6,15 +6,75 @@ from collections.abc import Sequence
 from typing import Any
 
 import torch
+from isaaclab.envs import ManagerBasedRLEnv
 from isaacsim.core.simulation_manager import SimulationManager
 
-from isaaclab.envs import ManagerBasedRLEnv
-
 from .mdp.events import bootstrap_reset_observation
+from .runtime import RickshawRuntime
 
 
 class G1RickshawRLEnv(ManagerBasedRLEnv):
     """Manager environment whose explicit reset returns a real policy frame."""
+
+    rickshaw_runtime: RickshawRuntime
+
+    @property
+    def command_state(self):
+        return self.rickshaw_runtime.command
+
+    @property
+    def path_state(self):
+        return self.rickshaw_runtime.path
+
+    @property
+    def rickshaw_state(self):
+        return self.rickshaw_runtime.cart
+
+    @property
+    def stability_state(self):
+        return self.rickshaw_runtime.stability
+
+    @property
+    def action_state(self):
+        return self.rickshaw_runtime.action
+
+    @property
+    def analytic_force_state(self):
+        return self.rickshaw_runtime.analytic_force
+
+    @property
+    def cart_interaction_wrench_state(self):
+        return self.rickshaw_runtime.cart_interaction_wrench
+
+    @property
+    def observation_history_state(self):
+        return self.rickshaw_runtime.observation_history
+
+    @property
+    def teacher_dynamic_history_state(self):
+        return self.rickshaw_runtime.teacher_dynamic_history
+
+    @property
+    def termination_state(self):
+        return self.rickshaw_runtime.termination
+
+    @property
+    def termination_cause_state(self):
+        return self.rickshaw_runtime.termination_causes
+
+    def read_d6_reaction_residual(self):
+        return self.d6_reaction_adapter.read()
+
+    def _g1_rickshaw_pre_physics_step(self) -> None:
+        from .mdp.dynamics import accumulate_cart_interaction_wrench, apply_rolling_resistance
+
+        rolling_force_w = apply_rolling_resistance(self, self.rickshaw_runtime.rolling_resistance_cfg)
+        accumulate_cart_interaction_wrench(self, rolling_force_w)
+
+    def write_closed_chain_reset_state(self, env_ids: torch.Tensor) -> None:
+        from .mdp.events import write_closed_chain_reset_state
+
+        write_closed_chain_reset_state(self, env_ids)
 
     def _bootstrap_reset_observations(self, env_ids: torch.Tensor) -> None:
         bootstrap_reset_observation(self, env_ids, self.cfg.policy_update)

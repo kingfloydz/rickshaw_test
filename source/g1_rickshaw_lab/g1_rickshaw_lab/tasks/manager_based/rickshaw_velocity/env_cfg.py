@@ -10,6 +10,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -30,17 +31,18 @@ from g1_rickshaw_lab.assets.rickshaw import (
 )
 from g1_rickshaw_lab.configuration import (
     G1_JOINT_ORDER,
-    load_feasibility_envelope,
-    load_reset_pose_library,
 )
+from g1_rickshaw_lab.project_paths import CONFIG_ROOT
+from g1_rickshaw_lab.task_artifacts import load_task_artifacts
 
 from . import mdp
 from .closed_chain import ReplicatedDualD6SpawnerCfg
+from .mdp.isaac_actions import FilteredJointPositionActionCfg
+from .task_spec import HandleConstraintCfg, RickshawPoseTargetCfg
 from .terrain_cfg import DIRECTIONAL_SLOPES_CFG
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
-DEFAULT_FEASIBILITY_PATH = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
-DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
+DEFAULT_FEASIBILITY_PATH = CONFIG_ROOT / "feasibility_envelope.yaml"
+DEFAULT_RESET_POSES_PATH = CONFIG_ROOT / "reset_poses.yaml"
 LOWER_JOINT_NAMES = G1_JOINT_ORDER[:12]
 WAIST_JOINT_NAMES = G1_JOINT_ORDER[12:15]
 ARM_JOINT_NAMES = G1_JOINT_ORDER[15:29]
@@ -100,10 +102,6 @@ TEACHER_DYNAMIC_DIM = mdp.TEACHER_DYNAMIC_DIM
 CRITIC_PRIVILEGED_DIM = mdp.CRITIC_PRIVILEGED_DIM
 
 
-def _configured_path(env_var: str, default: Path) -> Path:
-    return Path(os.environ.get(env_var, os.fspath(default)))
-
-
 def _range_pairs(envelope) -> dict[str, tuple[float, float]]:
     return {name: (interval.minimum, interval.maximum) for name, interval in envelope.ranges.items()}
 
@@ -160,7 +158,7 @@ class G1RickshawSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Three fixed action groups totaling exactly 29 policy joints."""
 
-    lower = mdp.FilteredJointPositionActionCfg(
+    lower = FilteredJointPositionActionCfg(
         asset_name="robot",
         joint_names=list(LOWER_JOINT_NAMES),
         preserve_order=True,
@@ -169,7 +167,7 @@ class ActionsCfg:
         reference_indices=tuple(range(0, 12)),
         physics_hook_owner=True,
     )
-    waist = mdp.FilteredJointPositionActionCfg(
+    waist = FilteredJointPositionActionCfg(
         asset_name="robot",
         joint_names=list(WAIST_JOINT_NAMES),
         preserve_order=True,
@@ -177,7 +175,7 @@ class ActionsCfg:
         use_default_offset=False,
         reference_indices=tuple(range(12, 15)),
     )
-    upper = mdp.FilteredJointPositionActionCfg(
+    upper = FilteredJointPositionActionCfg(
         asset_name="robot",
         joint_names=list(ARM_JOINT_NAMES),
         preserve_order=True,
@@ -273,14 +271,6 @@ class RewardsCfg:
     """Reward terms from guide section 11.1."""
 
     track_speed_exp = RewTerm(func=mdp.track_speed_exp, weight=mdp.REWARD_WEIGHTS["track_speed_exp"])
-    track_speed_precise_exp = RewTerm(
-        func=mdp.track_speed_precise_exp,
-        weight=mdp.REWARD_WEIGHTS["track_speed_precise_exp"],
-    )
-    speed_error_pseudo_huber = RewTerm(
-        func=mdp.speed_error_pseudo_huber,
-        weight=mdp.REWARD_WEIGHTS["speed_error_pseudo_huber"],
-    )
     lateral_error_l2 = RewTerm(func=mdp.lateral_error_l2, weight=mdp.REWARD_WEIGHTS["lateral_error_l2"])
     heading_error_l2 = RewTerm(func=mdp.heading_error_l2, weight=mdp.REWARD_WEIGHTS["heading_error_l2"])
     zmp_margin_barrier = RewTerm(
@@ -364,6 +354,14 @@ class TerminationsCfg:
 
 
 @configclass
+class CurriculumCfg:
+    speed_command_levels = CurrTerm(
+        func=mdp.speed_command_levels,
+        params={"reward_term_name": "track_speed_exp"},
+    )
+
+
+@configclass
 class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
     """Training configuration for the registered G1 rickshaw task."""
 
@@ -380,8 +378,9 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    curriculum = None
+    curriculum: CurriculumCfg = CurriculumCfg()
     observation_noise_enabled: bool = True
+    shuffle_slopes: bool = True
 
     feasibility_path: str = os.fspath(DEFAULT_FEASIBILITY_PATH)
     reset_pose_path: str = os.fspath(DEFAULT_RESET_POSES_PATH)
@@ -397,13 +396,12 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.__dict__["__reset_pose_library"] = value
 
     def __post_init__(self):
-        self.events.randomize_slopes.params = {
-            "shuffle": os.environ.get("G1_RICKSHAW_RENDER_ORDERED_SLOPES") != "1"
-        }
-        feasibility_path = _configured_path("G1_RICKSHAW_FEASIBILITY_ENVELOPE", Path(self.feasibility_path))
-        reset_pose_path = _configured_path("G1_RICKSHAW_RESET_POSES", Path(self.reset_pose_path))
-        envelope = load_feasibility_envelope(feasibility_path)
-        reset_library = load_reset_pose_library(reset_pose_path)
+        self.events.randomize_slopes.params = {"shuffle": self.shuffle_slopes}
+        feasibility_path = Path(self.feasibility_path).resolve()
+        reset_pose_path = Path(self.reset_pose_path).resolve()
+        artifacts = load_task_artifacts(os.fspath(feasibility_path), os.fspath(reset_pose_path))
+        envelope = artifacts.feasibility
+        reset_library = artifacts.reset_poses
         calibration = dict(envelope.calibration)
         ranges = _range_pairs(envelope)
 
@@ -426,7 +424,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 "wheel.right_damping": RICKSHAW_URDF_SPEC.wheel_joint_damping,
             },
         )
-        self.handle_constraint = mdp.HandleConstraintCfg(
+        self.handle_constraint = HandleConstraintCfg(
             robot_body_paths=tuple(_cal(calibration, "d6.robot_body_paths")),
             hitch_body_paths=tuple(_cal(calibration, "d6.hitch_body_paths")),
             grasp_local_positions=(
@@ -455,7 +453,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
                 handle_constraint=self.handle_constraint,
             ),
         )
-        self.rickshaw_pose = mdp.RickshawPoseTargetCfg(
+        self.rickshaw_pose = RickshawPoseTargetCfg(
             hitch_height_target=_cal(calibration, "rickshaw_pose.hitch_height_target"),
             hitch_height_tolerance=_cal(calibration, "rickshaw_pose.hitch_height_tolerance"),
             hitch_vertical_speed_tolerance=_cal(calibration, "rickshaw_pose.hitch_vertical_speed_tolerance"),
@@ -577,6 +575,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.wheel_contacts.update_period = self.sim.dt
         # Keep canonical slope rows in the generated mesh; runtime curriculum is disabled.
         self.scene.terrain.terrain_generator.curriculum = True
+        _rebind_manager_cfg_references(self)
 
 
 @configclass
@@ -586,8 +585,11 @@ class G1RickshawDirectionalSlopePlayEnvCfg(G1RickshawDirectionalSlopeEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 64
+        self.curriculum = None
+        self.policy_update.command_sampling.maximum = self.policy_update.command_sampling.limit_maximum
         self.domain_randomization.enabled = False
         self.observation_noise_enabled = False
+        _rebind_manager_cfg_references(self)
 
 
 def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) -> None:
@@ -602,20 +604,6 @@ def _rebind_manager_cfg_references(env_cfg: G1RickshawDirectionalSlopeEnvCfg) ->
     env_cfg.events.initialize_domain.params["cfg"] = env_cfg.domain_randomization
     env_cfg.events.policy_interval.params["cfg"] = env_cfg.policy_update
     env_cfg.terminations.refresh_policy_state.params["cfg"] = env_cfg.policy_update
-
-
-def _install_post_init_rebind(config_type) -> None:
-    original_post_init = config_type.__post_init__
-
-    def _post_init_with_rebind(self) -> None:
-        original_post_init(self)
-        _rebind_manager_cfg_references(self)
-
-    config_type.__post_init__ = _post_init_with_rebind
-
-
-_install_post_init_rebind(G1RickshawDirectionalSlopeEnvCfg)
-_install_post_init_rebind(G1RickshawDirectionalSlopePlayEnvCfg)
 
 
 __all__ = [

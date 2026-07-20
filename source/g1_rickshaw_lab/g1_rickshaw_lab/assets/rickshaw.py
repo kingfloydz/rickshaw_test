@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass
-from pathlib import Path
 import math
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
+from ..project_paths import ASSET_ROOT
 from ..rickshaw_spec import (
     HITCH_HALF_WIDTH,
     HITCH_X,
@@ -14,16 +14,14 @@ from ..rickshaw_spec import (
     RICKSHAW_CENTER_OF_MASS,
     RICKSHAW_TOTAL_MASS,
     RICKSHAW_URDF_SPEC,
-    RickshawUrdfSpec,
     WHEEL_JOINT_DAMPING,
     WHEEL_RADIUS,
     WHEEL_TRACK,
     WHEEL_WIDTH,
+    RickshawUrdfSpec,
 )
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-RICKSHAW_ASSET_DIR = REPOSITORY_ROOT / "assets" / "rickshaw"
+RICKSHAW_ASSET_DIR = ASSET_ROOT / "rickshaw"
 RICKSHAW_URDF_PATH = RICKSHAW_ASSET_DIR / "rickshaw.urdf"
 RICKSHAW_USD_PATH = RICKSHAW_ASSET_DIR / "rickshaw.usd"
 RICKSHAW_MESH_PATHS = (
@@ -53,35 +51,13 @@ class RickshawAssetValidationError(ValueError):
 try:
     import isaaclab.sim as sim_utils
     from isaaclab.assets import ArticulationCfg
-    from isaaclab.utils import configclass
 except ModuleNotFoundError as exc:  # Expected for pure unit-test installs.
     sim_utils = None
     ArticulationCfg = None
     _ISAACLAB_IMPORT_ERROR: ModuleNotFoundError | None = exc
 
-    def configclass(cls):
-        return dataclass(cls, kw_only=True)
-
 else:
     _ISAACLAB_IMPORT_ERROR = None
-
-
-@configclass
-class HandleConstraintCfg:
-    """D6 drive/limit values that must come from handle calibration.
-
-    The hitch-side local frame is identity. Dex-side local frames are calibrated
-    grasp centers. A physically free rotation axis must not be assigned a drive.
-    """
-
-    linear_stiffness: float = MISSING
-    linear_damping: float = MISSING
-    angular_stiffness: float = MISSING
-    angular_damping: float = MISSING
-    max_force: float = MISSING
-    max_torque: float = MISSING
-    linear_limit: float = MISSING
-    angular_limit: float = MISSING
 
 
 HANDLE_CONSTRAINT_CALIBRATION_REQUIRED = (
@@ -103,8 +79,7 @@ HANDLE_CONSTRAINT_CALIBRATION_REQUIRED = (
 def require_isaaclab() -> None:
     if ArticulationCfg is None:
         raise IsaacLabUnavailableError(
-            "RICKSHAW_CFG requires Isaac Lab. Launch through Isaac Sim/Isaac Lab "
-            "after installing the extension."
+            "RICKSHAW_CFG requires Isaac Lab. Launch through Isaac Sim/Isaac Lab after installing the extension."
         ) from _ISAACLAB_IMPORT_ERROR
 
 
@@ -114,8 +89,7 @@ def build_rickshaw_cfg(*, require_usd: bool = False):
     require_isaaclab()
     if require_usd and not RICKSHAW_USD_PATH.is_file():
         raise FileNotFoundError(
-            f"Missing rickshaw USD: {RICKSHAW_USD_PATH}. Convert "
-            f"{RICKSHAW_URDF_PATH} with --joint-target-type none."
+            f"Missing rickshaw USD: {RICKSHAW_USD_PATH}. Convert {RICKSHAW_URDF_PATH} with --joint-target-type none."
         )
 
     return ArticulationCfg(
@@ -155,9 +129,7 @@ def _close(actual: float, expected: float, tolerance: float) -> bool:
     return math.isclose(actual, expected, rel_tol=0.0, abs_tol=tolerance)
 
 
-def _check_scalar(
-    issues: list[str], label: str, actual: float, expected: float, tolerance: float
-) -> None:
+def _check_scalar(issues: list[str], label: str, actual: float, expected: float, tolerance: float) -> None:
     if not _close(actual, expected, tolerance):
         issues.append(f"{label}: expected {expected}, got {actual}")
 
@@ -315,8 +287,7 @@ def validate_rickshaw_urdf(
             masses_and_positions.append((_mass(links[link_name]), _origin_xyz(joints[joint_name], "origin")))
         total_mass = sum(mass for mass, _ in masses_and_positions)
         total_com = tuple(
-            sum(mass * position[axis] for mass, position in masses_and_positions) / total_mass
-            for axis in range(3)
+            sum(mass * position[axis] for mass, position in masses_and_positions) / total_mass for axis in range(3)
         )
         _check_scalar(issues, "total mass", total_mass, spec.total_mass, tolerance)
         for index, (actual, expected) in enumerate(zip(total_com, spec.center_of_mass)):
@@ -336,9 +307,8 @@ def validate_rickshaw_urdf(
         base_collision_mesh = links[BASE_LINK_NAME].find("collision/geometry/mesh")
         if base_collision_mesh is None:
             issues.append("base_link collision must use a simplified convex mesh/decomposition")
-        elif (
-            base_visual_mesh is not None
-            and base_collision_mesh.attrib.get("filename") == base_visual_mesh.attrib.get("filename")
+        elif base_visual_mesh is not None and base_collision_mesh.attrib.get("filename") == base_visual_mesh.attrib.get(
+            "filename"
         ):
             issues.append("base_link collision reuses the high-detail visual mesh")
 
@@ -359,8 +329,7 @@ def validate_rickshaw_urdf(
                 # A URDF cylinder is Z-aligned; +/- pi/2 about X maps it to Y.
                 if not _close(abs(roll), math.pi / 2.0, tolerance) or not _close(pitch, 0.0, tolerance):
                     issues.append(
-                        f"{name} collision cylinder is not Y-aligned: "
-                        f"rpy={collision_origin.attrib.get('rpy')}"
+                        f"{name} collision cylinder is not Y-aligned: rpy={collision_origin.attrib.get('rpy')}"
                     )
             except (KeyError, ValueError) as exc:
                 issues.append(f"{name} invalid collision cylinder: {exc}")
@@ -392,7 +361,6 @@ __all__ = [
     "HITCH_LINK_NAMES",
     "HITCH_X",
     "HITCH_Z",
-    "HandleConstraintCfg",
     "RICKSHAW_ASSET_DIR",
     "RICKSHAW_CENTER_OF_MASS",
     "RICKSHAW_CFG",

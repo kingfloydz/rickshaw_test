@@ -3128,27 +3128,22 @@ def _validate_arguments(args: argparse.Namespace) -> None:
 DEX_FORWARD_INITIAL_MAX_LATERAL = 0.01
 DEX_FORWARD_ROLLOUT_MAX_LATERAL = 0.03
 
-def _terrain_indices(slopes: tuple[float, ...]) -> tuple[list[int], list[int]]:
-    indices = tuple(terrain_index_for_gradient(slope) for slope in slopes)
-    return [level for level, _ in indices], [terrain_type for _, terrain_type in indices]
-
-
 def _set_signed_slope_origins(env, slopes: tuple[float, ...]) -> None:
-    levels, columns = _terrain_indices(slopes)
-    _set_terrain_origins(env, levels, columns)
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
+        assign_terrain_slopes,
+    )
+
+    assign_terrain_slopes(env, slopes)
 
 
 def _set_terrain_origins(
     env: Any, levels: list[int], columns: list[int]
 ) -> None:
-    if len(levels) != env.num_envs or len(columns) != env.num_envs:
-        raise ValueError("terrain index rows must match the environment count")
-    terrain = env.scene.terrain
-    level_tensor = torch.tensor(levels, device=env.device, dtype=torch.long)
-    column_tensor = torch.tensor(columns, device=env.device, dtype=torch.long)
-    terrain.terrain_levels.copy_(level_tensor)
-    terrain.terrain_types.copy_(column_tensor)
-    terrain.env_origins.copy_(terrain.terrain_origins[level_tensor, column_tensor])
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
+        apply_terrain_assignment,
+    )
+
+    apply_terrain_assignment(env, levels, columns)
 
 
 def _grasp_positions(env) -> torch.Tensor:
@@ -3444,8 +3439,9 @@ def _validate_round(
         if candidate_batch is not None
         else tuple(float(value) for value in SLOPE_GRADIENTS)
     )
-    os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(reset_pose_path.resolve())
-    cfg = G1RickshawDirectionalSlopePlayEnvCfg()
+    cfg = G1RickshawDirectionalSlopePlayEnvCfg(
+        reset_pose_path=os.fspath(reset_pose_path.resolve()),
+    )
     # Reset validation always exercises the real closed chain, never the
     # synthetic hand-load pretraining stage.
     cfg.domain_randomization = replace(

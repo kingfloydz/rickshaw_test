@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import pytest
-
 from g1_rickshaw_lab.training_contract import (
     DEFAULT_TRAINING_PARAMETERS,
     GUIDE_TRAINING_PARAMETERS,
@@ -13,15 +11,6 @@ from g1_rickshaw_lab.training_contract import (
     finalize_training_configuration,
     validate_guide_training_configuration,
     validate_training_configuration,
-)
-
-
-SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_ROOT))
-
-from _training_configuration import (  # noqa: E402
-    validate_training_configuration as validate_launcher_training_configuration,
 )
 
 
@@ -46,7 +35,6 @@ def test_training_configuration_has_one_canonical_validator() -> None:
     normalized = validate_training_configuration(configuration)
 
     assert normalized["training_parameters"] == DEFAULT_TRAINING_PARAMETERS
-    assert validate_launcher_training_configuration(configuration) == normalized
 
 
 def test_s0_configuration_binds_startup_randomization() -> None:
@@ -73,12 +61,12 @@ def test_training_configuration_rejects_unknown_or_non_mainline_fields() -> None
     configuration = finalize_training_configuration(_configuration())
     configuration["legacy_digest"] = "removed"
     with pytest.raises(ValueError, match="missing or unknown"):
-        validate_launcher_training_configuration(configuration)
+        validate_training_configuration(configuration)
 
     configuration = _configuration()
     configuration["training_parameters"]["latent_dim"] = 7
     with pytest.raises(ValueError, match="context dimension"):
-        validate_launcher_training_configuration(configuration)
+        validate_training_configuration(configuration)
 
 
 @pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))
@@ -93,7 +81,7 @@ def test_training_configuration_accepts_supported_variants(
         latent_dim=latent_dim,
         rollout_steps=rollout_steps,
     )
-    normalized = validate_launcher_training_configuration(configuration)
+    normalized = validate_training_configuration(configuration)
     assert normalized["training_parameters"]["fat2_weight"] == fat2_weight
     assert normalized["training_parameters"]["latent_dim"] == latent_dim
     assert normalized["training_parameters"]["rollout_steps"] == rollout_steps
@@ -104,7 +92,7 @@ def test_training_configuration_rejects_non_integer_variants(field: str) -> None
     configuration = _configuration()
     configuration["training_parameters"][field] = 24.5
     with pytest.raises(ValueError, match="must be an integer"):
-        validate_launcher_training_configuration(configuration)
+        validate_training_configuration(configuration)
 
 
 @pytest.mark.parametrize("fat2_weight", (-0.1, 0.3, True, "0.1"))
@@ -114,7 +102,7 @@ def test_training_configuration_rejects_unsupported_fat2_weight(
     configuration = _configuration()
     configuration["training_parameters"]["fat2_weight"] = fat2_weight
     with pytest.raises(ValueError, match="fat2_weight"):
-        validate_launcher_training_configuration(configuration)
+        validate_training_configuration(configuration)
 
 
 def test_training_configuration_finalize_rejects_non_json_values() -> None:

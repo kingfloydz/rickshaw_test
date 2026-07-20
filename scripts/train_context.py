@@ -36,6 +36,8 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     GUIDE_MAX_ITERATIONS,
     GUIDE_TRAINING_PARAMETERS,
     S1_DETERMINISTIC_ALGORITHMS,
+    TRAINING_CONFIGURATION_KEY as TRAINING_CONFIGURATION_CHECKPOINT_KEY,
+    build_training_configuration,
     extract_gaussian_actor_state,
     load_stage_checkpoint,
     validate_guide_training_configuration,
@@ -48,12 +50,6 @@ from _rollout_audit import (  # noqa: E402
     normalize_audit_tensors,
     validate_rollout_sample_audit,
 )
-from _training_configuration import (  # noqa: E402
-    TRAINING_CONFIGURATION_CHECKPOINT_KEY,
-    build_training_configuration,
-)
-
-
 CHECKPOINT_SCHEMA_VERSION = 1
 S1_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s1_context_distillation"]
 REQUIRED_TENSORS = (

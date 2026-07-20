@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from g1_rickshaw_lab.rl.runner import RunnerContext
+    from g1_rickshaw_lab.workflows.rsl_rl import PlayOptions
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -45,99 +50,22 @@ def require_existing_file(path: str | Path, label: str) -> Path:
     return result
 
 
-def run_isaaclab_rsl_rl(script_name: str, argv: list[str]) -> None:
-    """Run Isaac Lab's RSL-RL train/play script with this task registered."""
+def run_isaaclab_rsl_rl(
+    mode: Literal["train", "play"],
+    argv: list[str],
+    *,
+    runner_context: RunnerContext,
+    play_options: PlayOptions | None = None,
+) -> None:
+    """Run the project-owned RSL-RL launcher against the configured Isaac Lab."""
 
-    root = isaaclab_root()
-    script = root / "scripts" / "reinforcement_learning" / "rsl_rl" / script_name
-    require_existing_file(script, f"Isaac Lab RSL-RL {script_name}")
-    if str(script.parent) not in sys.path:
-        sys.path.insert(0, str(script.parent))
     add_isaaclab_sources_to_path()
     add_project_source_to_path()
-    source = script.read_text(encoding="utf-8")
-    placeholder = "# PLACEHOLDER: Extension template (do not remove this comment)"
-    extension_import = (
-        "import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401\n"
-        "from g1_rickshaw_lab.training_contract import install_runner_hooks_from_environment\n"
-        "install_runner_hooks_from_environment()\n"
-        + placeholder
+    from g1_rickshaw_lab.workflows.rsl_rl import run_rsl_rl
+
+    run_rsl_rl(
+        mode,
+        argv,
+        runner_context=runner_context,
+        play_options=play_options,
     )
-    if placeholder not in source:
-        raise RuntimeError(f"Isaac Lab script has no extension placeholder: {script}")
-    source = source.replace(placeholder, extension_import, 1)
-    if script_name == "play.py" and (video_dir := os.environ.get("G1_RICKSHAW_VIDEO_DIR")):
-        video_marker = '"video_folder": os.path.join(log_dir, "videos", "play"),'
-        if video_marker not in source:
-            raise RuntimeError(f"Isaac Lab play script has no video-folder marker: {script}")
-        source = source.replace(
-            video_marker,
-            f'"video_folder": {os.fspath(Path(video_dir).resolve())!r},',
-            1,
-        )
-    if script_name == "play.py" and os.environ.get("G1_RICKSHAW_EXPORT_ONLY") == "1":
-        loop_marker = "    dt = env.unwrapped.step_dt"
-        if loop_marker not in source:
-            raise RuntimeError(f"Isaac Lab play script has no export-loop marker: {script}")
-        source = source.replace(
-            loop_marker,
-            "    env.close()\n    return\n\n" + loop_marker,
-            1,
-        )
-    if script_name == "play.py" and os.environ.get("G1_RICKSHAW_SKIP_PLAY_EXPORT") == "1":
-        export_marker = "    # export the trained policy to JIT and ONNX formats"
-        loop_marker = "    dt = env.unwrapped.step_dt"
-        export_start = source.find(export_marker)
-        loop_start = source.find(loop_marker, export_start)
-        if export_start < 0 or loop_start < 0:
-            raise RuntimeError(f"Isaac Lab play script has no policy-export block: {script}")
-        source = source[:export_start] + loop_marker + source[loop_start + len(loop_marker) :]
-    if script_name == "play.py" and os.environ.get("G1_RICKSHAW_FOLLOW_ROBOT_CAMERA") == "1":
-        camera_marker = (
-            "    env_cfg.scene.num_envs = args_cli.num_envs "
-            "if args_cli.num_envs is not None else env_cfg.scene.num_envs"
-        )
-        if camera_marker not in source:
-            raise RuntimeError(f"Isaac Lab play script has no camera-setup marker: {script}")
-        camera_setup = (
-            camera_marker
-            + "\n    env_cfg.viewer.origin_type = 'asset_root'"
-            + "\n    env_cfg.viewer.asset_name = 'robot'"
-            + f"\n    env_cfg.viewer.eye = {FOLLOW_CAMERA_EYE!r}"
-            + f"\n    env_cfg.viewer.lookat = {FOLLOW_CAMERA_LOOKAT!r}"
-        )
-        source = source.replace(camera_marker, camera_setup, 1)
-    if script_name == "play.py" and (
-        slope_frames := os.environ.get("G1_RICKSHAW_SLOPE_FRAMES")
-    ) is not None:
-        try:
-            slope_frames = int(slope_frames)
-        except ValueError as exc:
-            raise RuntimeError("G1_RICKSHAW_SLOPE_FRAMES must be an integer") from exc
-        if slope_frames <= 0:
-            raise RuntimeError("G1_RICKSHAW_SLOPE_FRAMES must be positive")
-        timestep_marker = "            timestep += 1"
-        if timestep_marker not in source:
-            raise RuntimeError(f"Isaac Lab play script has no video-timestep marker: {script}")
-        switch_camera = (
-            timestep_marker
-            + f"\n            camera_env_index = min((timestep + 1) // {slope_frames}, env.unwrapped.num_envs - 1)"
-            + "\n            env.unwrapped.viewport_camera_controller.set_view_env_index(camera_env_index)"
-            + "\n            robot_position = env.unwrapped.scene['robot'].data.root_pos_w[camera_env_index]"
-            + "\n            rickshaw_position = env.unwrapped.scene['rickshaw'].data.root_pos_w[camera_env_index]"
-            + "\n            camera_target = 0.5 * (robot_position + rickshaw_position)"
-            + "\n            camera_target[2] = torch.maximum(camera_target[2], camera_target.new_tensor(0.85))"
-            + f"\n            camera_position = camera_target + camera_target.new_tensor({FOLLOW_CAMERA_EYE!r})"
-            + "\n            env.unwrapped.sim.set_camera_view("
-            + "\n                tuple(float(value) for value in camera_position.detach().cpu()),"
-            + "\n                tuple(float(value) for value in camera_target.detach().cpu()),"
-            + "\n            )"
-        )
-        source = source.replace(timestep_marker, switch_camera, 1)
-    previous = sys.argv
-    try:
-        sys.argv = [os.fspath(script), *argv]
-        globals_dict = {"__name__": "__main__", "__file__": os.fspath(script)}
-        exec(compile(source, os.fspath(script), "exec"), globals_dict)
-    finally:
-        sys.argv = previous

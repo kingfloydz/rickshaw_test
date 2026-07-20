@@ -7,26 +7,24 @@ testable before launching the simulator.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass
 import math
+from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
 import numpy as np
 
-from g1_rickshaw_lab.assets.rickshaw import HITCH_HALF_WIDTH, HITCH_X, HITCH_Z, WHEEL_RADIUS
 from g1_rickshaw_lab.slope_contract import (
     TERRAIN_COLUMNS_PER_TYPE,
     TERRAIN_NUM_COLS,
     TERRAIN_NUM_ROWS,
 )
 
+from .task_spec import RickshawPoseTargetCfg
 
 TERRAIN_SEED = 42
 TERRAIN_SIZE = (26.0, 6.0)
 TERRAIN_SPAWN_X = 4.0
-TERRAIN_GRADIENT_MAGNITUDES = tuple(
-    0.01 * level for level in range(1, TERRAIN_NUM_ROWS + 1)
-)
+TERRAIN_GRADIENT_MAGNITUDES = tuple(0.01 * level for level in range(1, TERRAIN_NUM_ROWS + 1))
 ALL_SIGNED_TERRAIN_GRADIENTS = (
     0.0,
     *TERRAIN_GRADIENT_MAGNITUDES,
@@ -163,7 +161,6 @@ if SubTerrainBaseCfg is not None:
         direction: int = 0
         spawn_x: float = TERRAIN_SPAWN_X
 
-
     DIRECTIONAL_SLOPES_CFG = TerrainGeneratorCfg(
         seed=TERRAIN_SEED,
         curriculum=True,
@@ -190,7 +187,6 @@ else:
         direction: int = 0
         spawn_x: float = TERRAIN_SPAWN_X
 
-
     @dataclass(frozen=True)
     class _TerrainGeneratorCfgFallback:
         seed: int
@@ -201,7 +197,6 @@ else:
         border_width: float
         use_cache: bool
         sub_terrains: dict[str, DirectionalPlaneSlopeCfg]
-
 
     DIRECTIONAL_SLOPES_CFG = _TerrainGeneratorCfgFallback(
         seed=TERRAIN_SEED,
@@ -289,19 +284,6 @@ class _RickshawPoseLike(Protocol):
     hitch_height_target: float
 
 
-@configclass
-class RickshawPoseTargetCfg:
-    """Rickshaw front-lift target and reset acceptance tolerances."""
-
-    wheel_radius: float = WHEEL_RADIUS
-    hitch_x: float = HITCH_X
-    hitch_z: float = HITCH_Z
-    hitch_half_width: float = HITCH_HALF_WIDTH
-    hitch_height_target: float = MISSING
-    hitch_height_tolerance: float = MISSING
-    hitch_vertical_speed_tolerance: float = MISSING
-
-
 def _validate_pose_dimensions(cfg: _RickshawPoseLike) -> tuple[float, float, float, float]:
     wheel_radius = float(cfg.wheel_radius)
     hitch_x = float(cfg.hitch_x)
@@ -325,10 +307,7 @@ def target_pitch_from_hitch_height(cfg: _RickshawPoseLike) -> float:
     if not -1.0 <= ratio <= 1.0:
         minimum = wheel_radius - radius
         maximum = wheel_radius + radius
-        raise ValueError(
-            f"infeasible hitch_height_target={target}; reachable range is "
-            f"[{minimum}, {maximum}]"
-        )
+        raise ValueError(f"infeasible hitch_height_target={target}; reachable range is [{minimum}, {maximum}]")
     return math.asin(ratio) - phase
 
 
@@ -339,11 +318,7 @@ def hitch_height_from_pitch(alpha: float, cfg: _RickshawPoseLike) -> float:
     alpha = float(alpha)
     if not math.isfinite(alpha):
         raise ValueError("alpha must be finite")
-    return (
-        wheel_radius
-        + hitch_x * math.sin(alpha)
-        + (hitch_z - wheel_radius) * math.cos(alpha)
-    )
+    return wheel_radius + hitch_x * math.sin(alpha) + (hitch_z - wheel_radius) * math.cos(alpha)
 
 
 def cart_root_height_from_pitch(alpha: float, cfg: _RickshawPoseLike) -> float:

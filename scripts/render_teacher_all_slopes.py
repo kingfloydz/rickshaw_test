@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from _isaaclab_wrappers import (
     add_project_source_to_path,
@@ -18,6 +18,7 @@ from _isaaclab_wrappers import (
 
 add_project_source_to_path()
 
+from g1_rickshaw_lab.rl.runner import RunnerContext  # noqa: E402
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     SLOPE_COUNT,
     SLOPE_PERCENTAGES,
@@ -27,11 +28,10 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )
-
+from g1_rickshaw_lab.workflows.rsl_rl import PlayOptions  # noqa: E402
 
 DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 DEFAULT_FRAMES_PER_SLOPE = 1000
-RENDER_ORDERED_SLOPES_ENV = "G1_RICKSHAW_RENDER_ORDERED_SLOPES"
 
 
 def slope_index_for_frame(frame_index: int, frames_per_slope: int) -> int:
@@ -48,9 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--frames-per-slope", type=int, default=DEFAULT_FRAMES_PER_SLOPE
-    )
+    parser.add_argument("--frames-per-slope", type=int, default=DEFAULT_FRAMES_PER_SLOPE)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--headless", action="store_true")
@@ -84,9 +82,7 @@ def _label_video(
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if raw_frames < required_frames:
         capture.release()
-        raise RuntimeError(
-            f"raw video has {raw_frames} frames; expected at least {required_frames}"
-        )
+        raise RuntimeError(f"raw video has {raw_frames} frames; expected at least {required_frames}")
     if fps <= 0.0 or width <= 0 or height <= 0:
         capture.release()
         raise RuntimeError("raw video has invalid media metadata")
@@ -188,9 +184,7 @@ def main() -> int:
     )
     training_parameters = checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
     latent_dim = int(training_parameters["latent_dim"])
-    checkpoint_iteration = int(
-        checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY]
-    )
+    checkpoint_iteration = int(checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY])
 
     output = args.output.resolve()
     raw_directory = output.parent / "raw" / output.stem
@@ -207,9 +201,7 @@ def main() -> int:
             ],
             check=True,
         )
-        raw_videos = sorted(
-            raw_directory.glob("*.mp4"), key=lambda path: path.stat().st_mtime_ns
-        )
+        raw_videos = sorted(raw_directory.glob("*.mp4"), key=lambda path: path.stat().st_mtime_ns)
         if not raw_videos:
             raise RuntimeError(f"Isaac Lab produced no video in {raw_directory}")
         raw_video = raw_videos[-1]
@@ -230,17 +222,15 @@ def main() -> int:
         print(f"manifest: {manifest}")
         return 0
 
-    os.environ.update(
-        {
-            "G1_RICKSHAW_RUNNER_HOOK": "1",
-            "G1_RICKSHAW_CHECKPOINT_STAGE": "s0_teacher",
-            "G1_RICKSHAW_CHECKPOINT_LINEAGE": "{}",
-            "G1_RICKSHAW_VIDEO_DIR": os.fspath(raw_directory),
-            "G1_RICKSHAW_SKIP_PLAY_EXPORT": "1",
-            "G1_RICKSHAW_FOLLOW_ROBOT_CAMERA": "1",
-            "G1_RICKSHAW_SLOPE_FRAMES": str(args.frames_per_slope),
-            RENDER_ORDERED_SLOPES_ENV: "1",
-        }
+    runner_context = RunnerContext.playback(
+        stage="s0_teacher",
+        curriculum_start_iteration=checkpoint_iteration,
+    )
+    play_options = PlayOptions(
+        video_dir=raw_directory,
+        export_policy=False,
+        follow_robot_camera=True,
+        slope_frames=args.frames_per_slope,
     )
     launcher_arguments = [
         "--task",
@@ -257,11 +247,17 @@ def main() -> int:
         "--device",
         args.device,
         f"agent.actor.latent_dim={latent_dim}",
+        "env.shuffle_slopes=false",
     ]
     if args.headless:
         launcher_arguments.append("--headless")
     try:
-        run_isaaclab_rsl_rl("play.py", launcher_arguments)
+        run_isaaclab_rsl_rl(
+            "play",
+            launcher_arguments,
+            runner_context=runner_context,
+            play_options=play_options,
+        )
     except SystemExit as exc:
         if exc.code not in (None, 0):
             raise

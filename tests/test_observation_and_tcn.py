@@ -7,17 +7,22 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
-
-from g1_rickshaw_lab.rl.actor_critic import G1RickshawStudentActor
-from g1_rickshaw_lab.rl.teacher_model import G1RickshawTeacherActor
+from g1_rickshaw_lab.rl.actor_critic import (
+    G1RickshawStudentActor,
+    GaussianActor,
+    PrivilegedCritic,
+)
 from g1_rickshaw_lab.rl.context_encoder import (
     DILATIONS,
-    HISTORY_LENGTH as TCN_HISTORY_LENGTH,
     KERNEL_SIZE,
     ContextEncoder,
     temporal_receptive_field,
 )
+from g1_rickshaw_lab.rl.context_encoder import (
+    HISTORY_LENGTH as TCN_HISTORY_LENGTH,
+)
+from g1_rickshaw_lab.rl.distillation import StudentDistillationLoss, gaussian_kl
+from g1_rickshaw_lab.rl.teacher_model import G1RickshawTeacherActor
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import rewards
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations import (
     ACTOR_OBSERVATION_DIM,
@@ -31,6 +36,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations impo
     ObservationHistoryState,
     assemble_actor_observation,
 )
+from torch import nn
 
 
 def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
@@ -87,6 +93,7 @@ def test_observation_and_reward_interfaces_do_not_read_v_sample() -> None:
     env = SimpleNamespace(
         command_state=command,
         policy_robot_speed_s=torch.tensor([0.5], dtype=torch.float64),
+        policy_robot_speed_l=torch.tensor([0.0], dtype=torch.float64),
     )
     before = rewards.track_speed_exp(env)
     command.v_sample[:] = -100.0
@@ -204,6 +211,59 @@ def test_fixed_teacher_and_student_context_interfaces() -> None:
     assert not hasattr(student, "context_projection")
     assert not any("aux" in name for name, _ in teacher.named_modules())
     assert not any("aux" in name for name, _ in student.named_modules())
+
+
+def test_actor_and_critic_architectures_match_the_policy_abi() -> None:
+    actor = GaussianActor()
+    actor_shapes = [
+        (layer.in_features, layer.out_features)
+        for layer in actor.network
+        if isinstance(layer, nn.Linear)
+    ]
+    assert actor_shapes == [(112, 512), (512, 256), (256, 128), (128, 29)]
+    torch.testing.assert_close(actor.std[:12], torch.full((12,), 0.4))
+    torch.testing.assert_close(actor.std[12:], torch.full((17,), 0.25))
+    actor.log_std.data.fill_(10.0)
+    assert actor.std[:12].max().item() <= 0.800001
+    assert actor.std[12:].max().item() <= 0.500001
+    actor.log_std.data.fill_(-10.0)
+    assert actor.std.min().item() >= 0.049999
+
+    critic = PrivilegedCritic()
+    critic_shapes = [
+        (layer.in_features, layer.out_features)
+        for layer in critic.network
+        if isinstance(layer, nn.Linear)
+    ]
+    assert critic_shapes == [(130, 256), (256, 128), (128, 1)]
+    assert critic(torch.randn(3, 96), torch.randn(3, 34)).shape == (3, 1)
+
+
+def test_distillation_updates_only_the_student() -> None:
+    batch = 4
+    current = torch.randn(batch, 96)
+    history = torch.randn(batch, 61, 96)
+    teacher = G1RickshawTeacherActor()
+    student = G1RickshawStudentActor()
+    teacher_distribution, z_star = teacher.forward_with_context(
+        current,
+        history,
+        torch.randn(batch, 61, 21),
+        torch.randn(batch, 10),
+    )
+    student_distribution, z_hat = student.forward_with_context(current, history)
+
+    loss, metrics = StudentDistillationLoss()(
+        teacher_distribution,
+        student_distribution,
+        z_hat,
+        z_star,
+    )
+    assert set(metrics) == {"loss", "action_kl", "latent_smooth_l1"}
+    loss.backward()
+    assert student.context_encoder.input.weight.grad is not None
+    assert all(parameter.grad is None for parameter in teacher.parameters())
+    assert gaussian_kl(teacher_distribution, teacher_distribution).abs().max().item() < 1.0e-6
 
 
 @pytest.mark.parametrize("latent_dim", (8, 16, 24, 32))

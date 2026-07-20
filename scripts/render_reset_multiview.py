@@ -5,27 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from dataclasses import replace
 from pathlib import Path
-import sys
 
+from _isaaclab_wrappers import (
+    REPOSITORY_ROOT,
+    add_isaaclab_sources_to_path,
+    add_project_source_to_path,
+)
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "source" / "g1_rickshaw_lab"
-ISAACLAB_ROOT = Path(os.environ.get("ISAACLAB_PATH", ROOT.parent / "IsaacLab"))
-for path in (
-    SOURCE,
-    ISAACLAB_ROOT / "source" / "isaaclab",
-    ISAACLAB_ROOT / "source" / "isaaclab_assets",
-    ISAACLAB_ROOT / "source" / "isaaclab_tasks",
-    ISAACLAB_ROOT / "source" / "isaaclab_rl",
-):
-    if path.is_dir() and str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+ROOT = REPOSITORY_ROOT
+add_isaaclab_sources_to_path()
+add_project_source_to_path()
 
-from isaaclab.app import AppLauncher
-from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS, terrain_index_for_gradient
+from isaaclab.app import AppLauncher  # noqa: E402
+from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS  # noqa: E402
 
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -42,11 +36,6 @@ launcher = AppLauncher(args)
 simulation_app = launcher.app
 
 
-def terrain_indices(slopes: tuple[float, ...]) -> tuple[list[int], list[int]]:
-    indices = tuple(terrain_index_for_gradient(slope) for slope in slopes)
-    return [level for level, _ in indices], [terrain_type for _, terrain_type in indices]
-
-
 def main() -> None:
     import gymnasium as gym
     import numpy as np
@@ -56,6 +45,9 @@ def main() -> None:
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import (
         G1RickshawDirectionalSlopePlayEnvCfg,
         PLAY_TASK_ID,
+    )
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
+        assign_terrain_slopes,
     )
 
     cfg = G1RickshawDirectionalSlopePlayEnvCfg()
@@ -74,13 +66,7 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        levels, columns = terrain_indices(SLOPE_GRADIENTS)
-        terrain = base.scene.terrain
-        level_tensor = torch.tensor(levels, device=base.device, dtype=torch.long)
-        column_tensor = torch.tensor(columns, device=base.device, dtype=torch.long)
-        terrain.terrain_levels.copy_(level_tensor)
-        terrain.terrain_types.copy_(column_tensor)
-        terrain.env_origins.copy_(terrain.terrain_origins[level_tensor, column_tensor])
+        assign_terrain_slopes(base, SLOPE_GRADIENTS)
         env.reset(seed=args.seed)
 
         expected = torch.tensor(

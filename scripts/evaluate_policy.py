@@ -7,7 +7,6 @@ import argparse
 from collections.abc import Mapping
 from dataclasses import replace
 import json
-import math
 import os
 from pathlib import Path
 from typing import Any
@@ -41,8 +40,6 @@ from g1_rickshaw_lab.reward_profile import (  # noqa: E402
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
-    SLOPE_TERRAIN_LEVELS,
-    SLOPE_TERRAIN_TYPES,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
@@ -155,19 +152,11 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
     import torch
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
-    slots = torch.arange(base_env.num_envs, device=base_env.device) % len(SIGNED_SLOPES)
-    levels_lut = torch.tensor(
-        SLOPE_TERRAIN_LEVELS, device=base_env.device, dtype=torch.long
+    slots, levels, columns = mdp.balanced_slope_assignment(
+        base_env.num_envs,
+        device=base_env.device,
     )
-    columns_lut = torch.tensor(
-        SLOPE_TERRAIN_TYPES, device=base_env.device, dtype=torch.long
-    )
-    levels = levels_lut[slots]
-    columns = columns_lut[slots]
-    terrain = base_env.scene.terrain
-    terrain.terrain_levels[:] = levels
-    terrain.terrain_types[:] = columns
-    terrain.env_origins[:] = terrain.terrain_origins[levels, columns]
+    mdp.apply_terrain_assignment(base_env, levels, columns)
     mdp.update_slope_frame(base_env)
     expected = torch.tensor(SIGNED_SLOPES, device=base_env.device)[slots]
     if not torch.allclose(base_env.slope, expected, atol=1.0e-7, rtol=0.0):
