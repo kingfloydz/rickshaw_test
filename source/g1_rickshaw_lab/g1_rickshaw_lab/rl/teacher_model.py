@@ -11,6 +11,8 @@ from g1_rickshaw_lab.policy_schema import (
     DEFAULT_CONTEXT_DIM,
     TEACHER_DYNAMIC_DIM,
     TEACHER_STATIC_DIM,
+    HISTORY_LENGTH,
+    validate_history_length,
     validate_context_dim,
 )
 
@@ -18,6 +20,7 @@ from .actor_critic import GaussianActor
 from .context_encoder import (
     DILATIONS,
     FEATURE_DIM,
+    HISTORY_KERNEL_SIZES,
     OBSERVATION_DIM,
     CausalBlock,
     validate_history,
@@ -32,9 +35,15 @@ STATIC_FEATURE_DIM = 32
 class TeacherEncoder(nn.Module):
     """Fuse observation/physical histories with episode-static physics."""
 
-    def __init__(self, latent_dim: int = DEFAULT_CONTEXT_DIM) -> None:
+    def __init__(
+        self,
+        latent_dim: int = DEFAULT_CONTEXT_DIM,
+        history_length: int = HISTORY_LENGTH,
+    ) -> None:
         super().__init__()
         self.latent_dim = validate_context_dim(latent_dim)
+        self.history_length = validate_history_length(history_length)
+        self.kernel_size = HISTORY_KERNEL_SIZES[self.history_length]
         self.observation_input = nn.Conv1d(
             OBSERVATION_DIM, FEATURE_DIM, kernel_size=1
         )
@@ -42,7 +51,10 @@ class TeacherEncoder(nn.Module):
             DYNAMIC_PRIVILEGE_DIM, FEATURE_DIM, kernel_size=1
         )
         self.blocks = nn.Sequential(
-            *(CausalBlock(FEATURE_DIM, dilation) for dilation in DILATIONS)
+            *(
+                CausalBlock(FEATURE_DIM, dilation, self.kernel_size)
+                for dilation in DILATIONS
+            )
         )
         self.static = nn.Sequential(
             nn.Linear(STATIC_PRIVILEGE_DIM, STATIC_FEATURE_DIM),
@@ -60,11 +72,13 @@ class TeacherEncoder(nn.Module):
             observation_history,
             feature_dim=OBSERVATION_DIM,
             name="observation_history",
+            history_length=self.history_length,
         )
         validate_history(
             dynamic_privilege_history,
             feature_dim=DYNAMIC_PRIVILEGE_DIM,
             name="dynamic_privilege_history",
+            history_length=self.history_length,
         )
         if static_privilege.ndim != 2 or static_privilege.shape[1] != STATIC_PRIVILEGE_DIM:
             raise ValueError(
@@ -86,9 +100,13 @@ class TeacherEncoder(nn.Module):
 class G1RickshawTeacherActor(nn.Module):
     """S0 policy with temporal privilege compressed into the shared actor ABI."""
 
-    def __init__(self, latent_dim: int = DEFAULT_CONTEXT_DIM) -> None:
+    def __init__(
+        self,
+        latent_dim: int = DEFAULT_CONTEXT_DIM,
+        history_length: int = HISTORY_LENGTH,
+    ) -> None:
         super().__init__()
-        self.encoder = TeacherEncoder(latent_dim)
+        self.encoder = TeacherEncoder(latent_dim, history_length)
         self.actor = GaussianActor(latent_dim)
 
     def encode(

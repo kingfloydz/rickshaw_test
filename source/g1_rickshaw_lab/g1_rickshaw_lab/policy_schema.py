@@ -7,6 +7,7 @@ from typing import Final
 
 ACTOR_OBSERVATION_DIM: Final[int] = 96
 HISTORY_LENGTH: Final[int] = 61
+SUPPORTED_HISTORY_LENGTHS: Final[tuple[int, ...]] = (61, 91)
 DEFAULT_CONTEXT_DIM: Final[int] = 16
 SUPPORTED_CONTEXT_DIMS: Final[tuple[int, ...]] = (
     4,
@@ -39,6 +40,12 @@ def validate_context_dim(value: int) -> int:
     return value
 
 
+def validate_history_length(value: int) -> int:
+    if type(value) is not int or value not in SUPPORTED_HISTORY_LENGTHS:
+        raise ValueError(f"history length must be one of {SUPPORTED_HISTORY_LENGTHS}, got {value!r}")
+    return value
+
+
 __all__ = [
     "ACTION_DIM",
     "ACTION_SCALE",
@@ -49,8 +56,10 @@ __all__ = [
     "DEFAULT_CONTEXT_DIM",
     "CRITIC_PRIVILEGED_DIM",
     "HISTORY_LENGTH",
+    "SUPPORTED_HISTORY_LENGTHS",
     "SUPPORTED_CONTEXT_DIMS",
     "TEACHER_DYNAMIC_DIM",
     "TEACHER_STATIC_DIM",
     "validate_context_dim",
+    "validate_history_length",
 ]

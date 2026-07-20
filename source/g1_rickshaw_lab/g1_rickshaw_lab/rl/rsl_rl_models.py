@@ -17,6 +17,7 @@ from g1_rickshaw_lab.policy_schema import (
     BUTTERWORTH_B1,
     DEFAULT_CONTEXT_DIM,
     HISTORY_LENGTH,
+    validate_history_length,
     validate_context_dim,
 )
 
@@ -71,6 +72,7 @@ class RslRickshawActorModel(_RslModelContract):
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
         latent_dim: int = DEFAULT_CONTEXT_DIM,
+        history_length: int = HISTORY_LENGTH,
     ) -> None:
         super().__init__()
         _require_rsl_rl()
@@ -83,6 +85,7 @@ class RslRickshawActorModel(_RslModelContract):
         if distribution_cfg is None:
             raise ValueError("the PPO actor requires a Gaussian distribution configuration")
         self.latent_dim = validate_context_dim(latent_dim)
+        self.history_length = validate_history_length(history_length)
 
         self.obs_groups = list(obs_groups[obs_set])
         if (
@@ -100,7 +103,7 @@ class RslRickshawActorModel(_RslModelContract):
             "teacher_static",
         }
         if groups == teacher_groups:
-            self.encoder = TeacherEncoder(self.latent_dim)
+            self.encoder = TeacherEncoder(self.latent_dim, self.history_length)
             self.stage = "teacher"
         else:
             if groups != {"policy", "history"}:
@@ -108,14 +111,14 @@ class RslRickshawActorModel(_RslModelContract):
                     "actor groups must match the fixed teacher or student interface"
                 )
             if tuple(obs["history"].shape[1:]) != (
-                HISTORY_LENGTH,
+                self.history_length,
                 ACTOR_OBSERVATION_DIM,
             ):
                 raise ValueError(
                     "history must have shape "
-                    f"[N,{HISTORY_LENGTH},{ACTOR_OBSERVATION_DIM}]"
+                    f"[N,{self.history_length},{ACTOR_OBSERVATION_DIM}]"
                 )
-            self.encoder = ContextEncoder(self.latent_dim)
+            self.encoder = ContextEncoder(self.latent_dim, self.history_length)
             self.stage = "student"
         self.policy = GaussianActor(self.latent_dim)
         self._distribution: Independent | None = None
@@ -355,7 +358,7 @@ class _StudentOnnxExport(_StudentExport):
     def get_dummy_inputs(self):
         return (
             torch.zeros(1, ACTOR_OBSERVATION_DIM),
-            torch.zeros(1, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM),
+            torch.zeros(1, self.context_encoder.history_length, ACTOR_OBSERVATION_DIM),
         )
 
     @property
@@ -404,6 +407,7 @@ class _DeploymentContextEncoder(nn.Module):
 
     def __init__(self, encoder: ContextEncoder) -> None:
         super().__init__()
+        self.history_length = encoder.history_length
         self.input = copy.deepcopy(encoder.input)
         self.blocks = copy.deepcopy(encoder.blocks)
         self.context = copy.deepcopy(encoder.context)

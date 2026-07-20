@@ -160,6 +160,8 @@ def create_rickshaw_runner_type(
                     raise RuntimeError("training rollout length differs from the published configuration")
                 if int(self.alg.actor.latent_dim) != int(parameters["latent_dim"]):
                     raise RuntimeError("actor latent width differs from the published configuration")
+                if int(getattr(self.alg.actor, "history_length", 61)) != int(parameters.get("history_length", 61)):
+                    raise RuntimeError("actor history length differs from the published configuration")
                 if int(self.cfg["save_interval"]) != training_artifact_interval(configured_steps):
                     raise RuntimeError("checkpoint interval differs from the fixed transition cadence")
 

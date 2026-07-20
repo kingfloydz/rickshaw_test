@@ -60,6 +60,7 @@ class RunSpec:
     rollout_steps: int
     latent_dim: int
     stability_reward_curriculum: bool = False
+    history_length: int = 61
 
     @property
     def training_parameters(self) -> dict[str, int | float | bool]:
@@ -67,6 +68,7 @@ class RunSpec:
             "fat2_weight": self.fat2_weight,
             "rollout_steps": self.rollout_steps,
             "latent_dim": self.latent_dim,
+            "history_length": self.history_length,
             "stability_reward_curriculum": self.stability_reward_curriculum,
         }
 
@@ -95,9 +97,26 @@ STABILITY_CURRICULUM_RUNS = tuple(
     )
     for latent_dim in (6, 8, 10, 12, 14, 16, 18, 20)
 )
+TCN_HISTORY_RUNS = tuple(
+    RunSpec(
+        f"tcn_history_{history_length}_latent_dim_{latent_dim}",
+        0.1,
+        48,
+        latent_dim,
+        False,
+        history_length,
+    )
+    for history_length in (61, 91)
+    for latent_dim in (8, 12, 16, 24)
+)
 RUNS_BY_NAME = {
     spec.name: spec
-    for spec in (*UNIQUE_RUNS, *LATENT_DIM_RUNS, *STABILITY_CURRICULUM_RUNS)
+    for spec in (
+        *UNIQUE_RUNS,
+        *LATENT_DIM_RUNS,
+        *STABILITY_CURRICULUM_RUNS,
+        *TCN_HISTORY_RUNS,
+    )
 }
 
 
@@ -668,6 +687,8 @@ def _teacher_command(
         str(spec.rollout_steps),
         "--latent-dim",
         str(spec.latent_dim),
+        "--history-length",
+        str(spec.history_length),
         "--seed",
         str(args.seed),
     ]

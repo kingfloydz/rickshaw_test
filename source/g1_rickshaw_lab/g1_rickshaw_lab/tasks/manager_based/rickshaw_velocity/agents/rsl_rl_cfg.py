@@ -20,6 +20,7 @@ class G1RickshawPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 @configclass
 class G1RickshawActorModelCfg(RslRlMLPModelCfg):
     latent_dim: int = 16
+    history_length: int = 61
 
 
 @configclass

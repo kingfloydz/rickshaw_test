@@ -134,6 +134,7 @@ def main() -> int:  # noqa: C901
     )
     training_parameters = teacher_training_configuration["training_parameters"]
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("rollout task differs from the S0 teacher training task")
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
@@ -171,6 +172,7 @@ def main() -> int:  # noqa: C901
         device = args.device
         env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
         env_cfg.seed = args.seed
+        env_cfg.history_length = history_length
         # Rollout samples bind immutable slopes. This prevents auto-resets
         # from advancing terrain difficulty during a short segment.
         env_cfg.curriculum = None
@@ -185,6 +187,7 @@ def main() -> int:  # noqa: C901
         agent_cfg.seed = args.seed
         agent_cfg.device = device
         agent_cfg.actor.latent_dim = latent_dim
+        agent_cfg.actor.history_length = history_length
         agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
         raw_env = gym.make(args.task, cfg=env_cfg)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)

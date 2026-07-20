@@ -13,6 +13,7 @@ from g1_rickshaw_lab.policy_schema import (
     HISTORY_LENGTH,
     TEACHER_DYNAMIC_DIM,
     TEACHER_STATIC_DIM,
+    validate_history_length,
 )
 from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
 
@@ -187,8 +188,9 @@ class ObservationHistoryState:
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> "ObservationHistoryState":
-        if history_length != HISTORY_LENGTH or observation_dim <= 0:
-            raise ValueError(f"history length is fixed at {HISTORY_LENGTH} and feature dimension must be positive")
+        history_length = validate_history_length(history_length)
+        if observation_dim <= 0:
+            raise ValueError("feature dimension must be positive")
         return cls(
             history=(
                 torch.zeros(
@@ -211,7 +213,7 @@ class ObservationHistoryState:
         self.initialized[ids] = False
 
     def initialize(self, observation: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
-        """Fill all 61 past frames with the first post-reset observation."""
+        """Fill all history frames with the first post-reset observation."""
 
         if env_ids is None:
             ids = torch.arange(self.current.shape[0], device=self.current.device)
@@ -222,7 +224,7 @@ class ObservationHistoryState:
         if observation.shape != (ids.numel(), self.current.shape[-1]):
             raise ValueError("initial history observation has the wrong shape")
         if self.history is not None:
-            self.history[ids] = observation[:, None, :].expand(-1, HISTORY_LENGTH, -1)
+            self.history[ids] = observation[:, None, :].expand(-1, self.history.shape[1], -1)
         self.current[ids] = observation
         self.initialized[ids] = True
 
@@ -248,7 +250,7 @@ class ObservationHistoryState:
         next_history = torch.cat((self.history[:, 1:], self.current[:, None, :]), dim=1)
         next_history[~advance_mask] = self.history[~advance_mask]
         initial = new_observation[initialize_mask]
-        next_history[initialize_mask] = initial[:, None, :].expand(-1, HISTORY_LENGTH, -1)
+        next_history[initialize_mask] = initial[:, None, :].expand(-1, next_history.shape[1], -1)
         self.history = next_history
 
         self.current[valid_mask] = new_observation[valid_mask]
@@ -354,6 +356,12 @@ def _is_observation_shape_probe(env: Any) -> bool:
     return not hasattr(env, "observation_manager")
 
 
+def _history_length(env: Any) -> int:
+    return validate_history_length(
+        int(getattr(getattr(env, "cfg", None), "history_length", HISTORY_LENGTH))
+    )
+
+
 def _shape_placeholder(env: Any, *feature_shape: int) -> torch.Tensor:
     return torch.empty((), device=env.device).expand(env.num_envs, *feature_shape)
 
@@ -369,7 +377,7 @@ def current_actor_observation(env: Any) -> torch.Tensor:
 def actor_observation_history(env: Any) -> torch.Tensor:
     if not hasattr(env, "observation_history_state"):
         if _is_observation_shape_probe(env):
-            return _shape_placeholder(env, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM)
+            return _shape_placeholder(env, _history_length(env), ACTOR_OBSERVATION_DIM)
         raise RuntimeError("actor history requested before MDP startup")
     result = env.observation_history_state.history
     if result is None:
@@ -431,14 +439,14 @@ def dynamic_privileged_observation(env: Any) -> torch.Tensor:
 
 
 def teacher_dynamic_history(env: Any, expected_dim: int | None = None) -> torch.Tensor:
-    """Return the causal 61-frame history of raw dynamic privilege."""
+    """Return the causal history of raw dynamic privilege."""
 
     if expected_dim is not None and expected_dim != TEACHER_DYNAMIC_DIM:
         raise ValueError("teacher dynamic dimension differs from observation config")
     state = getattr(env, "teacher_dynamic_history_state", None)
     if state is None:
         if _is_observation_shape_probe(env):
-            return _shape_placeholder(env, HISTORY_LENGTH, TEACHER_DYNAMIC_DIM)
+            return _shape_placeholder(env, _history_length(env), TEACHER_DYNAMIC_DIM)
         raise RuntimeError("teacher dynamic history requested before MDP startup")
     if state.history is None:
         raise RuntimeError("teacher dynamic history is disabled for this environment")

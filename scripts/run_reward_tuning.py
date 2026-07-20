@@ -183,6 +183,8 @@ def _checkpoint(
         "fat2_weight": fixed["fat2_weight"],
         "rollout_steps": fixed["rollout_steps"],
         "latent_dim": fixed["latent_dim"],
+        "history_length": 61,
+        "stability_reward_curriculum": False,
     }
     records: list[multi_gpu.CheckpointRecord] = []
     for path in directory.rglob("model_*.pt"):
@@ -245,6 +247,7 @@ def _valid_diagnostic(
             and evaluation["fat2_weight"] == config["fixed"]["fat2_weight"]
             and evaluation["rollout_steps"] == config["fixed"]["rollout_steps"]
             and evaluation["latent_dim"] == config["fixed"]["latent_dim"]
+            and evaluation.get("history_length", 61) == 61
             and evaluation["reward_weight_overrides"]
             == job.profile["reward_weight_overrides"]
             and path.stat().st_mtime_ns >= checkpoint.stat().st_mtime_ns

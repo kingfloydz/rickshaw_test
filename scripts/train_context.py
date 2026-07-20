@@ -133,7 +133,11 @@ def _as_tensor(value: Any, name: str, path: Path) -> torch.Tensor:
     return tensor
 
 
-def _normalize_shard(path: Path, latent_dim: int = 16) -> dict[str, torch.Tensor]:
+def _normalize_shard(
+    path: Path,
+    latent_dim: int = 16,
+    history_length: int = 61,
+) -> dict[str, torch.Tensor]:
     raw = _torch_load(path)
     current = _as_tensor(raw.get("current"), "current", path).float()
     history = _as_tensor(raw.get("history"), "history", path).float()
@@ -153,7 +157,7 @@ def _normalize_shard(path: Path, latent_dim: int = 16) -> dict[str, torch.Tensor
         "z_star": _as_tensor(raw.get("z_star"), "z_star", path).float(),
     }
     expected_shapes = {
-        "history": (batch_size, 61, 96),
+        "history": (batch_size, history_length, 96),
         "teacher_action_mean": (batch_size, 29),
         "teacher_action_std": (batch_size, 29),
         "z_star": (batch_size, latent_dim),
@@ -170,7 +174,10 @@ def _normalize_shard(path: Path, latent_dim: int = 16) -> dict[str, torch.Tensor
 
 
 def load_rollout_dataset(
-    rollout_dir: Path, manifest: Mapping[str, Any], latent_dim: int
+    rollout_dir: Path,
+    manifest: Mapping[str, Any],
+    latent_dim: int,
+    history_length: int,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """Load shards and independently reconstruct their formal sample audit."""
 
@@ -179,7 +186,7 @@ def load_rollout_dataset(
     )
     if not shards:
         raise FileNotFoundError(f"no .pt/.pth rollout shards found in {rollout_dir}")
-    loaded = [_normalize_shard(path, latent_dim) for path in shards]
+    loaded = [_normalize_shard(path, latent_dim, history_length) for path in shards]
     tensors = {
         name: torch.cat([shard[name] for shard in loaded], dim=0)
         for name in (*REQUIRED_TENSORS, *AUDIT_TENSOR_NAMES)
@@ -296,6 +303,7 @@ def train(args: argparse.Namespace) -> Path:
         teacher_training_configuration
     )
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     rollout_steps = int(training_parameters["rollout_steps"])
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("S1 task differs from the S0 teacher training task")
@@ -325,7 +333,10 @@ def train(args: argparse.Namespace) -> Path:
             "rollout manifest training configuration differs from the S0 teacher"
         )
     dataset, stage_coverage = load_rollout_dataset(
-        rollout_dir, rollout_manifest, latent_dim
+        rollout_dir,
+        rollout_manifest,
+        latent_dim,
+        history_length,
     )
     if args.device == "auto":
         device_name = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -334,7 +345,7 @@ def train(args: argparse.Namespace) -> Path:
     device = torch.device(device_name)
     for name in REQUIRED_TENSORS:
         dataset[name] = dataset[name].to(device=device)
-    student = G1RickshawStudentActor(latent_dim).to(device)
+    student = G1RickshawStudentActor(latent_dim, history_length).to(device)
     initialize_actor_from_checkpoint(student, teacher_checkpoint)
 
     student.actor.eval()
@@ -383,6 +394,7 @@ def train(args: argparse.Namespace) -> Path:
         stage_coverage=stage_coverage,
         fat2_weight=float(training_parameters["fat2_weight"]),
         latent_dim=latent_dim,
+        history_length=history_length,
         rollout_steps=rollout_steps,
         stability_reward_curriculum=bool(
             training_parameters["stability_reward_curriculum"]

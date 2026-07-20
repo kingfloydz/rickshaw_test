@@ -55,7 +55,7 @@ def _validate_resume_lineage(checkpoint: dict, teacher: Path, context: Path) -> 
 
 def _validate_resume_training_configuration(resume_configuration: dict, source_configuration: dict) -> None:
     if resume_configuration["training_parameters"] != source_configuration["training_parameters"]:
-        raise ValueError("S2 resume cannot change FAT2, latent_dim, or rollout_steps")
+        raise ValueError("S2 resume cannot change FAT2, latent_dim, history_length, or rollout_steps")
     if reward_weight_overrides_from_configuration(resume_configuration) != reward_weight_overrides_from_configuration(
         source_configuration
     ):
@@ -97,6 +97,7 @@ def main() -> int:
     training_parameters = s1_training_configuration["training_parameters"]
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     fat2_weight = float(training_parameters["fat2_weight"])
     stability_reward_curriculum = bool(training_parameters["stability_reward_curriculum"])
     reward_weight_overrides = reward_weight_overrides_from_configuration(s1_training_configuration)
@@ -161,6 +162,7 @@ def main() -> int:
             "save_interval": training_artifact_interval(rollout_steps),
             "fat2_weight": fat2_weight,
             "latent_dim": latent_dim,
+            "history_length": history_length,
             "stability_reward_curriculum": stability_reward_curriculum,
             REWARD_WEIGHT_OVERRIDES_KEY: reward_weight_overrides,
             "launcher_arguments": list(remaining),
@@ -171,6 +173,7 @@ def main() -> int:
         stage_coverage=s1_training_configuration.get("stage_coverage"),
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
+        history_length=history_length,
         rollout_steps=rollout_steps,
         stability_reward_curriculum=stability_reward_curriculum,
     )
@@ -206,6 +209,8 @@ def main() -> int:
             f"agent.num_steps_per_env={rollout_steps}",
             f"agent.save_interval={training_artifact_interval(rollout_steps)}",
             f"agent.actor.latent_dim={latent_dim}",
+            f"agent.actor.history_length={history_length}",
+            f"env.history_length={history_length}",
             *reward_weight_hydra_overrides(reward_weight_overrides),
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
             "env.observations.teacher_dynamic_history=null",

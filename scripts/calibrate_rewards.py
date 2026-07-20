@@ -312,6 +312,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     env_cfg.seed = args.seed
     _configure_training(env_cfg)
     training_parameters = training_configuration["training_parameters"]
+    env_cfg.history_length = int(training_parameters["history_length"])
     apply_reward_weight_overrides(
         env_cfg,
         reward_weight_overrides_from_configuration(training_configuration),
@@ -325,6 +326,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
     agent_cfg = load_cfg_from_registry(args.task, registry_key)
     agent_cfg.device = device
     agent_cfg.actor.latent_dim = int(training_parameters["latent_dim"])
+    agent_cfg.actor.history_length = int(training_parameters["history_length"])
     agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
     raw_env = gym.make(args.task, cfg=env_cfg)
     env = None

@@ -91,6 +91,7 @@ def main() -> int:
     training_parameters = loaded_checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
     fat2_weight = float(training_parameters["fat2_weight"])
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     curriculum_iteration = loaded_checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
     if isinstance(curriculum_iteration, bool) or not isinstance(curriculum_iteration, int):
         raise RuntimeError("S2 checkpoint is missing its audited curriculum iteration")
@@ -109,6 +110,8 @@ def main() -> int:
             "--checkpoint",
             str(checkpoint),
             f"agent.actor.latent_dim={latent_dim}",
+            f"agent.actor.history_length={history_length}",
+            f"env.history_length={history_length}",
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
             "env.observations.teacher_dynamic_history=null",
             "env.observations.teacher_static=null",

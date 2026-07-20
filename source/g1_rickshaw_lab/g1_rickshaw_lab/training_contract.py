@@ -30,7 +30,9 @@ from .policy_schema import (
     DEFAULT_CONTEXT_DIM,
     HISTORY_LENGTH,
     SUPPORTED_CONTEXT_DIMS,
+    SUPPORTED_HISTORY_LENGTHS,
     validate_context_dim,
+    validate_history_length,
 )
 from .project_paths import CONFIG_ROOT, PROJECT_ROOT
 from .provenance import (
@@ -58,7 +60,8 @@ CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
 CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY = "g1_rickshaw_stability_rewards_active"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
-TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
+TRAINING_CONFIGURATION_SCHEMA_VERSION = 9
+LEGACY_TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
 EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
 
 REPOSITORY_ROOT = PROJECT_ROOT
@@ -79,12 +82,14 @@ TRAINING_PARAMETER_KEYS = (
     "fat2_weight",
     "rollout_steps",
     "latent_dim",
+    "history_length",
     "stability_reward_curriculum",
 )
 DEFAULT_TRAINING_PARAMETERS = {
     "fat2_weight": 0.1,
     "rollout_steps": 48,
     "latent_dim": DEFAULT_CONTEXT_DIM,
+    "history_length": HISTORY_LENGTH,
     "stability_reward_curriculum": False,
 }
 SUPPORTED_FAT2_WEIGHTS = (0.0, 0.1, 0.2)
@@ -196,6 +201,7 @@ def build_training_configuration(
     fat2_weight: float = float(DEFAULT_TRAINING_PARAMETERS["fat2_weight"]),
     latent_dim: int = int(DEFAULT_TRAINING_PARAMETERS["latent_dim"]),
     rollout_steps: int = int(DEFAULT_TRAINING_PARAMETERS["rollout_steps"]),
+    history_length: int = int(DEFAULT_TRAINING_PARAMETERS["history_length"]),
     stability_reward_curriculum: bool = bool(DEFAULT_TRAINING_PARAMETERS["stability_reward_curriculum"]),
 ) -> dict[str, Any]:
     """Build the canonical configuration shared by every training stage."""
@@ -216,6 +222,7 @@ def build_training_configuration(
                 "fat2_weight": fat2_weight,
                 "rollout_steps": rollout_steps,
                 "latent_dim": latent_dim,
+                "history_length": history_length,
                 "stability_reward_curriculum": stability_reward_curriculum,
             },
         }
@@ -258,7 +265,15 @@ def validate_training_configuration(
 ) -> dict[str, Any]:
     """Validate the replayable CLI/Hydra configuration in a checkpoint."""
 
-    if not isinstance(value, Mapping) or value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
+    if not isinstance(value, Mapping):
+        raise ValueError("training configuration must be a mapping")
+    if value.get("schema_version") == LEGACY_TRAINING_CONFIGURATION_SCHEMA_VERSION:
+        value = dict(value)
+        parameters = dict(value["training_parameters"])
+        parameters["history_length"] = HISTORY_LENGTH
+        value["training_parameters"] = parameters
+        value["schema_version"] = TRAINING_CONFIGURATION_SCHEMA_VERSION
+    if value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
         raise ValueError(f"training configuration requires schema_version: {TRAINING_CONFIGURATION_SCHEMA_VERSION}")
     if set(value) != TRAINING_CONFIGURATION_FIELDS:
         raise ValueError("training configuration has missing or unknown fields")
@@ -295,6 +310,8 @@ def validate_training_configuration(
         raise ValueError("rollout_steps must be an integer")
     if type(training_parameters["latent_dim"]) is not int:
         raise ValueError("latent_dim must be an integer")
+    if type(training_parameters["history_length"]) is not int:
+        raise ValueError("history_length must be an integer")
     if type(training_parameters["stability_reward_curriculum"]) is not bool:
         raise ValueError("stability_reward_curriculum must be boolean")
     raw_fat2_weight = training_parameters["fat2_weight"]
@@ -304,6 +321,7 @@ def validate_training_configuration(
         "fat2_weight": float(raw_fat2_weight),
         "rollout_steps": int(training_parameters["rollout_steps"]),
         "latent_dim": int(training_parameters["latent_dim"]),
+        "history_length": int(training_parameters["history_length"]),
         "stability_reward_curriculum": training_parameters["stability_reward_curriculum"],
     }
     if normalized_parameters["fat2_weight"] not in SUPPORTED_FAT2_WEIGHTS:
@@ -311,6 +329,7 @@ def validate_training_configuration(
     if normalized_parameters["rollout_steps"] not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
     validate_context_dim(normalized_parameters["latent_dim"])
+    validate_history_length(normalized_parameters["history_length"])
     result = dict(value)
     result["training_parameters"] = normalized_parameters
     return finalize_training_configuration(result)
@@ -764,6 +783,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("deployment training configuration must be S2")
     training_configuration = dict(raw_training_configuration)
     latent_dim = int(training_configuration["training_parameters"]["latent_dim"])
+    history_length = int(training_configuration["training_parameters"].get("history_length", HISTORY_LENGTH))
     artifacts = load_task_artifacts(
         os.fspath(feasibility_config_path()),
         os.fspath(DEFAULT_RESET_POSES_PATH.resolve()),
@@ -795,7 +815,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "type": "deterministic_student_mean",
             "inputs": {
                 "current": [None, ACTOR_OBSERVATION_DIM],
-                "history": [None, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM],
+                "history": [None, history_length, ACTOR_OBSERVATION_DIM],
             },
             "context_dim": latent_dim,
             "output": {"normalized_action": [None, ACTION_DIM], "clip": [-1.0, 1.0]},
@@ -806,7 +826,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "stateless": True,
             "inputs": {
                 "current": [None, ACTOR_OBSERVATION_DIM],
-                "history": [None, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM],
+                "history": [None, history_length, ACTOR_OBSERVATION_DIM],
                 "q_ref": [None, ACTION_DIM],
                 "x_prev": [None, ACTION_DIM],
                 "y_prev": [None, ACTION_DIM],
@@ -898,6 +918,7 @@ __all__ = [
     "TRAINING_CONFIGURATION_SCHEMA_VERSION",
     "TRAINING_ARTIFACT_INTERVAL",
     "SUPPORTED_CONTEXT_DIMS",
+    "SUPPORTED_HISTORY_LENGTHS",
     "SUPPORTED_FAT2_WEIGHTS",
     "SUPPORTED_ROLLOUT_STEPS",
     "CHECKPOINT_CURRICULUM_ITERATION_KEY",

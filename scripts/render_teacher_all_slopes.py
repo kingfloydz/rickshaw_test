@@ -184,6 +184,7 @@ def main() -> int:
     )
     training_parameters = checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     checkpoint_iteration = int(checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY])
 
     output = args.output.resolve()
@@ -247,6 +248,8 @@ def main() -> int:
         "--device",
         args.device,
         f"agent.actor.latent_dim={latent_dim}",
+        f"agent.actor.history_length={history_length}",
+        f"env.history_length={history_length}",
         "env.shuffle_slopes=false",
     ]
     if args.headless:

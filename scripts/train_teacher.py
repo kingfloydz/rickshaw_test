@@ -30,6 +30,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     GUIDE_TRAINING_TASK,
     SUPPORTED_CONTEXT_DIMS,
     SUPPORTED_FAT2_WEIGHTS,
+    SUPPORTED_HISTORY_LENGTHS,
     SUPPORTED_ROLLOUT_STEPS,
     TRAINING_CONFIGURATION_KEY,
     build_training_configuration,
@@ -56,6 +57,7 @@ def main() -> int:
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--fat2-weight", type=float, choices=SUPPORTED_FAT2_WEIGHTS, default=None)
     parser.add_argument("--latent-dim", type=int, choices=SUPPORTED_CONTEXT_DIMS, default=None)
+    parser.add_argument("--history-length", type=int, choices=SUPPORTED_HISTORY_LENGTHS, default=None)
     parser.add_argument("--rollout-steps", type=int, choices=SUPPORTED_ROLLOUT_STEPS, default=None)
     parser.add_argument("--stability-reward-curriculum", action="store_true", default=None)
     parser.add_argument(
@@ -104,6 +106,7 @@ def main() -> int:
     defaults = DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
     fat2_weight = float(defaults["fat2_weight"] if args.fat2_weight is None else args.fat2_weight)
     latent_dim = int(defaults["latent_dim"] if args.latent_dim is None else args.latent_dim)
+    history_length = int(defaults["history_length"] if args.history_length is None else args.history_length)
     rollout_steps = int(defaults["rollout_steps"] if args.rollout_steps is None else args.rollout_steps)
     stability_reward_curriculum = bool(
         defaults["stability_reward_curriculum"]
@@ -113,10 +116,11 @@ def main() -> int:
     if resume_parameters is not None and (
         fat2_weight != float(resume_parameters["fat2_weight"])
         or latent_dim != int(resume_parameters["latent_dim"])
+        or history_length != int(resume_parameters["history_length"])
         or rollout_steps != int(resume_parameters["rollout_steps"])
         or stability_reward_curriculum != bool(resume_parameters["stability_reward_curriculum"])
     ):
-        raise ValueError("S0 resume cannot change FAT2, latent_dim, rollout_steps, or stability reward curriculum")
+        raise ValueError("S0 resume cannot change FAT2, latent_dim, history_length, rollout_steps, or stability reward curriculum")
     seed = cli_value(
         remaining,
         "--seed",
@@ -154,6 +158,7 @@ def main() -> int:
         stage_coverage=None,
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
+        history_length=history_length,
         rollout_steps=rollout_steps,
         stability_reward_curriculum=stability_reward_curriculum,
     )
@@ -166,6 +171,8 @@ def main() -> int:
         f"agent.num_steps_per_env={rollout_steps}",
         f"agent.save_interval={training_artifact_interval(rollout_steps)}",
         f"agent.actor.latent_dim={latent_dim}",
+        f"agent.actor.history_length={history_length}",
+        f"env.history_length={history_length}",
         *reward_weight_hydra_overrides(reward_weight_overrides),
         f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
     ]

@@ -380,6 +380,7 @@ class G1RickshawDirectionalSlopeEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     observation_noise_enabled: bool = True
+    history_length: int = 61
     shuffle_slopes: bool = True
 
     feasibility_path: str = os.fspath(DEFAULT_FEASIBILITY_PATH)

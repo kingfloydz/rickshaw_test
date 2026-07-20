@@ -182,6 +182,19 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
     assert recurrent_modules == []
 
 
+@pytest.mark.parametrize(("history_length", "kernel_size"), ((61, 5), (91, 7)))
+def test_tcn_history_ablation_uses_the_full_requested_receptive_field(
+    history_length: int,
+    kernel_size: int,
+) -> None:
+    encoder = ContextEncoder(history_length=history_length).eval()
+
+    assert encoder.history_length == history_length
+    assert encoder.kernel_size == kernel_size
+    assert encoder.receptive_field == history_length
+    assert encoder(torch.zeros(2, history_length, 96)).shape == (2, 16)
+
+
 def test_fixed_teacher_and_student_context_interfaces() -> None:
     teacher = G1RickshawTeacherActor().eval()
     student = G1RickshawStudentActor().eval()

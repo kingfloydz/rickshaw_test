@@ -36,6 +36,11 @@ STABILITY_RUN_NAMES = [
     f"latent_dim_{latent_dim}_stability_curriculum"
     for latent_dim in (6, 8, 10, 12, 14, 16, 18, 20)
 ]
+TCN_HISTORY_RUN_NAMES = [
+    f"tcn_history_{history_length}_latent_dim_{latent_dim}"
+    for history_length in (61, 91)
+    for latent_dim in (8, 12, 16, 24)
+]
 
 
 def _exact_arguments(output_dir: Path, *, plan_only: bool = False) -> list[str]:
@@ -58,51 +63,59 @@ def test_unique_runs_are_the_requested_controlled_matrix() -> None:
     assert [spec.training_parameters for spec in pipeline.UNIQUE_RUNS] == [
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 16,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.0,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 16,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.2,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 16,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 24,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 24,
+                "latent_dim": 16,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 64,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 64,
+                "latent_dim": 16,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 8,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 8,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 24,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 24,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
         {
             "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 32,
-            "stability_reward_curriculum": False,
+                "rollout_steps": 48,
+                "latent_dim": 32,
+                "history_length": 61,
+                "stability_reward_curriculum": False,
         },
     ]
 
@@ -122,6 +135,19 @@ def test_latent_dim_4_is_registered() -> None:
     assert spec.fat2_weight == 0.1
     assert spec.rollout_steps == 48
     assert spec.stability_reward_curriculum is False
+
+
+def test_tcn_history_matrix_covers_requested_lengths_and_latents() -> None:
+    specs = [pipeline.RUNS_BY_NAME[name] for name in TCN_HISTORY_RUN_NAMES]
+
+    assert [(spec.history_length, spec.latent_dim) for spec in specs] == [
+        (history_length, latent_dim)
+        for history_length in (61, 91)
+        for latent_dim in (8, 12, 16, 24)
+    ]
+    assert all(spec.fat2_weight == 0.1 for spec in specs)
+    assert all(spec.rollout_steps == 48 for spec in specs)
+    assert all(not spec.stability_reward_curriculum for spec in specs)
 
 
 def test_stability_curriculum_teacher_command_enables_switch(
@@ -202,6 +228,18 @@ def test_teacher_command_binds_every_controlled_parameter(
     assert command[command.index("--latent-dim") + 1] == latent_dim
     assert command[command.index("--device") + 1] == "cuda:0"
     assert any(value.startswith("hydra.run.dir=") for value in command)
+
+
+def test_tcn_history_command_binds_history_length(tmp_path: Path) -> None:
+    args = argparse.Namespace(task="task", num_envs=8192, seed=42)
+    command = pipeline._teacher_command(
+        pipeline.RUNS_BY_NAME["tcn_history_91_latent_dim_24"],
+        args,
+        tmp_path / "tcn_history_91_latent_dim_24",
+        None,
+    )
+
+    assert command[command.index("--history-length") + 1] == "91"
 
 
 def test_ablation_freezes_reward_profile_in_teacher_command(tmp_path: Path) -> None:

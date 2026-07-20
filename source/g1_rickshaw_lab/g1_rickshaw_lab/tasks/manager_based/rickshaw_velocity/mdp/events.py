@@ -1430,6 +1430,7 @@ def initialize_mdp_state(
     from .terminations import PersistentTerminationState, TerminationCauseState
 
     dynamic_history_enabled = getattr(env.cfg.observations, "teacher_dynamic_history", None) is not None
+    history_length = int(getattr(env.cfg, "history_length", 61))
     env.rickshaw_runtime = RickshawRuntime(
         command=CommandState.zeros(num_envs, device=device),
         path=PathTrackingState.zeros(num_envs, device=device),
@@ -1438,9 +1439,14 @@ def initialize_mdp_state(
         action=ButterworthActionState.create(torch.zeros((num_envs, ACTION_DIM), device=device)),
         analytic_force=None,
         cart_interaction_wrench=None,
-        observation_history=ObservationHistoryState.zeros(num_envs, device=device),
+        observation_history=ObservationHistoryState.zeros(
+            num_envs,
+            history_length=history_length,
+            device=device,
+        ),
         teacher_dynamic_history=ObservationHistoryState.zeros(
             num_envs,
+            history_length=history_length,
             observation_dim=TEACHER_DYNAMIC_DIM,
             device=device,
             history_enabled=dynamic_history_enabled,

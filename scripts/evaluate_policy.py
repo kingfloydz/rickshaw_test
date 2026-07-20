@@ -207,11 +207,14 @@ def _load_policy(
     latent_dim = int(
         checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
     )
+    history_length = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["history_length"]
+    )
     if stage == "s1_context_distillation":
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
         state = checkpoint["model_state_dict"]
-        model = G1RickshawStudentActor(latent_dim).to(device)
+        model = G1RickshawStudentActor(latent_dim, history_length).to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
         keepalive.append(model)
@@ -219,7 +222,7 @@ def _load_policy(
 
     from rsl_rl.runners import OnPolicyRunner
     registry_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device, latent_dim)
+    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device, latent_dim, history_length)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
@@ -243,8 +246,11 @@ def _load_teacher_policy(
     latent_dim = int(
         checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
     )
+    history_length = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["history_length"]
+    )
     agent_cfg = _load_rsl_runner_cfg(
-        task, "rsl_rl_cfg_entry_point", device, latent_dim
+        task, "rsl_rl_cfg_entry_point", device, latent_dim, history_length
     )
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
     runner.load(
@@ -257,7 +263,11 @@ def _load_teacher_policy(
 
 
 def _load_rsl_runner_cfg(
-    task: str, registry_key: str, device: str, latent_dim: int
+    task: str,
+    registry_key: str,
+    device: str,
+    latent_dim: int,
+    history_length: int,
 ):
     """Load the fixed RSL-RL 5 runner configuration."""
 
@@ -266,6 +276,7 @@ def _load_rsl_runner_cfg(
     agent_cfg = load_cfg_from_registry(task, registry_key)
     agent_cfg.device = device
     agent_cfg.actor.latent_dim = latent_dim
+    agent_cfg.actor.history_length = history_length
     return normalize_rsl_rl_runner_configuration(agent_cfg)
 
 
@@ -631,6 +642,7 @@ def main() -> int:  # noqa: C901
     fat2_weight = float(training_parameters["fat2_weight"])
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     reward_weight_overrides = reward_weight_overrides_from_configuration(
         training_configuration
     )
@@ -653,6 +665,7 @@ def main() -> int:  # noqa: C901
         baseline_parameters = s1_report["evaluation"]
         if (
             baseline_parameters.get("latent_dim") != latent_dim
+            or baseline_parameters.get("history_length") != history_length
             or baseline_parameters.get("rollout_steps") != rollout_steps
             or baseline_parameters.get("fat2_weight") != fat2_weight
             or baseline_parameters.get("reward_weight_overrides", {})
@@ -700,12 +713,19 @@ def main() -> int:  # noqa: C901
         try:
             env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
             env_cfg.seed = args.seeds[0]
+            env_cfg.history_length = history_length
             _configure_evaluation(env_cfg, fat2_weight, reward_weight_overrides)
             if is_student and teacher_path is None:
                 env_cfg.observations.teacher_dynamic_history = None
                 env_cfg.observations.teacher_static = None
             agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-            agent_cfg = _load_rsl_runner_cfg(args.task, agent_key, device, latent_dim)
+            agent_cfg = _load_rsl_runner_cfg(
+                args.task,
+                agent_key,
+                device,
+                latent_dim,
+                history_length,
+            )
             raw_env = gym.make(args.task, cfg=env_cfg)
             env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
             base_env = raw_env.unwrapped
@@ -789,6 +809,7 @@ def main() -> int:  # noqa: C901
             "fat2_weight": fat2_weight,
             "rollout_steps": rollout_steps,
             "latent_dim": latent_dim,
+            "history_length": history_length,
             "reward_weight_overrides": reward_weight_overrides,
         },
         "metric_definitions": METRIC_DEFINITIONS,
