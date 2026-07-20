@@ -22,6 +22,10 @@ from g1_rickshaw_lab.rl.context_encoder import (
     HISTORY_LENGTH as TCN_HISTORY_LENGTH,
 )
 from g1_rickshaw_lab.rl.distillation import StudentDistillationLoss, gaussian_kl
+from g1_rickshaw_lab.rl.rsl_rl_models import (
+    RslRickshawActorModel,
+    RslRickshawCriticModel,
+)
 from g1_rickshaw_lab.rl.teacher_model import G1RickshawTeacherActor
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import rewards
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations import (
@@ -193,6 +197,22 @@ def test_tcn_history_ablation_uses_the_full_requested_receptive_field(
     assert encoder.kernel_size == kernel_size
     assert encoder.receptive_field == history_length
     assert encoder(torch.zeros(2, history_length, 96)).shape == (2, 16)
+
+
+def test_rsl_models_accept_standard_mlp_compatibility_fields() -> None:
+    compatibility_fields = {
+        "stochastic",
+        "init_noise_std",
+        "noise_std_type",
+        "state_dependent_std",
+    }
+
+    assert compatibility_fields <= set(
+        inspect.signature(RslRickshawActorModel).parameters
+    )
+    assert compatibility_fields <= set(
+        inspect.signature(RslRickshawCriticModel).parameters
+    )
 
 
 def test_fixed_teacher_and_student_context_interfaces() -> None:

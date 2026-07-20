@@ -71,10 +71,15 @@ class RslRickshawActorModel(_RslModelContract):
         activation: str = "elu",
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
+        stochastic: Any = None,
+        init_noise_std: Any = None,
+        noise_std_type: str = "scalar",
+        state_dependent_std: bool = False,
         latent_dim: int = DEFAULT_CONTEXT_DIM,
         history_length: int = HISTORY_LENGTH,
     ) -> None:
         super().__init__()
+        del stochastic, init_noise_std, noise_std_type, state_dependent_std
         _require_rsl_rl()
         if output_dim != ACTION_DIM:
             raise ValueError(f"rickshaw action dimension is fixed to {ACTION_DIM}, got {output_dim}")
@@ -214,8 +219,13 @@ class RslRickshawCriticModel(_RslModelContract):
         activation: str = "elu",
         obs_normalization: bool = False,
         distribution_cfg: dict | None = None,
+        stochastic: Any = None,
+        init_noise_std: Any = None,
+        noise_std_type: str = "scalar",
+        state_dependent_std: bool = False,
     ) -> None:
         super().__init__()
+        del stochastic, init_noise_std, noise_std_type, state_dependent_std
         _require_rsl_rl()
         if output_dim != 1 or distribution_cfg is not None:
             raise ValueError("critic must be deterministic with scalar output")
