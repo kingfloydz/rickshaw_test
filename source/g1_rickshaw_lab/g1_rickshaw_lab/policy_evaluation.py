@@ -7,17 +7,16 @@ number independently testable on CPU.
 
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import math
 from typing import Any, Final
 
 import numpy as np
 import torch
 
 from .slope_contract import SLOPE_GRADIENTS
-
 
 POLICY_DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 1
 GUIDE_POLICY_EVALUATION_TASK: Final[str] = (
@@ -50,15 +49,17 @@ METRIC_DEFINITIONS: Final[dict[str, str]] = {
     "locomotion.foot_slip": "summed slope-plane speed of contacting feet",
     "actions.processed_rate": "RMS joint norm of (q_t-q_t-1)/policy_dt",
     "actions.processed_jerk": "RMS joint norm of (q_t-2q_t-1+q_t-2)/policy_dt^2",
-    "actuation.power": "sum(abs(applied_torque * joint_velocity)) over the 29 policy joints",
+    "actuation.power": "sum(abs(actuator_force * joint_velocity)) over the 29 policy joints",
     "connection.residual": "maximum position residual of the two MuJoCo site connections",
     "connection.force/torque": "maximum left/right connection force or torque norm",
     "connection.asymmetry": "absolute left/right norm difference divided by their sum",
-    "analytic_force.relative_error": "instantaneous symmetric relative error after projecting robot-on-cart connection force",
+    "analytic_force.relative_error": (
+        "instantaneous symmetric relative error after projecting robot-on-cart connection force"
+    ),
     "analytic_force.fat_window_consistency": "0.5 s impulse-bias gate normalized by mean absolute analytic force",
     "stability.zmp_margin": "signed ZMP support-polygon margin for valid samples",
     "actuation.arm/leg_torque_margin": (
-        "minimum per-environment 1-|applied_torque|/current actuator.effort_limit"
+        "minimum per-environment 1-|actuator_force|/current actuator.effort_limit"
     ),
     "distillation.teacher_student_action_kl": "KL(teacher Gaussian || student Gaussian), summed over 29 actions",
     "curriculum.distribution": "policy-sample histogram for training stage and slope",

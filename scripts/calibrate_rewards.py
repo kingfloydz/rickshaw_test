@@ -167,13 +167,15 @@ def _configure_training(env_cfg: Any) -> None:
 def _assign_fixed_slopes(base_env: Any):
     import torch
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mjlab_events import (
+        assign_mjlab_slope_slots,
+    )
 
-    slots, levels, columns = mdp.balanced_slope_assignment(
+    slots, _, _ = mdp.balanced_slope_assignment(
         base_env.num_envs,
         device=base_env.device,
     )
-    mdp.apply_terrain_assignment(base_env, levels, columns)
-    mdp.update_slope_frame(base_env)
+    assign_mjlab_slope_slots(base_env, slots)
     expected = torch.tensor(SIGNED_SLOPES, device=base_env.device)[slots]
     if not torch.allclose(base_env.slope, expected, atol=1.0e-7, rtol=0.0):
         raise RewardCalibrationError(
@@ -210,8 +212,6 @@ def _physics_snapshot(
     nominal_source = base_env.cfg.domain_randomization.nominal
     if not isinstance(nominal_source, Mapping):
         raise RewardCalibrationError("C1 environment has no fixed physics values")
-    num_envs = base_env.num_envs
-    device = base_env.device
     actual_values = {
         "torso.mass_delta": base_env.torso_mass_delta,
         "payload.mass": base_env._payload_mass,

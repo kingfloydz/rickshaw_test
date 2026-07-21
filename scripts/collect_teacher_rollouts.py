@@ -38,7 +38,6 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     validate_rollout_stage_coverage,
 )
 from g1_rickshaw_lab.artifact_io import write_json_atomic  # noqa: E402
-
 from _rollout_audit import (  # noqa: E402
     AUDIT_TENSOR_NAMES,
     DEFAULT_NUM_ENVS,
@@ -158,7 +157,9 @@ def main() -> int:  # noqa: C901
         from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
-        from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
+        from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mjlab_events import (
+            assign_mjlab_slope_slots,
+        )
 
         random.seed(args.seed)
         np.random.seed(args.seed)
@@ -266,10 +267,7 @@ def main() -> int:  # noqa: C901
         def install_fixed_rollout_assignment() -> None:
             """Install the deterministic configured-slope allocation before reset."""
 
-            levels = fixed_assignment["terrain_level"]
-            terrain_types = fixed_assignment["terrain_type"]
-            mdp.apply_terrain_assignment(base_env, levels, terrain_types)
-            mdp.update_slope_frame(base_env)
+            assign_mjlab_slope_slots(base_env, fixed_assignment["slope_index"])
 
         def assert_fixed_rollout_assignment() -> None:
             terrain = base_env.scene.terrain

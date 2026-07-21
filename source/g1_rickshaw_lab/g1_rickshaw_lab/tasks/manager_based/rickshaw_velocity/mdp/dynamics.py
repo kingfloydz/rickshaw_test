@@ -1,20 +1,11 @@
-"""Command, cart, FAT2, and ZMP dynamics for the rickshaw task.
-
-All numerical kernels are plain Torch functions.  The small environment
-adapters at the end use the state names defined by the implementation guide and
-can be called from a ManagerBasedRLEnv pre-physics hook.
-"""
+"""Pure Torch command, cart, FAT2, and ZMP dynamics kernels."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import MISSING, dataclass
-from typing import Any
 
 import torch
-
-from g1_rickshaw_lab.slope_contract import TERRAIN_COLUMNS_PER_TYPE
-
 
 GRAVITY = 9.81
 
@@ -49,7 +40,7 @@ class SpeedReferenceState:
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
-    ) -> "SpeedReferenceState":
+    ) -> SpeedReferenceState:
         value = torch.zeros(num_envs, device=device, dtype=dtype)
         return cls(v_ref=value.clone(), a_ref=value.clone())
 
@@ -100,57 +91,6 @@ def update_speed_reference(
     state.v_ref[:] = torch.where(settled, v_sample, v_next)
     state.a_ref[:] = torch.where(settled, torch.zeros_like(a_next), a_next)
     return state
-
-
-@dataclass(frozen=True)
-class SlopeFrame:
-    slope: torch.Tensor
-    gamma: torch.Tensor
-    tangent_w: torch.Tensor
-    lateral_w: torch.Tensor
-    normal_w: torch.Tensor
-    quaternion_wxyz: torch.Tensor
-
-
-def compute_slope_frame(
-    terrain_level: torch.Tensor,
-    terrain_column: torch.Tensor,
-    *,
-    columns_per_type: int = TERRAIN_COLUMNS_PER_TYPE,
-) -> SlopeFrame:
-    """Construct the configured slope frame from terrain row and column."""
-
-    if terrain_level.shape != terrain_column.shape:
-        raise ValueError("terrain_level and terrain_column must have identical shapes")
-    if columns_per_type <= 0:
-        raise ValueError("columns_per_type must be positive")
-    dtype = torch.float32 if not terrain_level.dtype.is_floating_point else terrain_level.dtype
-    level = terrain_level.to(dtype=dtype)
-    column = terrain_column.to(device=level.device)
-    magnitude = 0.01 + 0.01 * level
-    sign = torch.where(
-        column < columns_per_type,
-        torch.zeros_like(magnitude),
-        torch.where(
-            column < 2 * columns_per_type,
-            torch.ones_like(magnitude),
-            -torch.ones_like(magnitude),
-        ),
-    )
-    slope = sign * magnitude
-    gamma = torch.atan(slope)
-    zeros = torch.zeros_like(gamma)
-    ones = torch.ones_like(gamma)
-    tangent = torch.stack((torch.cos(gamma), zeros, torch.sin(gamma)), dim=-1)
-    lateral = torch.stack((zeros, ones, zeros), dim=-1)
-    normal = torch.stack((-torch.sin(gamma), zeros, torch.cos(gamma)), dim=-1)
-
-    # The frame matrix has [e_s, e_y, e_n] as columns. In wxyz
-    # convention this is a rotation of -gamma about world Y.
-    quaternion = torch.stack(
-        (torch.cos(0.5 * gamma), zeros, -torch.sin(0.5 * gamma), zeros), dim=-1
-    )
-    return SlopeFrame(slope, gamma, tangent, lateral, normal, quaternion)
 
 
 def low_pass(
@@ -237,7 +177,7 @@ class SecondOrderLowPassState:
     previous_previous: torch.Tensor
 
     @classmethod
-    def initialized(cls, value: torch.Tensor) -> "SecondOrderLowPassState":
+    def initialized(cls, value: torch.Tensor) -> SecondOrderLowPassState:
         return cls(value.clone(), value.clone(), value.clone(), value.clone())
 
     def reset(self, value: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
@@ -333,110 +273,6 @@ def articulation_center_of_mass(
     return position, velocity, total_mass
 
 
-def _center_of_mass_from_cached_weights(
-    body_com_pos_w: torch.Tensor,
-    body_com_lin_vel_w: torch.Tensor,
-    weights: torch.Tensor,
-    total_mass: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    position = torch.sum(body_com_pos_w * weights[..., None], dim=1)
-    velocity = torch.sum(body_com_lin_vel_w * weights[..., None], dim=1)
-    return position, velocity, total_mass
-
-
-def robot_system_mass_kinematics(env: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Read current whole-G1 CoM kinematics using startup-validated masses."""
-
-    robot = env.scene["robot"]
-    return _center_of_mass_from_cached_weights(
-        robot.data.body_com_pos_w,
-        robot.data.body_com_lin_vel_w,
-        env.robot_body_mass_weights,
-        env.robot_total_mass,
-    )
-
-
-def cart_system_mass_kinematics(env: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Read current whole-rickshaw CoM kinematics using sampled body masses."""
-
-    cart = env.scene["rickshaw"]
-    return _center_of_mass_from_cached_weights(
-        cart.data.body_com_pos_w,
-        cart.data.body_com_lin_vel_w,
-        env.rickshaw_body_mass_weights,
-        env.rickshaw_total_mass,
-    )
-
-
-def cart_ground_contact_force_w(env: Any) -> torch.Tensor:
-    """Return the external terrain force on the cart from its two wheels.
-
-    The all-body cart contact sensor also contains the intended gripper/crossbar
-    contact. Subtracting that force from cart momentum would remove part of the
-    robot-cart interaction that this estimator is intended to measure.
-    """
-
-    force_w = env.scene["wheel_contacts"].data.net_forces_w[:, env.wheel_sensor_ids]
-    if force_w.ndim != 3 or force_w.shape[1:] != (2, 3):
-        raise ValueError("wheel ground-contact force must have shape [N,2,3]")
-    return torch.sum(force_w, dim=1)
-
-
-def accumulate_cart_interaction_wrench(
-    env: Any, rolling_force_w: torch.Tensor
-) -> None:
-    """Accumulate one pre-physics ground-contact/rolling-force sample."""
-
-    state = getattr(env, "cart_interaction_wrench_state", None)
-    if state is None:
-        raise RuntimeError("cart interaction wrench state is not initialized")
-    if rolling_force_w.ndim != 3 or rolling_force_w.shape[1:] != (2, 3):
-        raise ValueError("rolling resistance force must have shape [N,2,3]")
-    contact_force_w = cart_ground_contact_force_w(env)
-    state.accumulate(contact_force_w, torch.sum(rolling_force_w, dim=1))
-
-
-def update_cart_interaction_wrench(
-    env: Any,
-    cart_kinematics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-) -> torch.Tensor:
-    """Recover the measured cart-on-robot force from whole-cart momentum balance."""
-
-    if not hasattr(env, "read_connection_reaction_residual"):
-        raise RuntimeError("connection residual/impulse adapter was not installed at startup")
-    # The per-side proxy is the only complete connection wrench available to privileged
-    # observations. Whole-cart momentum balance below remains the physical force
-    # source used by FAT2 and the analytic interaction-force diagnostics.
-    connection_wrench_w, _, _ = env.read_connection_reaction_residual()
-    state = getattr(env, "cart_interaction_wrench_state", None)
-    if state is None:
-        raise RuntimeError("cart interaction wrench state is not initialized")
-    if cart_kinematics is None:
-        cart_kinematics = cart_system_mass_kinematics(env)
-    _, com_velocity_w, total_mass = cart_kinematics
-    final_contact_force_w = cart_ground_contact_force_w(env)
-    gravity_w = torch.tensor(
-        env.cfg.sim.gravity,
-        device=env.device,
-        dtype=com_velocity_w.dtype,
-    )
-    force_on_cart_w, valid = state.finish(
-        com_velocity_w,
-        total_mass,
-        gravity_w,
-        final_contact_force_w,
-        env.step_dt,
-    )
-    hand_force_w = -force_on_cart_w
-    env.rickshaw_state.hand_force_w[:] = hand_force_w
-    env.rickshaw_state.hand_torque_w.zero_()
-    # Keep physical truth separate from its diagnostic/checkpoint mirror.
-    env.rickshaw_state.connection_truth_wrench_w[:] = connection_wrench_w
-    env.rickshaw_state.connection_wrench_w[:] = connection_wrench_w
-    env.cart_interaction_wrench_valid = valid
-    return hand_force_w
-
-
 def parallel_axis_inertia(
     inertia_at_com: torch.Tensor, mass: torch.Tensor, displacement: torch.Tensor
 ) -> torch.Tensor:
@@ -513,7 +349,7 @@ class AnalyticHandleForceState:
     @classmethod
     def initialized(
         cls, tangential_velocity: torch.Tensor, pitch: torch.Tensor
-    ) -> "AnalyticHandleForceState":
+    ) -> AnalyticHandleForceState:
         zeros = torch.zeros_like(tangential_velocity)
         return cls(
             velocity_filter=SecondOrderLowPassState.initialized(tangential_velocity),
@@ -557,7 +393,7 @@ class WrenchConsistencyState:
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
-    ) -> "WrenchConsistencyState":
+    ) -> WrenchConsistencyState:
         if num_envs <= 0 or window_steps <= 0:
             raise ValueError("wrench consistency dimensions must be positive")
         return cls(
@@ -589,7 +425,7 @@ class WrenchConsistencyState:
 
 @dataclass
 class FAT2ComRadiusState:
-    """Windowed sagittal CoM radius with a calibrated reset fallback."""
+    """Windowed sagittal CoM radius initialized from its calibrated reference."""
 
     sample_buffer: torch.Tensor
     running_sum: torch.Tensor
@@ -607,7 +443,7 @@ class FAT2ComRadiusState:
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
-    ) -> "FAT2ComRadiusState":
+    ) -> FAT2ComRadiusState:
         if num_envs <= 0 or window_steps <= 0 or reference_radius <= 0.0:
             raise ValueError("FAT2 CoM radius state dimensions and reference must be positive")
         reference = torch.full(
@@ -670,119 +506,6 @@ class FAT2ComRadiusState:
         self.cursor[ids] = 0
         self.count[ids] = 0
         self.filtered_radius[ids] = self.reference_radius[ids]
-
-
-@dataclass
-class CartInteractionWrenchState:
-    """Policy-rate cart interaction force reconstructed from momentum balance."""
-
-    previous_com_velocity_w: torch.Tensor
-    contact_force_sum_w: torch.Tensor
-    first_contact_force_w: torch.Tensor
-    rolling_force_sum_w: torch.Tensor
-    sample_count: torch.Tensor
-    valid: torch.Tensor
-
-    @classmethod
-    def initialized(cls, com_velocity_w: torch.Tensor) -> "CartInteractionWrenchState":
-        if com_velocity_w.ndim != 2 or com_velocity_w.shape[-1] != 3:
-            raise ValueError("cart CoM velocity must have shape [N,3]")
-        zeros = torch.zeros_like(com_velocity_w)
-        return cls(
-            previous_com_velocity_w=com_velocity_w.clone(),
-            contact_force_sum_w=zeros.clone(),
-            first_contact_force_w=zeros.clone(),
-            rolling_force_sum_w=zeros.clone(),
-            sample_count=torch.zeros(
-                com_velocity_w.shape[0],
-                device=com_velocity_w.device,
-                dtype=torch.long,
-            ),
-            valid=torch.zeros(
-                com_velocity_w.shape[0],
-                device=com_velocity_w.device,
-                dtype=torch.bool,
-            ),
-        )
-
-    def reset(
-        self, com_velocity_w: torch.Tensor, env_ids: torch.Tensor | None = None
-    ) -> None:
-        ids: slice | torch.Tensor = slice(None) if env_ids is None else env_ids
-        if env_ids is None:
-            source = com_velocity_w
-        elif com_velocity_w.shape[0] == self.previous_com_velocity_w.shape[0]:
-            source = com_velocity_w[env_ids]
-        elif com_velocity_w.shape == (env_ids.numel(), 3):
-            source = com_velocity_w
-        else:
-            raise ValueError("reset cart CoM velocity has the wrong batch shape")
-        self.previous_com_velocity_w[ids] = source
-        self.contact_force_sum_w[ids] = 0.0
-        self.first_contact_force_w[ids] = 0.0
-        self.rolling_force_sum_w[ids] = 0.0
-        self.sample_count[ids] = 0
-        self.valid[ids] = False
-
-    def accumulate(
-        self, contact_force_w: torch.Tensor, rolling_force_w: torch.Tensor
-    ) -> None:
-        expected = self.previous_com_velocity_w.shape
-        if contact_force_w.shape != expected or rolling_force_w.shape != expected:
-            raise ValueError("cart force samples must have shape [N,3]")
-        first = self.sample_count == 0
-        self.first_contact_force_w[first] = contact_force_w[first]
-        self.contact_force_sum_w += contact_force_w
-        self.rolling_force_sum_w += rolling_force_w
-        self.sample_count += 1
-
-    def finish(
-        self,
-        com_velocity_w: torch.Tensor,
-        total_mass: torch.Tensor,
-        gravity_w: torch.Tensor,
-        final_contact_force_w: torch.Tensor,
-        dt: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if dt <= 0.0:
-            raise ValueError("cart interaction update dt must be positive")
-        expected = self.previous_com_velocity_w.shape
-        if com_velocity_w.shape != expected or final_contact_force_w.shape != expected:
-            raise ValueError("cart interaction kinematics/contacts must have shape [N,3]")
-        if total_mass.shape != expected[:1] or gravity_w.shape != (3,):
-            raise ValueError("cart interaction mass/gravity shapes are invalid")
-        count = self.sample_count.to(com_velocity_w.dtype)
-        ready = self.sample_count > 0
-        denominator = torch.clamp(count, min=1.0)[:, None]
-        # Pre-physics hooks observe the previous interval's final contact on
-        # their first call. Replace that sample with this interval's final one.
-        contact_average = (
-            self.contact_force_sum_w
-            - self.first_contact_force_w
-            + final_contact_force_w
-        ) / denominator
-        rolling_average = self.rolling_force_sum_w / denominator
-        acceleration_w = (
-            com_velocity_w - self.previous_com_velocity_w
-        ) / dt
-        force_on_cart_w = (
-            total_mass[:, None] * acceleration_w
-            - total_mass[:, None] * gravity_w[None, :]
-            - contact_average
-            - rolling_average
-        )
-        finite = torch.all(torch.isfinite(force_on_cart_w), dim=-1)
-        valid = ready & finite & torch.isfinite(total_mass) & (total_mass > 0.0)
-        force_on_cart_w = torch.where(
-            valid[:, None], force_on_cart_w, torch.zeros_like(force_on_cart_w)
-        )
-        self.previous_com_velocity_w[:] = com_velocity_w
-        self.contact_force_sum_w.zero_()
-        self.first_contact_force_w.zero_()
-        self.rolling_force_sum_w.zero_()
-        self.sample_count.zero_()
-        self.valid[:] = valid
-        return force_on_cart_w, valid
 
 
 def update_wrench_consistency_state(
@@ -953,39 +676,6 @@ def update_analytic_handle_force_state(
     state.t_n[:] = t_n
     state.valid[:] = geometry_valid & wheel_valid
     return state
-
-
-def actual_rickshaw_geometry_in_slope_frame(
-    env: Any,
-    *,
-    cart_com_w: torch.Tensor | None = None,
-    hitch_w: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return actual ``(s,n)`` hitch and whole-cart CoM vectors from the axle."""
-
-    cart = env.scene["rickshaw"]
-    if cart_com_w is None:
-        cart_com_w, _, _ = cart_system_mass_kinematics(env)
-    axle_w = torch.mean(cart.data.body_pos_w[:, env.wheel_body_ids], dim=1)
-    if hitch_w is None:
-        hitch_w = torch.mean(cart.data.body_pos_w[:, env.hitch_body_ids], dim=1)
-    handle_vector = hitch_w - axle_w
-    com_vector = cart_com_w - axle_w
-    handle_sn = torch.stack(
-        (
-            torch.sum(handle_vector * env.path_tangent_w, dim=-1),
-            torch.sum(handle_vector * env.path_normal_w, dim=-1),
-        ),
-        dim=-1,
-    )
-    com_sn = torch.stack(
-        (
-            torch.sum(com_vector * env.path_tangent_w, dim=-1),
-            torch.sum(com_vector * env.path_normal_w, dim=-1),
-        ),
-        dim=-1,
-    )
-    return handle_sn, com_sn
 
 
 def quat_apply_wxyz(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
@@ -1195,7 +885,7 @@ class ZMPKinematicState:
     @classmethod
     def initialized(
         cls, velocity_s: torch.Tensor, velocity_n: torch.Tensor
-    ) -> "ZMPKinematicState":
+    ) -> ZMPKinematicState:
         zeros = torch.zeros_like(velocity_s)
         return cls(
             tangential_velocity_filter=SecondOrderLowPassState.initialized(velocity_s),
@@ -1382,41 +1072,14 @@ def foot_support_polygon(
     return points, point_mask, support_center
 
 
-def update_slope_frame(env: Any, env_ids: torch.Tensor | None = None) -> SlopeFrame:
-    """Recompute the path frame after a terrain-level change."""
-
-    levels = env.scene.terrain.terrain_levels
-    columns = env.scene.terrain.terrain_types
-    ids: slice | torch.Tensor = slice(None) if env_ids is None else env_ids
-    frame = compute_slope_frame(levels[ids], columns[ids])
-
-    if not hasattr(env, "path_tangent_w"):
-        shape = (env.num_envs, 3)
-        env.path_tangent_w = torch.zeros(shape, device=env.device)
-        env.path_lateral_w = torch.zeros(shape, device=env.device)
-        env.path_normal_w = torch.zeros(shape, device=env.device)
-        env.gamma = torch.zeros(env.num_envs, device=env.device)
-        env.slope = torch.zeros(env.num_envs, device=env.device)
-        env.slope_quat_w = torch.zeros((env.num_envs, 4), device=env.device)
-    env.path_tangent_w[ids] = frame.tangent_w
-    env.path_lateral_w[ids] = frame.lateral_w
-    env.path_normal_w[ids] = frame.normal_w
-    env.gamma[ids] = frame.gamma
-    env.slope[ids] = frame.slope
-    env.slope_quat_w[ids] = frame.quaternion_wxyz
-    return frame
-
-
 __all__ = [
     "AnalyticForceCfg",
     "AnalyticHandleForceState",
-    "CartInteractionWrenchState",
     "FAT2Cfg",
     "FAT2ComRadiusState",
     "GRAVITY",
     "RickshawMassProperties",
     "SecondOrderLowPassState",
-    "SlopeFrame",
     "SpeedReferenceCfg",
     "SpeedReferenceState",
     "SupportPolygonCfg",
@@ -1424,14 +1087,9 @@ __all__ = [
     "ZMPCfg",
     "ZMPKinematicState",
     "adapt_connection_reaction_wrench",
-    "actual_rickshaw_geometry_in_slope_frame",
-    "accumulate_cart_interaction_wrench",
     "analytic_handle_force",
     "articulation_center_of_mass",
     "combine_mass_properties",
-    "cart_system_mass_kinematics",
-    "cart_ground_contact_force_w",
-    "compute_slope_frame",
     "convex_support_margin",
     "effective_cart_mass",
     "effective_wheel_damping",
@@ -1444,15 +1102,12 @@ __all__ = [
     "project_hand_wrench_to_slope",
     "quat_apply_wxyz",
     "rickshaw_pitch_from_quaternion",
-    "robot_system_mass_kinematics",
     "rolling_resistance_wrench",
     "sagittal_com_radius",
     "slope_zmp",
     "torso_tilt_from_slope_normal",
     "torso_pitch_from_world_vertical",
     "update_analytic_handle_force_state",
-    "update_cart_interaction_wrench",
-    "update_slope_frame",
     "update_speed_reference",
     "update_wrench_consistency_state",
 ]

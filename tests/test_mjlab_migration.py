@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import xml.etree.ElementTree as ET
 
+import pytest
 
 from g1_rickshaw_lab.assets.g1_dex1 import (
     G1_DEX1_URDF_PATH,
@@ -47,7 +48,7 @@ def test_rickshaw_has_0_6m_wheels_aligned_with_lowered_body() -> None:
 
 
 def test_g1_uses_official_builtin_position_actuator_defaults() -> None:
-    from mjlab.actuator import BuiltinPositionActuatorCfg
+    BuiltinPositionActuatorCfg = pytest.importorskip("mjlab.actuator").BuiltinPositionActuatorCfg
 
     from g1_rickshaw_lab.assets.g1_dex1 import get_g1_robot_cfg
     from g1_rickshaw_lab.g1_motor_defaults import (

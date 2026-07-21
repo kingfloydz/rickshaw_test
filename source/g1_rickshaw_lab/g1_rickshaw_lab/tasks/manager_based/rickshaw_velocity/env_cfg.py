@@ -3,14 +3,46 @@
 from __future__ import annotations
 
 from g1_rickshaw_lab.assets import get_g1_robot_cfg, get_rickshaw_cfg
-from g1_rickshaw_lab.configuration import G1_JOINT_ORDER, load_feasibility_envelope
+from g1_rickshaw_lab.configuration import load_feasibility_envelope
 from g1_rickshaw_lab.policy_schema import HISTORY_LENGTH
 from g1_rickshaw_lab.project_paths import CONFIG_ROOT
+
+ILLEGAL_CONTACT_BODY_NAMES = (
+    "pelvis",
+    "left_hip_pitch_link",
+    "left_hip_roll_link",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_pitch_link",
+    "right_hip_pitch_link",
+    "right_hip_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_pitch_link",
+    "waist_yaw_link",
+    "waist_roll_link",
+    "torso_link",
+    "left_shoulder_pitch_link",
+    "left_shoulder_roll_link",
+    "left_shoulder_yaw_link",
+    "left_elbow_link",
+    "left_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_pitch_link",
+    "right_shoulder_roll_link",
+    "right_shoulder_yaw_link",
+    "right_elbow_link",
+    "right_wrist_roll_link",
+    "right_wrist_pitch_link",
+    "right_wrist_yaw_link",
+)
 
 
 def _runtime_cfg(*, play: bool, history_length: int):
     from .mdp.dynamics import AnalyticForceCfg, FAT2Cfg, SupportPolygonCfg, ZMPCfg
     from .mdp.events import DomainRandomizationCfg, SpeedCommandSamplingCfg
+    from .mdp.terminations import ImmediateSafetyCfg, PersistentSafetyCfg
     from .mjlab_events import MjlabTaskRuntimeCfg
     from .task_spec import RickshawPoseTargetCfg
 
@@ -50,9 +82,9 @@ def _runtime_cfg(*, play: bool, history_length: int):
     )
     return MjlabTaskRuntimeCfg(
         domain=domain,
-        command=SpeedCommandSamplingCfg(),
-        speed_acceleration_limit=envelope.ranges["command.acceleration_limit"].minimum,
-        speed_jerk_limit=envelope.ranges["command.jerk_limit"].minimum,
+        command=SpeedCommandSamplingCfg(maximum=1.0 if play else 0.1),
+        speed_acceleration_limit=envelope.ranges["command.acceleration_limit"].maximum,
+        speed_jerk_limit=envelope.ranges["command.jerk_limit"].maximum,
         rickshaw_pose=RickshawPoseTargetCfg(
             hitch_height_target=calibration["rickshaw_pose.hitch_height_target"],
             hitch_height_tolerance=calibration["rickshaw_pose.hitch_height_tolerance"],
@@ -82,6 +114,21 @@ def _runtime_cfg(*, play: bool, history_length: int):
             foot_center_offset_x=calibration["support.foot_center_offset_x"],
         ),
         zmp=ZMPCfg(min_ground_reaction=calibration["safety.min_ground_reaction"]),
+        immediate_safety=ImmediateSafetyCfg(
+            illegal_contact_force_threshold=calibration["safety.illegal_contact_force_threshold"],
+            wheel_lift_normal_force_threshold=calibration["safety.minimum_wheel_normal_force"],
+            connection_residual_limit=calibration["safety.connection_residual_limit"],
+            connection_impulse_limit=calibration["safety.connection_impulse_limit"],
+        ),
+        persistent_safety=PersistentSafetyCfg(
+            torso_tilt_max=calibration["safety.theta_max"],
+            hitch_height_bounds=tuple(calibration["safety.hitch_height_bounds"]),
+            rickshaw_pitch_bounds=tuple(calibration["safety.rickshaw_pitch_bounds"]),
+            lateral_corridor=calibration["safety.corridor_half_width"],
+            heading_envelope=calibration["safety.heading_error_limit"],
+            overspeed_margin=calibration["safety.overspeed_margin"],
+            arm_torque_limit=calibration["safety.arm_torque_limit"],
+        ),
         history_length=history_length,
         shuffle_slopes=not play,
         play=play,
@@ -92,7 +139,6 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
     """Create the full directional-slope task using mjlab 1.2 APIs."""
 
     from mjlab.envs import ManagerBasedRlEnvCfg
-    from mjlab.envs import mdp as envs_mdp
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -229,9 +275,14 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
         ),
     }
     terminations = {
-        "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
-        "fell_over": TerminationTermCfg(
-            func=envs_mdp.bad_orientation, params={"limit_angle": 1.1344640138}
+        "time_out": TerminationTermCfg(func=mjlab_mdp.time_out, time_out=True),
+        "immediate_safety": TerminationTermCfg(
+            func=mjlab_mdp.immediate_safety,
+            params={"cfg": runtime.immediate_safety},
+        ),
+        "persistent_safety": TerminationTermCfg(
+            func=mjlab_mdp.persistent_safety,
+            params={"cfg": runtime.persistent_safety},
         ),
     }
     curriculum = {
@@ -264,6 +315,19 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
         fields=("found", "force"),
         reduce="netforce",
         num_slots=1,
+        history_length=10,
+    )
+    illegal_contacts = ContactSensorCfg(
+        name="illegal_robot_contacts",
+        primary=ContactMatch(
+            mode="body",
+            pattern=ILLEGAL_CONTACT_BODY_NAMES,
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
     )
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
@@ -273,7 +337,7 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
                 max_init_terrain_level=0,
             ),
             entities={"robot": get_g1_robot_cfg(), "rickshaw": get_rickshaw_cfg()},
-            sensors=(feet, wheels),
+            sensors=(feet, wheels, illegal_contacts),
             num_envs=19 if play else 8192,
             env_spacing=6.0,
             spec_fn=add_closed_chain_constraints,

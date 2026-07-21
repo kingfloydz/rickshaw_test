@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import MISSING, dataclass
-from typing import Any, Sequence
+from typing import Any
 
 import torch
-
-from .dynamics import torso_tilt_from_slope_normal
-
 
 PERSISTENCE_STEPS = 10
 ROOT_NORMAL_HEIGHT_MIN = 0.31
@@ -57,7 +55,7 @@ class PersistentSafetyCfg:
             raise ValueError("the specified root-height threshold is 0.31 m")
         if self.persistence_steps != PERSISTENCE_STEPS:
             raise ValueError("persistent safety conditions must last 10 policy steps")
-        if not 0.0 < self.torso_tilt_max:
+        if not self.torso_tilt_max > 0.0:
             raise ValueError("torso_tilt_max must be positive")
         if self.hitch_height_bounds[1] <= self.hitch_height_bounds[0]:
             raise ValueError("hitch height bounds are not ordered")
@@ -86,7 +84,7 @@ class PersistentTerminationState:
         num_envs: int,
         *,
         device: torch.device | str | None = None,
-    ) -> "PersistentTerminationState":
+    ) -> PersistentTerminationState:
         shape = (num_envs, len(PERSISTENT_CAUSES))
         return cls(
             counters=torch.zeros(shape, device=device, dtype=torch.long),
@@ -133,7 +131,7 @@ class TerminationCauseState:
         num_envs: int,
         *,
         device: torch.device | str | None = None,
-    ) -> "TerminationCauseState":
+    ) -> TerminationCauseState:
         return cls(
             counts=torch.zeros(len(TERMINATION_CAUSES), device=device, dtype=torch.long),
             last_causes=torch.zeros(
@@ -143,6 +141,10 @@ class TerminationCauseState:
 
     def begin_policy_step(self) -> None:
         self.last_causes[:] = False
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        ids: slice | torch.Tensor = slice(None) if env_ids is None else env_ids
+        self.last_causes[ids] = False
 
     def record(self, names: Sequence[str], causes: torch.Tensor) -> None:
         if causes.shape != (self.last_causes.shape[0], len(names)) or causes.dtype != torch.bool:
@@ -165,24 +167,10 @@ class TerminationCauseState:
         return result
 
 
-def _termination_cause_state(env: Any) -> TerminationCauseState:
-    return env.termination_cause_state
-
-
 def termination_cause_histogram(env: Any, *, reset: bool = False) -> dict[str, int]:
     """Public logging interface for the mandatory termination histogram."""
 
-    return _termination_cause_state(env).histogram(reset=reset)
-
-
-def time_out(env: Any) -> torch.Tensor:
-    """Guide-compatible timeout with cause accounting and no failure penalty semantics."""
-
-    result = env.episode_length_buf >= env.max_episode_length
-    state = _termination_cause_state(env)
-    state.begin_policy_step()
-    state.record(("time_out",), result[:, None])
-    return result
+    return env.termination_cause_state.histogram(reset=reset)
 
 
 def finite_tensor_violation(*values: torch.Tensor) -> torch.Tensor:
@@ -284,169 +272,6 @@ def persistent_condition_matrix(
     )
 
 
-def non_finite_state(env: Any) -> torch.Tensor:
-    """Detect numerical divergence in authoritative and safety-critical state."""
-
-    robot = env.scene["robot"]
-    cart = env.scene["rickshaw"]
-    values = [
-        robot.data.root_state_w,
-        robot.data.joint_pos,
-        robot.data.joint_vel,
-        cart.data.root_state_w,
-        cart.data.joint_pos,
-        cart.data.joint_vel,
-        env.command_state.v_sample,
-        env.command_state.v_ref,
-        env.command_state.a_ref,
-        env.command_state.resampling_elapsed_s,
-    ]
-    for state, names in (
-        (env.path_state, ("lateral_error", "heading_error")),
-        (
-            env.action_state,
-            (
-                "q_ref",
-                "target",
-            ),
-        ),
-        (
-            env.rickshaw_state,
-            (
-                "wheel_normal_force",
-                "hitch_height",
-                "hitch_vertical_speed",
-                "pitch",
-                "connection_residual",
-                "connection_impulse",
-                "hand_force_w",
-            ),
-        ),
-        (
-            env.stability_state,
-            (
-                "theta_fat",
-                "torso_pitch",
-                "zmp_s",
-                "zmp_margin",
-                "ground_reaction_normal",
-            ),
-        ),
-        (
-            env.analytic_force_state,
-            ("a_s", "alpha_ddot", "t_s", "t_n"),
-        ),
-    ):
-        for name in names:
-            value = getattr(state, name, None)
-            if torch.is_tensor(value):
-                values.append(value)
-    return finite_tensor_violation(*values)
-
-
-def illegal_body_contact(
-    env: Any, sensor_cfg: Any, threshold: float
-) -> torch.Tensor:
-    sensor = env.scene[sensor_cfg.name]
-    forces = sensor.data.net_forces_w[:, sensor_cfg.body_ids]
-    return contact_force_violation(forces, threshold)
-
-
-def wheel_lift(env: Any, threshold: float) -> torch.Tensor:
-    violation = wheel_lift_violation(env.rickshaw_state.wheel_normal_force, threshold)
-    env.rickshaw_state.two_wheel_contact[:] = ~violation
-    return violation
-
-
-def connection_constraint_failure(
-    env: Any, residual_limit: float, impulse_limit: float
-) -> torch.Tensor:
-    violation = connection_safety_violation(
-        env.rickshaw_state.connection_residual,
-        env.rickshaw_state.connection_impulse,
-        residual_limit,
-        impulse_limit,
-    )
-    return violation
-
-
-def joint_hard_limit(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
-    name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
-    asset = env.scene[name]
-    joint_ids = slice(None) if asset_cfg is None else getattr(asset_cfg, "joint_ids", slice(None))
-    position = asset.data.joint_pos[:, joint_ids]
-    limits = asset.data.joint_pos_limits[:, joint_ids]
-    if limits.ndim == 2:
-        limits = limits.unsqueeze(0).expand(position.shape[0], -1, -1)
-    return hard_joint_limit_violation(position, limits)
-
-
-def persistent_safety_violation(
-    env: Any, cfg: PersistentSafetyCfg
-) -> torch.Tensor:
-    robot = env.scene["robot"]
-    terrain_origin = env.scene.terrain.env_origins
-    root_height = torch.sum(
-        (robot.data.root_pos_w - terrain_origin) * env.path_normal_w, dim=-1
-    )
-    torso_tilt = torso_tilt_from_slope_normal(
-        robot.data.body_quat_w[:, env.torso_body_id], env.path_normal_w
-    )
-    arm_torque = (
-        robot.data.applied_torque[:, env.arm_joint_ids] / env.arm_effort_limits
-    )
-    violations = persistent_condition_matrix(
-        root_height,
-        torso_tilt,
-        env.rickshaw_state.hitch_height,
-        env.rickshaw_state.pitch,
-        env.path_state.lateral_error,
-        env.path_state.heading_error,
-        env.policy_robot_speed_s,
-        env.command_state.v_ref,
-        arm_torque,
-        env.stability_state.zmp_margin,
-        env.stability_state.zmp_valid,
-        cfg,
-    )
-    result = env.termination_state.update(violations, cfg.persistence_steps)
-    _termination_cause_state(env).record(
-        PERSISTENT_CAUSES, env.termination_state.last_causes
-    )
-    return result
-
-
-def immediate_safety_violation(
-    env: Any,
-    cfg: ImmediateSafetyCfg,
-    *,
-    illegal_contact_sensor_cfg: Any,
-    robot_asset_cfg: Any | None = None,
-) -> torch.Tensor:
-    """Combined immediate manager term with no timeout semantics."""
-
-    wheel_violation = wheel_lift(
-        env, cfg.wheel_lift_normal_force_threshold
-    )
-    connection_violation = connection_constraint_failure(
-        env, cfg.connection_residual_limit, cfg.connection_impulse_limit
-    )
-    causes = torch.stack(
-        (
-            non_finite_state(env),
-            illegal_body_contact(
-                env, illegal_contact_sensor_cfg, cfg.illegal_contact_force_threshold
-            ),
-            wheel_violation,
-            connection_violation,
-            joint_hard_limit(env, robot_asset_cfg),
-        ),
-        dim=-1,
-    )
-    _termination_cause_state(env).record(IMMEDIATE_CAUSES, causes)
-    return torch.any(causes, dim=-1)
-
-
 __all__ = [
     "ImmediateSafetyCfg",
     "IMMEDIATE_CAUSES",
@@ -458,18 +283,10 @@ __all__ = [
     "TerminationCauseState",
     "ROOT_NORMAL_HEIGHT_MIN",
     "contact_force_violation",
-    "connection_constraint_failure",
     "connection_safety_violation",
     "finite_tensor_violation",
     "hard_joint_limit_violation",
-    "illegal_body_contact",
-    "immediate_safety_violation",
-    "joint_hard_limit",
-    "non_finite_state",
     "persistent_condition_matrix",
-    "persistent_safety_violation",
     "termination_cause_histogram",
-    "time_out",
-    "wheel_lift",
     "wheel_lift_violation",
 ]

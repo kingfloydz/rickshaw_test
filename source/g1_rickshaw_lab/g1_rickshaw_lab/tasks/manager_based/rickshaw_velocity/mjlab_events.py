@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import torch
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.utils.lab_api.math import quat_from_matrix
 
+from g1_rickshaw_lab.assets.g1_dex1 import GRASP_SITE_NAMES
 from g1_rickshaw_lab.assets.rickshaw import (
     BASE_LINK_NAME,
     HITCH_SITE_NAMES,
@@ -20,10 +20,15 @@ from g1_rickshaw_lab.assets.rickshaw import (
     WHEEL_JOINT_NAMES,
     WHEEL_LINK_NAMES,
 )
-from g1_rickshaw_lab.assets.g1_dex1 import GRASP_SITE_NAMES
 from g1_rickshaw_lab.configuration import G1_JOINT_ORDER
-from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM, HISTORY_LENGTH, TEACHER_DYNAMIC_DIM
-from g1_rickshaw_lab.slope_contract import SLOPE_COUNT, SLOPE_GRADIENTS
+from g1_rickshaw_lab.g1_motor_defaults import G1_JOINT_EFFORT_LIMITS
+from g1_rickshaw_lab.policy_schema import HISTORY_LENGTH, TEACHER_DYNAMIC_DIM
+from g1_rickshaw_lab.slope_contract import (
+    SLOPE_COUNT,
+    SLOPE_GRADIENTS,
+    SLOPE_TERRAIN_LEVELS,
+    SLOPE_TERRAIN_TYPES,
+)
 from g1_rickshaw_lab.static_equilibrium import MujocoStaticEquilibrium, solve_mujoco_static_equilibrium
 
 from .closed_chain import build_assembled_spec
@@ -31,13 +36,13 @@ from .mdp.curricula import apply_terrain_assignment, balanced_slope_assignment, 
 from .mdp.dynamics import (
     AnalyticForceCfg,
     AnalyticHandleForceState,
-    FAT2ComRadiusState,
     FAT2Cfg,
+    FAT2ComRadiusState,
     RickshawMassProperties,
     SupportPolygonCfg,
     WrenchConsistencyState,
-    ZMPKinematicState,
     ZMPCfg,
+    ZMPKinematicState,
     combine_mass_properties,
     convex_support_margin,
     effective_cart_mass,
@@ -67,6 +72,12 @@ from .mdp.events import (
     sample_domain_parameters,
 )
 from .mdp.observations import ObservationHistoryState
+from .mdp.terminations import (
+    ImmediateSafetyCfg,
+    PersistentSafetyCfg,
+    PersistentTerminationState,
+    TerminationCauseState,
+)
 from .task_spec import RickshawPoseTargetCfg
 
 
@@ -81,6 +92,8 @@ class MjlabTaskRuntimeCfg:
     fat2: FAT2Cfg
     support: SupportPolygonCfg
     zmp: ZMPCfg
+    immediate_safety: ImmediateSafetyCfg
+    persistent_safety: PersistentSafetyCfg
     history_length: int = HISTORY_LENGTH
     shuffle_slopes: bool = True
     play: bool = False
@@ -102,6 +115,27 @@ def _slope_frame(gradient: torch.Tensor) -> tuple[torch.Tensor, ...]:
     normal = torch.stack((-torch.sin(gamma), zeros, torch.cos(gamma)), dim=-1)
     quat = torch.stack((torch.cos(0.5 * gamma), zeros, -torch.sin(0.5 * gamma), zeros), dim=-1)
     return gamma, tangent, lateral, normal, quat
+
+
+def assign_mjlab_slope_slots(env: Any, slots: torch.Tensor) -> None:
+    """Apply one canonical slope slot and matching reset library entry per environment."""
+
+    slots = torch.as_tensor(slots, device=env.device, dtype=torch.long).reshape(-1)
+    if slots.shape != (env.num_envs,) or torch.any((slots < 0) | (slots >= SLOPE_COUNT)):
+        raise ValueError("slope slots must have shape [num_envs] and lie in the 19-slope grid")
+    levels = torch.tensor(SLOPE_TERRAIN_LEVELS, device=env.device)[slots]
+    terrain_types = torch.tensor(SLOPE_TERRAIN_TYPES, device=env.device)[slots]
+    apply_terrain_assignment(env, levels, terrain_types)
+    gradients = torch.tensor(SLOPE_GRADIENTS, device=env.device, dtype=torch.float32)
+    env.slope_slot = slots
+    env.slope = gradients[slots]
+    (
+        env.gamma,
+        env.path_tangent_w,
+        env.path_lateral_w,
+        env.path_normal_w,
+        env.slope_quat_w,
+    ) = _slope_frame(env.slope)
 
 
 def _body_mass_kinematics(env: Any, entity_name: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -137,23 +171,23 @@ def initialize_mjlab_task(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTask
 
     del env_ids
     if cfg.play:
-        slots, levels, terrain_types = balanced_slope_assignment(
+        slots, _, _ = balanced_slope_assignment(
             env.num_envs, device=env.device, shuffle=False
         )
     else:
-        slots, levels, terrain_types = weighted_slope_assignment(
+        slots, _, _ = weighted_slope_assignment(
             env.num_envs, device=env.device, shuffle=cfg.shuffle_slopes
         )
-    apply_terrain_assignment(env, levels, terrain_types)
-    gradients = torch.tensor(SLOPE_GRADIENTS, device=env.device, dtype=torch.float32)
-    env.slope_slot = slots
-    env.slope = gradients[slots]
-    env.gamma, env.path_tangent_w, env.path_lateral_w, env.path_normal_w, env.slope_quat_w = _slope_frame(env.slope)
+    assign_mjlab_slope_slots(env, slots)
 
     robot = env.scene["robot"]
     cart = env.scene["rickshaw"]
     env.policy_joint_ids = _ids(robot, "joints", G1_JOINT_ORDER)
     env.policy_actuator_ids = _ids(robot, "actuators", G1_JOINT_ORDER)
+    env.arm_actuator_ids = env.policy_actuator_ids[15:]
+    env.arm_effort_limits = torch.tensor(
+        G1_JOINT_EFFORT_LIMITS[15:], device=env.device, dtype=torch.float32
+    )
     env.wheel_joint_ids = _ids(cart, "joints", WHEEL_JOINT_NAMES)
     env.wheel_body_ids = _ids(cart, "bodies", WHEEL_LINK_NAMES)
     env.hitch_site_ids = _ids(cart, "sites", HITCH_SITE_NAMES)
@@ -210,8 +244,9 @@ def initialize_mjlab_task(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTask
         observation_dim=TEACHER_DYNAMIC_DIM,
         device=env.device,
     )
+    env.termination_state = PersistentTerminationState.zeros(env.num_envs, device=env.device)
+    env.termination_cause_state = TerminationCauseState.zeros(env.num_envs, device=env.device)
     env.rickshaw_pose_cfg = cfg.rickshaw_pose
-    env.actor_observation_noise_scale = torch.zeros(ACTOR_OBSERVATION_DIM, device=env.device)
     env.fat2_wrench_consistency_state = WrenchConsistencyState.zeros(
         env.num_envs, cfg.fat2.wrench_consistency_window_steps, device=env.device
     )
@@ -426,6 +461,8 @@ def reset_from_mujoco_statics(env: Any, env_ids: torch.Tensor | None) -> None:
     env.stability_state.zmp_valid[env_ids] = False
     env.observation_history_state.reset(env_ids)
     env.teacher_dynamic_history_state.reset(env_ids)
+    env.termination_state.reset(env_ids)
+    env.termination_cause_state.reset(env_ids)
     env.fat2_wrench_consistency_state.reset(env_ids)
     env.fat2_com_radius_state.reset(env_ids)
     env.cart_previous_com_velocity_w[env_ids] = 0.0
@@ -433,13 +470,6 @@ def reset_from_mujoco_statics(env: Any, env_ids: torch.Tensor | None) -> None:
     env.last_rolling_force_w[env_ids] = 0.0
     env._mjlab_physical_state_step = -1
     env._mjlab_observation_state_step = -1
-
-
-def _contact_force(sensor: Any) -> torch.Tensor:
-    force = sensor.data.force
-    if force is None:
-        raise RuntimeError(f"contact sensor {sensor.cfg.name!r} must expose force")
-    return force
 
 
 def ensure_mjlab_physical_state(env: Any) -> None:
@@ -485,7 +515,9 @@ def ensure_mjlab_physical_state(env: Any) -> None:
         connection_position_error, dim=-1
     )
 
-    wheel_force = _contact_force(env.scene["wheel_contacts"])
+    wheel_sensor = env.scene["wheel_contacts"]
+    wheel_force = wheel_sensor.data.force
+    mean_wheel_force = torch.mean(wheel_sensor.data.force_history, dim=2)
     wheel_normal = torch.clamp(torch.sum(wheel_force * env.path_normal_w[:, None, :], dim=-1), min=0.0)
     env.rickshaw_state.wheel_normal_force[:] = wheel_normal
     env.rickshaw_state.two_wheel_contact[:] = torch.all(wheel_normal > 1.0, dim=-1)
@@ -495,7 +527,7 @@ def ensure_mjlab_physical_state(env: Any) -> None:
     force_on_cart = (
         cart_mass[:, None] * acceleration
         - cart_mass[:, None] * gravity
-        - torch.sum(wheel_force, dim=1)
+        - torch.sum(mean_wheel_force, dim=1)
         - torch.sum(env.last_rolling_force_w, dim=1)
     )
     valid_force = step > 0
@@ -518,7 +550,7 @@ def ensure_mjlab_physical_state(env: Any) -> None:
     ) * env.step_dt
     env.cart_previous_com_velocity_w[:] = cart_velocity
 
-    foot_force = _contact_force(env.scene["robot_contacts"])
+    foot_force = env.scene["robot_contacts"].data.force
     foot_contact = torch.linalg.vector_norm(foot_force, dim=-1) > 1.0
     points, mask, support_center = foot_support_polygon(
         robot.data.body_link_pos_w[:, env.foot_body_ids],
@@ -676,6 +708,7 @@ def advance_mjlab_policy_state(env: Any, env_ids: torch.Tensor | None, cfg: Mjla
 __all__ = [
     "MjlabTaskRuntimeCfg",
     "advance_mjlab_policy_state",
+    "assign_mjlab_slope_slots",
     "ensure_mjlab_physical_state",
     "initialize_mjlab_domain",
     "initialize_mjlab_task",

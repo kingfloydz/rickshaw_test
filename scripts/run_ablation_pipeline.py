@@ -1000,10 +1000,10 @@ def _run_one_pipeline(
 def _validate_runtime_inputs(args: argparse.Namespace) -> None:
     import importlib.util
 
-    if importlib.util.find_spec("mjlab") is None:
-        raise RuntimeError("mjlab==1.2.0 is not installed")
     if args.output_dir.exists() and not args.resume and any(args.output_dir.iterdir()):
         raise RuntimeError("output directory is not empty; use --resume")
+    if importlib.util.find_spec("mjlab") is None:
+        raise RuntimeError("mjlab==1.2.0 is not installed")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -74,10 +74,10 @@ calibration:
   support.foot_center_offset_x: 0.035
   safety.theta_max: 0.8
   safety.illegal_contact_force_threshold: 5.0
-  safety.robot_cart_contact_force_threshold: 5.0
-  safety.cart_ground_contact_force_threshold: 5.0
   safety.minimum_wheel_normal_force: 25.0
   safety.min_ground_reaction: 100.0
+  safety.connection_residual_limit: 0.06
+  safety.connection_impulse_limit: 1.7
   safety.hitch_height_bounds: [0.70, 0.95]
   safety.rickshaw_pitch_bounds: [0.15, 0.45]
   safety.corridor_half_width: 0.3

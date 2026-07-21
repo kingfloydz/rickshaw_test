@@ -14,6 +14,7 @@ from g1_rickshaw_lab.policy_schema import (
     TEACHER_STATIC_DIM,
 )
 
+from .mdp.dynamics import torso_tilt_from_slope_normal
 from .mdp.observations import (
     ACTOR_OBSERVATION_NOISE_SCALE,
     SLOPE_LOWER,
@@ -23,10 +24,10 @@ from .mdp.observations import (
 )
 from .mdp.rewards import (
     FOOT_SWING_HEIGHT_TARGET_M,
-    HITCH_HEIGHT_RECOVERY_DEADBAND_M,
-    HITCH_HEIGHT_RECOVERY_SCALE_M,
     HIP_YAW_ROLL_POLICY_INDICES,
     HIP_YAW_ROLL_REFERENCE_SCALE_RAD,
+    HITCH_HEIGHT_RECOVERY_DEADBAND_M,
+    HITCH_HEIGHT_RECOVERY_SCALE_M,
     JOINT_LIMIT_NORMALIZER_RAD,
     PELVIS_HEIGHT_BOUNDS_M,
     PELVIS_HEIGHT_ERROR_SCALE_M,
@@ -46,10 +47,24 @@ from .mdp.rewards import (
     track_speed_exp_value,
     zmp_margin_barrier_value,
 )
+from .mdp.terminations import (
+    IMMEDIATE_CAUSES,
+    PERSISTENT_CAUSES,
+    ImmediateSafetyCfg,
+    PersistentSafetyCfg,
+    connection_safety_violation,
+    contact_force_violation,
+    finite_tensor_violation,
+    hard_joint_limit_violation,
+    persistent_condition_matrix,
+    wheel_lift_violation,
+)
 from .mjlab_events import ensure_mjlab_physical_state
 
 
 def _shape_probe(env: Any, *shape: int) -> torch.Tensor:
+    if hasattr(env, "observation_manager"):
+        raise RuntimeError("observation state was not initialized by the startup event")
     return torch.empty((env.num_envs, *shape), device=env.device)
 
 
@@ -105,7 +120,7 @@ def _update_observation_state(env: Any) -> None:
         env.action_state.target,
         gait_phase_observation(env.episode_length_buf * env.step_dt),
     )
-    if not env.runtime_cfg.play:
+    if env.cfg.observation_noise_enabled:
         noise = torch.tensor(ACTOR_OBSERVATION_NOISE_SCALE, device=env.device)
         current = current + torch.empty_like(current).uniform_(-1.0, 1.0) * noise
     env.observation_history_state.advance(current)
@@ -233,7 +248,7 @@ def fat2_prior_exp(env: Any) -> torch.Tensor:
 def feet_gait(env: Any) -> torch.Tensor:
     ensure_mjlab_physical_state(env)
     sensor = env.scene["robot_contacts"]
-    contact = sensor.data.found > 0 if sensor.data.found is not None else torch.linalg.vector_norm(sensor.data.force, dim=-1) > 1.0
+    contact = sensor.data.found > 0
     return feet_gait_value(env.episode_length_buf * env.step_dt, contact, env.command_state.v_ref)
 
 
@@ -241,7 +256,7 @@ def feet_swing_height(env: Any) -> torch.Tensor:
     ensure_mjlab_physical_state(env)
     robot = env.scene["robot"]
     sensor = env.scene["robot_contacts"]
-    contact = sensor.data.found > 0 if sensor.data.found is not None else torch.linalg.vector_norm(sensor.data.force, dim=-1) > 1.0
+    contact = sensor.data.found > 0
     height = torch.sum(
         (robot.data.body_link_pos_w[:, env.foot_body_ids] - env.scene.env_origins[:, None, :])
         * env.path_normal_w[:, None, :],
@@ -254,7 +269,7 @@ def feet_slide(env: Any) -> torch.Tensor:
     ensure_mjlab_physical_state(env)
     robot = env.scene["robot"]
     sensor = env.scene["robot_contacts"]
-    contact = sensor.data.found > 0 if sensor.data.found is not None else torch.linalg.vector_norm(sensor.data.force, dim=-1) > 1.0
+    contact = sensor.data.found > 0
     return feet_slide_value(robot.data.body_link_lin_vel_w[:, env.foot_body_ids], contact)
 
 
@@ -300,6 +315,98 @@ def joint_position_limits(env: Any) -> torch.Tensor:
     return torch.sum(violation / JOINT_LIMIT_NORMALIZER_RAD, dim=-1)
 
 
+def time_out(env: Any) -> torch.Tensor:
+    result = env.episode_length_buf >= env.max_episode_length
+    env.termination_cause_state.begin_policy_step()
+    env.termination_cause_state.record(("time_out",), result[:, None])
+    return result
+
+
+def immediate_safety(env: Any, cfg: ImmediateSafetyCfg) -> torch.Tensor:
+    ensure_mjlab_physical_state(env)
+    robot = env.scene["robot"]
+    cart = env.scene["rickshaw"]
+    contact_force = env.scene["illegal_robot_contacts"].data.force
+    limits = robot.data.joint_pos_limits[:, env.policy_joint_ids]
+    causes = torch.stack(
+        (
+            finite_tensor_violation(
+                robot.data.root_link_pose_w,
+                robot.data.root_link_vel_w,
+                robot.data.joint_pos,
+                robot.data.joint_vel,
+                cart.data.root_link_pose_w,
+                cart.data.root_link_vel_w,
+                cart.data.joint_pos,
+                cart.data.joint_vel,
+                env.command_state.v_sample,
+                env.command_state.v_ref,
+                env.command_state.a_ref,
+                env.path_state.lateral_error,
+                env.path_state.heading_error,
+                env.action_state.q_ref,
+                env.action_state.target,
+                env.rickshaw_state.wheel_normal_force,
+                env.rickshaw_state.connection_residual,
+                env.rickshaw_state.connection_impulse,
+                env.stability_state.theta_fat,
+                env.stability_state.zmp_margin,
+                env.analytic_force_state.a_s,
+            ),
+            contact_force_violation(contact_force, cfg.illegal_contact_force_threshold),
+            wheel_lift_violation(
+                env.rickshaw_state.wheel_normal_force,
+                cfg.wheel_lift_normal_force_threshold,
+            ),
+            connection_safety_violation(
+                env.rickshaw_state.connection_residual,
+                env.rickshaw_state.connection_impulse,
+                cfg.connection_residual_limit,
+                cfg.connection_impulse_limit,
+            ),
+            hard_joint_limit_violation(
+                robot.data.joint_pos[:, env.policy_joint_ids], limits
+            ),
+        ),
+        dim=-1,
+    )
+    env.termination_cause_state.record(IMMEDIATE_CAUSES, causes)
+    return torch.any(causes, dim=-1)
+
+
+def persistent_safety(env: Any, cfg: PersistentSafetyCfg) -> torch.Tensor:
+    ensure_mjlab_physical_state(env)
+    robot = env.scene["robot"]
+    root_height = torch.sum(
+        (robot.data.root_link_pos_w - env.scene.env_origins) * env.path_normal_w,
+        dim=-1,
+    )
+    torso_tilt = torso_tilt_from_slope_normal(
+        robot.data.body_link_quat_w[:, env.torso_body_id], env.path_normal_w
+    )
+    arm_torque = (
+        robot.data.actuator_force[:, env.arm_actuator_ids]
+        / env.arm_effort_limits
+    )
+    violations = persistent_condition_matrix(
+        root_height,
+        torso_tilt,
+        env.rickshaw_state.hitch_height,
+        env.rickshaw_state.pitch,
+        env.path_state.lateral_error,
+        env.path_state.heading_error,
+        env.policy_robot_speed_s,
+        env.command_state.v_ref,
+        arm_torque,
+        env.stability_state.zmp_margin,
+        env.stability_state.zmp_valid,
+        cfg,
+    )
+    result = env.termination_state.update(violations, cfg.persistence_steps)
+    env.termination_cause_state.record(PERSISTENT_CAUSES, env.termination_state.last_causes)
+    return result
+
+
 def termination(env: Any) -> torch.Tensor:
     return (env.termination_manager.terminated & ~env.termination_manager.time_outs).float()
 
@@ -331,10 +438,13 @@ __all__ = [
     "pelvis_height_limits_l2",
     "processed_action_rate_l2",
     "speed_command_levels",
+    "immediate_safety",
+    "persistent_safety",
     "teacher_dynamic_history",
     "teacher_static",
     "terrain_normal_velocity_l2",
     "termination",
     "track_speed_exp",
+    "time_out",
     "zmp_margin_barrier",
 ]

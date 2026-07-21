@@ -24,15 +24,14 @@ flattened with dots.  An interval may be written as ``{min: x, max: y}`` or as
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-import math
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from .slope_contract import SLOPE_GRADIENTS
-
 
 FEASIBILITY_SCHEMA_VERSION = 1
 SLOPE_MATCH_TOLERANCE = 1.0e-9
@@ -114,10 +113,10 @@ REQUIRED_CALIBRATION_FIELDS = (
     "support.foot_center_offset_x",
     "safety.theta_max",
     "safety.illegal_contact_force_threshold",
-    "safety.robot_cart_contact_force_threshold",
-    "safety.cart_ground_contact_force_threshold",
     "safety.minimum_wheel_normal_force",
     "safety.min_ground_reaction",
+    "safety.connection_residual_limit",
+    "safety.connection_impulse_limit",
     "safety.hitch_height_bounds",
     "safety.rickshaw_pitch_bounds",
     "safety.corridor_half_width",
@@ -147,10 +146,10 @@ _CALIBRATION_STRICTLY_POSITIVE = frozenset(
         "support.foot_center_offset_x",
         "safety.theta_max",
         "safety.illegal_contact_force_threshold",
-        "safety.robot_cart_contact_force_threshold",
-        "safety.cart_ground_contact_force_threshold",
         "safety.minimum_wheel_normal_force",
         "safety.min_ground_reaction",
+        "safety.connection_residual_limit",
+        "safety.connection_impulse_limit",
         "safety.corridor_half_width",
         "safety.heading_error_limit",
         "safety.overspeed_margin",
@@ -280,7 +279,7 @@ class NumericRange:
         object.__setattr__(self, "maximum", maximum)
 
     @classmethod
-    def from_value(cls, value: Any, *, path: str = "range") -> "NumericRange":
+    def from_value(cls, value: Any, *, path: str = "range") -> NumericRange:
         if isinstance(value, cls):
             return value
         if isinstance(value, Mapping):
@@ -293,7 +292,7 @@ class NumericRange:
             return cls(value[0], value[1])
         return cls(value, value)
 
-    def contains(self, value: float | "NumericRange", *, tolerance: float = 0.0) -> bool:
+    def contains(self, value: float | NumericRange, *, tolerance: float = 0.0) -> bool:
         if tolerance < 0.0 or not math.isfinite(tolerance):
             raise ValueError("tolerance must be finite and non-negative")
         candidate = value if isinstance(value, NumericRange) else NumericRange.from_value(value)
@@ -301,7 +300,7 @@ class NumericRange:
 
     def assert_contains(
         self,
-        value: float | "NumericRange",
+        value: float | NumericRange,
         *,
         name: str = "value",
         tolerance: float = 0.0,
@@ -388,9 +387,8 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
             "fat.com_radius_bounds",
             "safety.hitch_height_bounds",
             "safety.rickshaw_pitch_bounds",
-        }:
-            if vector[0] >= vector[1]:
-                raise ConfigurationContractError(f"calibration.{name} lower bound must be less than its upper bound")
+        } and vector[0] >= vector[1]:
+            raise ConfigurationContractError(f"calibration.{name} lower bound must be less than its upper bound")
         validated[name] = vector
     theta_max = validated["safety.theta_max"]
     if theta_max >= math.pi / 2.0:
@@ -462,7 +460,7 @@ class FeasibilityEnvelope:
     @classmethod
     def from_mapping(
         cls, mapping: Mapping[str, Any], *, source_path: str | Path | None = None
-    ) -> "FeasibilityEnvelope":
+    ) -> FeasibilityEnvelope:
         data = _expect_mapping(mapping, "feasibility envelope")
         _expect_exact_keys(
             data,
