@@ -1,5 +1,5 @@
 schema_version: 1
-task: Isaac-G1-Rickshaw-Directional-Slope-v0
+task: Mjlab-G1-Rickshaw-Directional-Slope-Teacher
 fixed:
   num_envs: 8192
   rollout_steps: 48

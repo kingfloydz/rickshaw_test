@@ -1,0 +1,53 @@
+{
+  "status": "passed",
+  "issues": [],
+  "model": {
+    "nq": 45,
+    "nv": 43,
+    "njnt": 33,
+    "ngeom": 88,
+    "neq": 2
+  },
+  "collision_filter": {
+    "g1_rickshaw_pairs": "tow_rods_only",
+    "tow_rod_geoms": [
+      "left_tow_rod_collision",
+      "right_tow_rod_collision"
+    ],
+    "gripper_rickshaw_collision": false
+  },
+  "hitches": {
+    "body_stl_points_m": [
+      [
+        0.276,
+        -1.664929,
+        0.180746
+      ],
+      [
+        -0.276,
+        -1.664929,
+        0.180746
+      ]
+    ],
+    "closest_surface_points_m": [
+      [
+        0.2745903835513554,
+        -1.6649289994711545,
+        0.1727517975502371
+      ],
+      [
+        -0.27740961579641277,
+        -1.6649289994184175,
+        0.1727518012489705
+      ]
+    ],
+    "distance_to_surface_m": [
+      0.008117529879223415,
+      0.008117526123423209
+    ],
+    "triangle_ids": [
+      28233,
+      28187
+    ]
+  }
+}

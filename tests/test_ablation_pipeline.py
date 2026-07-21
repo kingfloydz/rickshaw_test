@@ -55,55 +55,18 @@ def _exact_arguments(output_dir: Path, *, plan_only: bool = False) -> list[str]:
 
 def test_unique_runs_are_the_requested_controlled_matrix() -> None:
     assert [spec.name for spec in pipeline.UNIQUE_RUNS] == RUN_NAMES
-    assert [spec.training_parameters for spec in pipeline.UNIQUE_RUNS] == [
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.0,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.2,
-            "rollout_steps": 48,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 24,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 64,
-            "latent_dim": 16,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 8,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 24,
-            "stability_reward_curriculum": False,
-        },
-        {
-            "fat2_weight": 0.1,
-            "rollout_steps": 48,
-            "latent_dim": 32,
-            "stability_reward_curriculum": False,
-        },
+    assert [
+        (spec.fat2_weight, spec.rollout_steps, spec.latent_dim, spec.history_length)
+        for spec in pipeline.UNIQUE_RUNS
+    ] == [
+        (0.0, 48, 16, 61),
+        (0.0, 48, 16, 61),
+        (0.2, 48, 16, 61),
+        (0.0, 24, 16, 61),
+        (0.0, 64, 16, 61),
+        (0.0, 48, 8, 61),
+        (0.0, 48, 24, 61),
+        (0.0, 48, 32, 61),
     ]
 
 
@@ -111,7 +74,7 @@ def test_stability_curriculum_matrix_covers_all_latent_dimensions() -> None:
     specs = [pipeline.RUNS_BY_NAME[name] for name in STABILITY_RUN_NAMES]
 
     assert [spec.latent_dim for spec in specs] == [6, 8, 10, 12, 14, 16, 18, 20]
-    assert all(spec.fat2_weight == 0.1 for spec in specs)
+    assert all(spec.fat2_weight == 0.0 for spec in specs)
     assert all(spec.stability_reward_curriculum for spec in specs)
 
 
@@ -170,10 +133,10 @@ def test_exact_cli_plan_runs_in_a_clean_subprocess(tmp_path: Path) -> None:
     (
         ("fat2_weight_0.0", "0.0", "48", "16"),
         ("fat2_weight_0.2", "0.2", "48", "16"),
-        ("rollout_steps_24", "0.1", "24", "16"),
-        ("rollout_steps_64", "0.1", "64", "16"),
-        ("latent_dim_8", "0.1", "48", "8"),
-        ("latent_dim_32", "0.1", "48", "32"),
+        ("rollout_steps_24", "0.0", "24", "16"),
+        ("rollout_steps_64", "0.0", "64", "16"),
+        ("latent_dim_8", "0.0", "48", "8"),
+        ("latent_dim_32", "0.0", "48", "32"),
     ),
 )
 def test_teacher_command_binds_every_controlled_parameter(
@@ -413,7 +376,6 @@ def test_non_resume_rejects_a_nonempty_output_directory(
     output = tmp_path / "pipeline"
     output.mkdir()
     (output / "existing").write_text("data", encoding="utf-8")
-    monkeypatch.setenv("ISAACLAB_PATH", os.fspath(tmp_path))
     args = pipeline._parser().parse_args(
         ["--output-dir", os.fspath(output), "--runs", "baseline", "--gpus", "0"]
     )
@@ -436,7 +398,7 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     partial = tmp_path / "model_10.pt"
-    complete = tmp_path / "model_3999.pt"
+    complete = tmp_path / "model_2599.pt"
     wrong = tmp_path / "model_wrong.pt"
     for path in (partial, complete, wrong):
         path.write_bytes(b"checkpoint")
@@ -448,12 +410,12 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
             if Path(path) == wrong
             else spec.training_parameters
         )
-        iteration = 10 if Path(path) == partial else 3999
+        iteration = 10 if Path(path) == partial else 2599
         return {
             "iter": iteration,
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": parameters,
-                "max_iterations": 4000,
+                "max_iterations": 2600,
                 "task": "task",
                 "seed": 42,
                 "num_envs": 4096,
@@ -490,7 +452,7 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
 def test_s2_checkpoint_must_match_teacher_and_context_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    checkpoint = tmp_path / "model_1999.pt"
+    checkpoint = tmp_path / "model_1599.pt"
     checkpoint.write_bytes(b"checkpoint")
     teacher = tmp_path / "teacher.pt"
     context = tmp_path / "context.pt"
@@ -501,10 +463,10 @@ def test_s2_checkpoint_must_match_teacher_and_context_lineage(
         pipeline,
         "load_stage_checkpoint",
         lambda *_args, **_kwargs: {
-            "iter": 1999,
+            "iter": 1599,
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": spec.training_parameters,
-                "max_iterations": 2000,
+                "max_iterations": 1600,
                 "task": "task",
                 "seed": 42,
                 "num_envs": 4096,
@@ -670,7 +632,7 @@ def test_s1_resume_matches_the_training_invocation(
         lambda *_args, **_kwargs: {
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": spec.training_parameters,
-                "max_iterations": 3000,
+                "max_iterations": 2000,
                 "task": "task",
                 "seed": 42,
                 "num_envs": None,
@@ -679,7 +641,7 @@ def test_s1_resume_matches_the_training_invocation(
             pipeline.CHECKPOINT_LINEAGE_KEY: {
                 "teacher_checkpoint": str(teacher.resolve())
             },
-            "training": {"completed_iterations": 3000},
+            "training": {"completed_iterations": 2000},
         },
     )
 

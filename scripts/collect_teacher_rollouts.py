@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import os
 from pathlib import Path
 import random
@@ -12,15 +13,17 @@ from typing import Any
 import numpy as np
 import torch
 
-from _isaaclab_wrappers import (
-    add_isaaclab_sources_to_path,
+from _mjlab_wrappers import (
+    add_mjlab_sources_to_path,
     add_project_source_to_path,
+    load_mjlab_configs,
     require_existing_file,
 )
 
 add_project_source_to_path()
 
 from g1_rickshaw_lab.provenance import atomic_torch_save, extract_checkpoint_metadata  # noqa: E402
+from g1_rickshaw_lab.rl.runner import RunnerContext, create_rickshaw_runner_type  # noqa: E402
 from g1_rickshaw_lab.reward_profile import (  # noqa: E402
     apply_reward_weight_overrides,
     reward_weight_overrides_from_configuration,
@@ -34,7 +37,7 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     require_pinned_rsl_rl,
     validate_rollout_stage_coverage,
 )
-from g1_rickshaw_lab.validation import write_json_atomic  # noqa: E402
+from g1_rickshaw_lab.artifact_io import write_json_atomic  # noqa: E402
 
 from _rollout_audit import (  # noqa: E402
     AUDIT_TENSOR_NAMES,
@@ -52,7 +55,7 @@ from _rollout_audit import (  # noqa: E402
 )
 
 
-DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
+DEFAULT_TASK = "Mjlab-G1-Rickshaw-Directional-Slope-Teacher"
 
 
 def _step_teacher_policy(
@@ -73,10 +76,8 @@ def _step_teacher_policy(
 
 
 def main() -> int:  # noqa: C901
-    add_isaaclab_sources_to_path()
+    add_mjlab_sources_to_path()
     require_pinned_rsl_rl()
-    from isaaclab.app import AppLauncher
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--teacher", required=True)
@@ -99,7 +100,7 @@ def main() -> int:  # noqa: C901
         default=None,
         help="Override the S0 checkpoint domain-randomization iteration.",
     )
-    AppLauncher.add_app_launcher_args(parser)
+    parser.add_argument("--device", default=None)
     args = parser.parse_args()
     args.num_envs = DEFAULT_NUM_ENVS
     args.num_steps = DISTILLATION_ROLLOUT_STEPS
@@ -134,6 +135,7 @@ def main() -> int:  # noqa: C901
     )
     training_parameters = teacher_training_configuration["training_parameters"]
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     if teacher_training_configuration["task"] != args.task:
         raise ValueError("rollout task differs from the S0 teacher training task")
     metadata = extract_checkpoint_metadata(teacher_checkpoint)
@@ -150,15 +152,10 @@ def main() -> int:  # noqa: C901
             path.unlink()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
     env = None
     try:
-        import gymnasium as gym
-        from rsl_rl.runners import OnPolicyRunner
-
-        from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-        from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
+        from mjlab.envs import ManagerBasedRlEnv
+        from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
         from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
@@ -168,28 +165,38 @@ def main() -> int:  # noqa: C901
         torch.manual_seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
-        device = args.device
-        env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
-        env_cfg.seed = args.seed
+        device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+        env_cfg, agent_cfg = load_mjlab_configs(
+            args.task,
+            play=False,
+            num_envs=args.num_envs,
+            seed=args.seed,
+            history_length=history_length,
+        )
         # Rollout samples bind immutable slopes. This prevents auto-resets
         # from advancing terrain difficulty during a short segment.
-        env_cfg.curriculum = None
+        env_cfg.curriculum = {}
         apply_reward_weight_overrides(
             env_cfg,
             reward_weight_overrides_from_configuration(teacher_training_configuration),
         )
-        env_cfg.rewards.fat2_prior_exp.weight = float(
+        env_cfg.rewards["fat2_prior_exp"].weight = float(
             training_parameters["fat2_weight"]
         )
-        agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
-        agent_cfg.seed = args.seed
-        agent_cfg.device = device
         agent_cfg.actor.latent_dim = latent_dim
         agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
-        raw_env = gym.make(args.task, cfg=env_cfg)
+        raw_env = ManagerBasedRlEnv(env_cfg, device=device)
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
-        runner = OnPolicyRunner(
-            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        runner_type = create_rickshaw_runner_type(
+            RunnerContext.playback(
+                stage="s0_teacher",
+                curriculum_start_iteration=args.training_iteration,
+                metadata=metadata,
+            ),
+            base_runner_type=MjlabOnPolicyRunner,
+        )
+        runner = runner_type(
+            env, asdict(agent_cfg), log_dir=None, device=device
         )
         runner.load(
             os.fspath(teacher_path),
@@ -204,7 +211,7 @@ def main() -> int:  # noqa: C901
         actor = runner.alg.actor.eval()
         base_env = raw_env.unwrapped
         fixed_assignment = slope_environment_assignment(
-            args.num_envs, device=agent_cfg.device
+            args.num_envs, device=device
         )
         storage_dtype = (
             torch.float16 if args.storage_dtype == "float16" else torch.float32
@@ -259,12 +266,9 @@ def main() -> int:  # noqa: C901
         def install_fixed_rollout_assignment() -> None:
             """Install the deterministic configured-slope allocation before reset."""
 
-            terrain = base_env.scene.terrain
             levels = fixed_assignment["terrain_level"]
             terrain_types = fixed_assignment["terrain_type"]
-            terrain.terrain_levels.copy_(levels)
-            terrain.terrain_types.copy_(terrain_types)
-            terrain.env_origins.copy_(terrain.terrain_origins[levels, terrain_types])
+            mdp.apply_terrain_assignment(base_env, levels, terrain_types)
             mdp.update_slope_frame(base_env)
 
         def assert_fixed_rollout_assignment() -> None:
@@ -283,9 +287,9 @@ def main() -> int:  # noqa: C901
             ):
                 raise RuntimeError("rollout slopes changed during collection")
 
-        def reset_at_physx_fixed_point() -> object:
+        def reset_at_static_fixed_point() -> object:
             observation, _ = env.reset()
-            return observation.to(agent_cfg.device)
+            return observation.to(device)
 
         sample_audit_contract = {
             "schema_version": ROLLOUT_SAMPLE_AUDIT_SCHEMA_VERSION,
@@ -306,12 +310,12 @@ def main() -> int:  # noqa: C901
             actual_global_stage = expected_stage
 
             install_fixed_rollout_assignment()
-            observation = reset_at_physx_fixed_point()
+            observation = reset_at_static_fixed_point()
             assert_fixed_rollout_assignment()
             stage_valid_samples = 0
             stage_collection_steps = 0
             per_environment_samples = torch.zeros(
-                args.num_envs, device=agent_cfg.device, dtype=torch.long
+                args.num_envs, device=device, dtype=torch.long
             )
             sample_distribution: dict[str, int] = {}
             stage_audit_chunks: dict[str, list[torch.Tensor]] = {
@@ -320,7 +324,7 @@ def main() -> int:  # noqa: C901
             episode_ids = torch.arange(
                 next_episode_id,
                 next_episode_id + args.num_envs,
-                device=agent_cfg.device,
+                device=device,
                 dtype=torch.long,
             )
             next_episode_id += args.num_envs
@@ -336,7 +340,7 @@ def main() -> int:  # noqa: C901
                     )
                 assert_fixed_rollout_assignment()
                 valid = torch.ones(
-                    args.num_envs, dtype=torch.bool, device=agent_cfg.device
+                    args.num_envs, dtype=torch.bool, device=device
                 )
                 valid &= per_environment_samples < args.num_steps
                 valid_ids = torch.nonzero(valid, as_tuple=False).squeeze(-1)
@@ -346,13 +350,13 @@ def main() -> int:  # noqa: C901
                     audit_values = {
                         "curriculum_stage": torch.ones(
                             (selected.numel(), 1),
-                            device=agent_cfg.device,
+                            device=device,
                             dtype=torch.long,
                         ),
                         "collection_segment": torch.full(
                             (selected.numel(), 1),
                             segment_index,
-                            device=agent_cfg.device,
+                            device=device,
                             dtype=torch.long,
                         ),
                         "environment_id": selected.unsqueeze(-1).clone(),
@@ -402,13 +406,13 @@ def main() -> int:  # noqa: C901
                     )
                     per_environment_samples[selected] += 1
                     stage_valid_samples += int(selected.numel())
-                observation = next_observation.to(agent_cfg.device)
+                observation = next_observation.to(device)
                 done_ids = torch.nonzero(dones > 0, as_tuple=False).flatten()
                 if done_ids.numel() > 0:
                     episode_ids[done_ids] = torch.arange(
                         next_episode_id,
                         next_episode_id + done_ids.numel(),
-                        device=agent_cfg.device,
+                        device=device,
                         dtype=torch.long,
                     )
                     next_episode_id += int(done_ids.numel())
@@ -525,7 +529,6 @@ def main() -> int:  # noqa: C901
     finally:
         if env is not None:
             env.close()
-        simulation_app.close()
     return 0
 
 

@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping, Sequence
 from itertools import combinations
-import math
 from pathlib import Path
-import re
 from statistics import fmean, pstdev
 from typing import Any
 
 import yaml
 
-from .reward_calibration import GUIDE_REWARD_TERMS
-from .reward_profile import FAT2_REWARD_TERM, validate_reward_weight_overrides
+from .reward_profile import (
+    FAT2_REWARD_TERM,
+    GUIDE_REWARD_TERMS,
+    validate_reward_weight_overrides,
+)
 from .slope_contract import SLOPE_GRADIENTS
-
 
 REWARD_TUNING_SCHEMA_VERSION = 1
 COST_METRICS = (

@@ -4,21 +4,25 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
-from _isaaclab_wrappers import add_project_source_to_path, require_existing_file, run_isaaclab_rsl_rl
+from _mjlab_wrappers import (
+    add_project_source_to_path,
+    require_existing_file,
+    run_mjlab_rsl_rl,
+)
 
 add_project_source_to_path()
 
+from g1_rickshaw_lab.rl.runner import RunnerContext  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )
+from g1_rickshaw_lab.workflows.rsl_rl import PlayOptions  # noqa: E402
 
-
-DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-Play-v0"
+DEFAULT_TASK = "Mjlab-G1-Rickshaw-Directional-Slope-Student"
 _OPERATIONAL_FLAGS = {
     "--headless",
     "--enable_cameras",
@@ -47,17 +51,11 @@ def validate_operational_play_arguments(arguments: list[str]) -> None:
             index += 1
             continue
         matched = next(
-            (
-                option
-                for option in _OPERATIONAL_OPTIONS
-                if token == option or token.startswith(option + "=")
-            ),
+            (option for option in _OPERATIONAL_OPTIONS if token == option or token.startswith(option + "=")),
             None,
         )
         if matched is None:
-            raise ValueError(
-                f"play/export rejects policy or environment override {token!r}"
-            )
+            raise ValueError(f"play/export rejects policy or environment override {token!r}")
         if token == matched:
             if index + 1 >= len(arguments):
                 raise ValueError(f"play/export option {matched} requires a value")
@@ -78,47 +76,47 @@ def main() -> int:
     parser.add_argument(
         "--export-only",
         action="store_true",
-        help="Validate and export JIT/ONNX plus manifest, then close Kit without entering the play loop.",
+        help="Validate and export JIT/ONNX plus manifest without entering the viewer loop.",
     )
     args, remaining = parser.parse_known_args()
     if args.task != DEFAULT_TASK:
         raise ValueError(f"play/export task is fixed to {DEFAULT_TASK}")
     validate_operational_play_arguments(list(remaining))
     checkpoint = require_existing_file(args.checkpoint, "student checkpoint").resolve()
-    if args.video_dir:
-        os.environ["G1_RICKSHAW_VIDEO_DIR"] = os.fspath(Path(args.video_dir).resolve())
     loaded_checkpoint = load_stage_checkpoint(
         checkpoint,
         expected_stage="s2_student_ppo",
         validate_runtime=True,
     )
-    training_parameters = loaded_checkpoint[TRAINING_CONFIGURATION_KEY][
-        "training_parameters"
-    ]
+    training_parameters = loaded_checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]
     fat2_weight = float(training_parameters["fat2_weight"])
     latent_dim = int(training_parameters["latent_dim"])
-    os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
-    os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s2_student_ppo"
+    history_length = int(training_parameters["history_length"])
     curriculum_iteration = loaded_checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
     if isinstance(curriculum_iteration, bool) or not isinstance(curriculum_iteration, int):
         raise RuntimeError("S2 checkpoint is missing its audited curriculum iteration")
-    os.environ["G1_RICKSHAW_CURRICULUM_START_ITERATION"] = str(curriculum_iteration)
-    os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = "{}"
-    if args.export_only:
-        os.environ["G1_RICKSHAW_EXPORT_ONLY"] = "1"
-    run_isaaclab_rsl_rl(
-        "play.py",
+    runner_context = RunnerContext.playback(
+        curriculum_start_iteration=curriculum_iteration,
+    )
+    play_options = PlayOptions(
+        video_dir=None if args.video_dir is None else Path(args.video_dir).resolve(),
+        export_only=args.export_only,
+    )
+    run_mjlab_rsl_rl(
+        "play",
         [
             "--task",
             args.task,
             "--checkpoint",
             str(checkpoint),
             f"agent.actor.latent_dim={latent_dim}",
+            f"agent.actor.history_length={history_length}",
+            f"env.history_length={history_length}",
             f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
-            "env.observations.teacher_dynamic_history=null",
-            "env.observations.teacher_static=null",
             *remaining,
         ],
+        runner_context=runner_context,
+        play_options=play_options,
     )
     return 0
 

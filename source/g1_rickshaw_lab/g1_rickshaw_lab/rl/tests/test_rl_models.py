@@ -7,6 +7,7 @@ import unittest
 import torch
 from torch import nn
 
+from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM
 from g1_rickshaw_lab.rl import (
     DYNAMIC_PRIVILEGE_DIM,
     STATIC_PRIVILEGE_DIM,
@@ -29,13 +30,13 @@ class TestRickshawRLModels(unittest.TestCase):
         encoder = ContextEncoder()
         self.assertEqual(encoder.receptive_field, temporal_receptive_field())
         self.assertEqual(encoder.receptive_field, 61)
-        self.assertEqual(encoder(torch.zeros(2, 61, 96)).shape, (2, 16))
+        self.assertEqual(encoder(torch.zeros(2, 61, ACTOR_OBSERVATION_DIM)).shape, (2, 16))
 
-        history = torch.full((1, 61, 96), 0.01, requires_grad=True)
+        history = torch.full((1, 61, ACTOR_OBSERVATION_DIM), 0.01, requires_grad=True)
         encoder(history).sum().backward()
         self.assertGreater(history.grad[:, 0].abs().sum().item(), 0.0)
 
-        probe = torch.full((1, 62, 96), 0.01, requires_grad=True)
+        probe = torch.full((1, 62, ACTOR_OBSERVATION_DIM), 0.01, requires_grad=True)
         feature = encoder.blocks(encoder.input(probe.transpose(1, 2)))[:, :, -1]
         encoder.context(feature).sum().backward()
         self.assertEqual(probe.grad[:, 0].count_nonzero().item(), 0)
@@ -48,7 +49,7 @@ class TestRickshawRLModels(unittest.TestCase):
         ]
         self.assertEqual(
             actor_shapes,
-            [(112, 512), (512, 256), (256, 128), (128, 29)],
+            [(ACTOR_OBSERVATION_DIM + 16, 512), (512, 256), (256, 128), (128, 29)],
         )
         torch.testing.assert_close(actor.std[:12], torch.full((12,), 0.4))
         torch.testing.assert_close(actor.std[12:], torch.full((17,), 0.25))
@@ -58,7 +59,9 @@ class TestRickshawRLModels(unittest.TestCase):
         self.assertLessEqual(float(actor.std[12:].max().detach()), 0.500001)
         actor.log_std.data.fill_(-10.0)
         self.assertGreaterEqual(float(actor.std.min().detach()), 0.049999)
-        distribution = actor.distribution(torch.zeros(2, 96), torch.zeros(2, 16))
+        distribution = actor.distribution(
+            torch.zeros(2, ACTOR_OBSERVATION_DIM), torch.zeros(2, 16)
+        )
         self.assertLessEqual(float(distribution.base_dist.scale[:, :12].max().detach()), 0.050001)
         self.assertGreaterEqual(float(distribution.base_dist.scale.min().detach()), 0.049999)
 
@@ -66,16 +69,19 @@ class TestRickshawRLModels(unittest.TestCase):
         critic_shapes = [
             (layer.in_features, layer.out_features) for layer in critic.network if isinstance(layer, nn.Linear)
         ]
-        self.assertEqual(critic_shapes, [(130, 256), (256, 128), (128, 1)])
         self.assertEqual(
-            critic(torch.randn(3, 96), torch.randn(3, 34)).shape,
+            critic_shapes,
+            [(ACTOR_OBSERVATION_DIM + 34, 256), (256, 128), (128, 1)],
+        )
+        self.assertEqual(
+            critic(torch.randn(3, ACTOR_OBSERVATION_DIM), torch.randn(3, 34)).shape,
             (3, 1),
         )
 
     def test_teacher_and_student_share_the_actor_latent_abi(self) -> None:
         batch = 3
-        current = torch.randn(batch, 96)
-        history = torch.randn(batch, 61, 96)
+        current = torch.randn(batch, ACTOR_OBSERVATION_DIM)
+        history = torch.randn(batch, 61, ACTOR_OBSERVATION_DIM)
         dynamic = torch.randn(batch, 61, DYNAMIC_PRIVILEGE_DIM)
         static = torch.randn(batch, STATIC_PRIVILEGE_DIM)
 
@@ -100,11 +106,11 @@ class TestRickshawRLModels(unittest.TestCase):
                 self.assertEqual(z_hat.shape, (batch, latent_dim))
                 self.assertEqual(
                     teacher.actor.network[0].in_features,
-                    96 + latent_dim,
+                    ACTOR_OBSERVATION_DIM + latent_dim,
                 )
                 self.assertEqual(
                     student.actor.network[0].in_features,
-                    96 + latent_dim,
+                    ACTOR_OBSERVATION_DIM + latent_dim,
                 )
                 self.assertEqual(
                     teacher_distribution.mean.shape,
@@ -113,8 +119,8 @@ class TestRickshawRLModels(unittest.TestCase):
 
     def test_minimal_distillation_is_student_only(self) -> None:
         batch = 4
-        current = torch.randn(batch, 96)
-        history = torch.randn(batch, 61, 96)
+        current = torch.randn(batch, ACTOR_OBSERVATION_DIM)
+        history = torch.randn(batch, 61, ACTOR_OBSERVATION_DIM)
         teacher = G1RickshawTeacherActor()
         student = G1RickshawStudentActor()
         teacher_distribution, z_star = teacher.forward_with_context(

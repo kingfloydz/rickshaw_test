@@ -2,59 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 import importlib.metadata
 import json
 import math
-import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-import tempfile
 from typing import Any
 
+from .artifact_io import utc_timestamp, write_json_atomic
+from .reward_profile import GUIDE_REWARD_TERMS
 from .slope_contract import SLOPE_GRADIENTS
 
-
-REWARD_CALIBRATION_SCHEMA_VERSION = 5
-RAW_REWARD_SAMPLE_SCHEMA_VERSION = 5
-RAW_REWARD_SAMPLE_KIND = "isaaclab_reward_manager_unweighted_terms"
+REWARD_CALIBRATION_SCHEMA_VERSION = 7
+RAW_REWARD_SAMPLE_SCHEMA_VERSION = 7
+RAW_REWARD_SAMPLE_KIND = "mjlab_reward_manager_unweighted_terms"
 SPEED_REFERENCE_TERM = "track_speed_exp"
-SPEED_TERMS = (
-    "track_speed_exp",
-    "track_speed_precise_exp",
-    "speed_error_pseudo_huber",
-)
+SPEED_TERMS = ("track_speed_exp",)
 TERMINATION_TERM = "termination"
 BALANCE_LIMIT_RATIO = 0.5
 NORMAL_SAMPLE_DEFINITION = "post-RewardManager step; terminated=false; timeout=false"
 SIGNED_C1_SLOPES = SLOPE_GRADIENTS
 
-GUIDE_REWARD_TERMS = (
-    "track_speed_exp",
-    "track_speed_precise_exp",
-    "speed_error_pseudo_huber",
-    "lateral_error_l2",
-    "heading_error_l2",
-    "zmp_margin_barrier",
-    "hitch_height_exp",
-    "hitch_height_recovery_l2",
-    "fat2_prior_exp",
-    "feet_landing",
-    "feet_air_time_excess_l2",
-    "feet_slide",
-    "terrain_normal_velocity_l2",
-    "joint_power_l1",
-    "processed_action_rate_l2",
-    "hip_yaw_roll_reference_l2",
-    "pelvis_height_limits_l2",
-    "joint_position_limits",
-    "termination",
-)
-
 GUIDE_PHYSICAL_SCALES = {
     "speed_error_sigma_mps": 0.5,
-    "speed_precise_error_sigma_mps": 0.25,
-    "speed_pseudo_huber_scale_mps": 0.5,
     "lateral_error_scale_m": 0.30,
     "heading_error_scale_rad": 0.30,
     "zmp_margin_m": 0.02,
@@ -66,10 +36,12 @@ GUIDE_PHYSICAL_SCALES = {
     "hip_yaw_roll_reference_scale_rad": 0.20,
     "pelvis_height_bounds_m": [0.58, 0.87],
     "pelvis_height_error_scale_m": 0.05,
-    "feet_landing_target_air_time_s": 0.30,
-    "feet_landing_sigma_s": 0.12,
-    "feet_max_air_time_s": 0.50,
-    "feet_air_time_excess_scale_s": 0.20,
+    "gait_period_s": 1.20,
+    "gait_phase_offsets": [0.0, 0.5],
+    "gait_stance_threshold": 0.55,
+    "foot_clearance_target_m": 0.07,
+    "foot_clearance_std_m": 0.05,
+    "foot_clearance_tanh_mult": 2.0,
     "feet_slide_normalizer_mps": 1.0,
     "terrain_normal_velocity_scale_mps": 0.25,
     "joint_power_normalizer_w": 1.0,
@@ -78,16 +50,14 @@ GUIDE_PHYSICAL_SCALES = {
 
 GUIDE_REWARD_NORMALIZATION_SCALES = {
     "track_speed_exp": {"scale": 0.5, "unit": "m/s"},
-    "track_speed_precise_exp": {"scale": 0.25, "unit": "m/s"},
-    "speed_error_pseudo_huber": {"scale": 0.5, "unit": "m/s"},
     "lateral_error_l2": {"scale": 0.30, "unit": "m"},
     "heading_error_l2": {"scale": 0.30, "unit": "rad"},
     "zmp_margin_barrier": {"scale": 0.02, "unit": "m"},
     "hitch_height_exp": {"scale": 0.02, "unit": "m"},
     "hitch_height_recovery_l2": {"scale": 0.05, "unit": "m"},
     "fat2_prior_exp": {"scale": 0.12, "unit": "rad"},
-    "feet_landing": {"scale": 0.12, "unit": "s"},
-    "feet_air_time_excess_l2": {"scale": 0.20, "unit": "s"},
+    "feet_gait": {"scale": 1.20, "unit": "s"},
+    "feet_swing_height": {"scale": 0.07, "unit": "m"},
     "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {"scale": 0.25, "unit": "m/s"},
     "joint_power_l1": {"scale": 1.0, "unit": "W"},
@@ -108,23 +78,11 @@ C1_NOMINAL_PHYSICS_FIELDS = (
     "terrain.friction",
     "wheel.left_damping",
     "wheel.right_damping",
-    "d6.linear_stiffness",
-    "d6.linear_damping",
-    "d6.angular_stiffness",
-    "d6.angular_damping",
-    "d6.max_force",
-    "d6.max_torque",
-    "d6.linear_limit",
-    "d6.angular_limit",
 )
 
 
 class RewardCalibrationError(ValueError):
     """Raised when reward samples do not satisfy the calibration contract."""
-
-
-def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def reward_calibration_runtime_versions() -> dict[str, str]:
@@ -136,15 +94,15 @@ def reward_calibration_runtime_versions() -> dict[str, str]:
         raise RewardCalibrationError("PyTorch is required for reward calibration") from error
     try:
         rsl_rl_version = importlib.metadata.version("rsl-rl-lib")
-        isaaclab_version = importlib.metadata.version("isaaclab")
+        mjlab_version = importlib.metadata.version("mjlab")
     except importlib.metadata.PackageNotFoundError as error:
         raise RewardCalibrationError(
-            "Isaac Lab and RSL-RL distributions are required for reward calibration"
+            "Mjlab and RSL-RL distributions are required for reward calibration"
         ) from error
     return {
         "torch": str(torch.__version__),
         "rsl_rl": rsl_rl_version,
-        "isaaclab": isaaclab_version,
+        "mjlab": mjlab_version,
     }
 
 
@@ -189,24 +147,7 @@ def write_reward_calibration_json(
 ) -> Path:
     """Atomically write the current reward-calibration report."""
 
-    directory = Path(output_dir).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / "reward_calibration.json"
-    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".reward_calibration.", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            json.dump(payload, stream, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-    return destination
+    return write_json_atomic(Path(output_dir) / "reward_calibration.json", payload)
 
 
 def _finite_number(value: Any, label: str) -> float:
@@ -451,9 +392,9 @@ def reward_manager_term_weights(reward_manager: Any) -> dict[str, float]:
 
 
 def collect_reward_manager_unweighted_step(reward_manager: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """Recover current unweighted terms from Isaac Lab's RewardManager.
+    """Recover current unweighted terms from Mjlab's RewardManager.
 
-    The pinned Isaac Lab ABI computes ``value = raw * weight * dt`` and then
+    The pinned Mjlab ABI computes ``value = raw * weight * dt`` and then
     stores ``value / dt`` in ``_step_reward``. Thus this buffer is a per-second
     weighted term, ``raw * weight``. The identity is checked against the
     integrated ``_reward_buf`` every step before division by weight. A
@@ -506,7 +447,7 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
     if value.get("schema_version") != RAW_REWARD_SAMPLE_SCHEMA_VERSION:
         raise RewardCalibrationError("unsupported raw reward sample schema_version")
     if value.get("kind") != RAW_REWARD_SAMPLE_KIND:
-        raise RewardCalibrationError("raw samples were not collected from Isaac Lab RewardManager")
+        raise RewardCalibrationError("raw samples were not collected from Mjlab RewardManager")
     if value.get("reward_normalization_scales") != GUIDE_REWARD_NORMALIZATION_SCALES:
         raise RewardCalibrationError("raw samples use unknown reward normalization scales")
     if value.get("curriculum_stage") != "TRAINING":
@@ -566,7 +507,7 @@ def validate_raw_sample_artifact(value: Mapping[str, Any]) -> None:
     runtime_versions = value.get("runtime_versions")
     if (
         not isinstance(runtime_versions, Mapping)
-        or set(runtime_versions) != {"torch", "rsl_rl", "isaaclab"}
+        or set(runtime_versions) != {"torch", "rsl_rl", "mjlab"}
         or not all(isinstance(item, str) and item for item in runtime_versions.values())
     ):
         raise RewardCalibrationError("raw samples contain malformed runtime versions")

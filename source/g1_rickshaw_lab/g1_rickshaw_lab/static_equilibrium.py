@@ -13,6 +13,11 @@ from typing import Any
 
 import numpy as np
 
+from .configuration import (
+    G1_JOINT_ORDER,
+)
+from .assets.g1_dex1 import G1_JOINT_EFFORT_LIMITS, G1_JOINT_STIFFNESS
+
 
 @dataclass(frozen=True)
 class FixedContactStaticSolution:
@@ -31,23 +36,31 @@ class MujocoStaticEquilibrium:
     gradient: float
     qpos: np.ndarray
     joint_position_target: np.ndarray
+    joint_actuator_torque: np.ndarray
     fat2_reference_angle: float
     equality_position_error: float
-    equality_rotation_error: float
     support_height_error: float
-    unactuated_force_error: float
+    acceleration_error: float
+    actuator_torque_error: float
+    actuator_torque_ratio: float
 
 
 @dataclass(frozen=True)
 class MujocoStaticSolverCfg:
-    max_nfev: int = 100
+    max_nfev: int = 300
+    forward_max_nfev: int = 300
     position_scale: float = 0.003
-    rotation_scale: float = 0.04
-    support_scale: float = 0.003
-    force_scale: float = 25.0
-    torque_scale: float = 60.0
-    posture_scale: float = 0.35
+    support_scale: float = 0.0005
+    contact_penetration: float = -0.001
+    unactuated_force_scale: float = 1.0
+    torque_limit_fraction: float = 0.8
+    posture_scale: float = 1.0
     fat2_scale: float = 0.12
+    position_tolerance: float = 0.003
+    support_tolerance: float = 0.003
+    acceleration_tolerance: float = 6.0
+    actuator_torque_tolerance: float = 1.0e-6
+    actuator_torque_ratio_tolerance: float = 1.0
     robot_mass: float = 34.1299349
     robot_com_radius: float = 0.715092420262594
     theta_max: float = 0.8
@@ -237,13 +250,6 @@ def _quat_from_rpy(rpy: np.ndarray) -> np.ndarray:
     )
 
 
-def _rotation_error(first: np.ndarray, second: np.ndarray) -> np.ndarray:
-    relative = first.reshape(3, 3).T @ second.reshape(3, 3)
-    return 0.5 * np.array(
-        (relative[2, 1] - relative[1, 2], relative[0, 2] - relative[2, 0], relative[1, 0] - relative[0, 1])
-    )
-
-
 def _rpy_from_quat(quat: np.ndarray) -> np.ndarray:
     w, x, y, z = quat
     return np.array(
@@ -338,11 +344,11 @@ def solve_mujoco_static_equilibrium(
     cfg: MujocoStaticSolverCfg | None = None,
     qpos_seed: np.ndarray | None = None,
 ) -> MujocoStaticEquilibrium:
-    """Solve a fixed-contact equilibrium with MuJoCo inverse dynamics.
+    """Solve a fixed-contact equilibrium with MuJoCo dynamics.
 
-    The optimization has no dynamic settling phase. It enforces the two welds,
-    eight foot contact points, both wheel contacts, zero generalized force on
-    unactuated DoFs, and the full-wrench FAT2 torso prior in one static solve.
+    The optimization has no dynamic settling phase. Inverse dynamics first solves the
+    fixed-contact pose under the grasp, support, hardware-limit, and FAT2 constraints.
+    A second forward-dynamics solve then finds and validates the bounded actuator torque.
     """
 
     import mujoco
@@ -368,12 +374,36 @@ def solve_mujoco_static_equilibrium(
     ]
     robot_joint_q = np.array([model.jnt_qposadr[index] for index in robot_joint_ids], dtype=int)
     robot_joint_v = np.array([model.jnt_dofadr[index] for index in robot_joint_ids], dtype=int)
+    joint_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) or "" for index in robot_joint_ids]
+    if tuple(name.removeprefix("robot/") for name in joint_names) != G1_JOINT_ORDER:
+        raise ValueError("MuJoCo robot joint order does not match the 29-joint policy contract")
+    stiffness = np.asarray(G1_JOINT_STIFFNESS)
+    effort_limits = np.asarray(G1_JOINT_EFFORT_LIMITS)
+    robot_actuator_ids = np.array(
+        [
+            actuator_id
+            for joint_id in robot_joint_ids
+            for actuator_id in range(model.nu)
+            if model.actuator_trnid[actuator_id, 0] == joint_id
+        ],
+        dtype=int,
+    )
+    if robot_actuator_ids.size not in (0, len(robot_joint_ids)):
+        raise ValueError("static model must have either zero or one actuator per robot joint")
     wheel_v = np.array(
         [
             _joint_dof_address(model, "rickshaw/left_wheel_joint"),
             _joint_dof_address(model, "rickshaw/right_wheel_joint"),
         ]
     )
+    unactuated_v = np.concatenate(
+        (
+            np.arange(robot_root_v, robot_root_v + 6),
+            np.arange(cart_root_v, cart_root_v + 6),
+            wheel_v,
+        )
+    )
+    inverse_balance_v = unactuated_v
 
     foot_geoms: list[int] = []
     for body_name in ("robot/left_ankle_roll_link", "robot/right_ankle_roll_link"):
@@ -401,7 +431,7 @@ def solve_mujoco_static_equilibrium(
     hand_force_s = -sum(wrench[0] for wrench in static_cart.handle_wrenches_sln)
     hand_force_n = -sum(wrench[2] for wrench in static_cart.handle_wrenches_sln)
 
-    x0 = np.concatenate(
+    pose_seed = np.concatenate(
         (
             q_seed[robot_root_q : robot_root_q + 3],
             _rpy_from_quat(q_seed[robot_root_q + 3 : robot_root_q + 7]),
@@ -410,6 +440,7 @@ def solve_mujoco_static_equilibrium(
             _rpy_from_quat(q_seed[cart_root_q + 3 : cart_root_q + 7]),
         )
     )
+    x0 = pose_seed
     lower = np.full_like(x0, -np.inf)
     upper = np.full_like(x0, np.inf)
     lower[:3], upper[:3] = (-0.2, -0.1, 0.55), (0.2, 0.1, 0.9)
@@ -426,7 +457,7 @@ def solve_mujoco_static_equilibrium(
     data = mujoco.MjData(model)
     gravity_original = model.opt.gravity.copy()
     gamma = math.atan(gradient)
-    model.opt.gravity[:] = (9.81 * math.sin(gamma), 0.0, -9.81 * math.cos(gamma))
+    model.opt.gravity[:] = (-9.81 * math.sin(gamma), 0.0, -9.81 * math.cos(gamma))
     diagnostics: dict[str, float] = {}
 
     def unpack(x: np.ndarray) -> None:
@@ -438,34 +469,27 @@ def solve_mujoco_static_equilibrium(
         data.qpos[cart_root_q + 3 : cart_root_q + 7] = _quat_from_rpy(x[-3:])
         data.qvel[:] = 0.0
         data.qacc[:] = 0.0
+        data.qacc_warmstart[:] = 0.0
+        data.qfrc_applied[:] = 0.0
+        if robot_actuator_ids.size:
+            data.ctrl[robot_actuator_ids] = data.qpos[robot_joint_q]
 
-    def residual(x: np.ndarray) -> np.ndarray:
-        unpack(x)
-        mujoco.mj_forward(model, data)
+    def kinematic_residuals() -> tuple[np.ndarray, np.ndarray, float, float]:
         position_errors: list[np.ndarray] = []
-        rotation_errors: list[np.ndarray] = []
         for side in ("left", "right"):
             grasp = data.site(f"robot/{side}_grasp_site")
             hitch = data.site(f"rickshaw/{side}_hitch_site")
             position_errors.append(np.asarray(grasp.xpos) - np.asarray(hitch.xpos))
-            rotation_errors.append(_rotation_error(np.asarray(grasp.xmat), np.asarray(hitch.xmat)))
-
-        foot_height = np.array([data.geom_xpos[index, 2] - model.geom_size[index, 0] for index in foot_geoms])
-        wheel_height = np.array([data.geom_xpos[index, 2] - model.geom_size[index, 0] for index in wheel_geoms])
-        support_error = np.concatenate((foot_height, wheel_height))
-
-        mujoco.mj_inverse(model, data)
-        unactuated = np.concatenate(
-            (
-                data.qfrc_inverse[robot_root_v : robot_root_v + 6],
-                data.qfrc_inverse[cart_root_v : cart_root_v + 6],
-                data.qfrc_inverse[wheel_v],
-            )
+        foot_height = np.array(
+            [data.geom_xpos[index, 2] - model.geom_size[index, 0] for index in foot_geoms]
         )
-        joint_torque = data.qfrc_inverse[robot_joint_v]
-
+        wheel_height = np.array(
+            [data.geom_xpos[index, 2] - model.geom_size[index, 0] for index in wheel_geoms]
+        )
         foot_center = np.mean(data.geom_xpos[foot_geoms], axis=0)
-        handle_center = 0.5 * (data.site("robot/left_grasp_site").xpos + data.site("robot/right_grasp_site").xpos)
+        handle_center = 0.5 * (
+            data.site("robot/left_grasp_site").xpos + data.site("robot/right_grasp_site").xpos
+        )
         fat2 = fat2_reference_angle_scalar(
             handle_s=float(handle_center[0] - foot_center[0]),
             handle_n=float(handle_center[2] - foot_center[2]),
@@ -477,15 +501,36 @@ def solve_mujoco_static_equilibrium(
         )
         torso = data.body("robot/torso_link").xmat.reshape(3, 3)
         torso_pitch = math.atan2(-torso[2, 0], math.hypot(torso[0, 0], torso[1, 0]))
+        return (
+            np.concatenate(position_errors),
+            np.concatenate((foot_height, wheel_height)) - cfg.contact_penetration,
+            fat2,
+            torso_pitch,
+        )
+
+    def residual(x: np.ndarray) -> np.ndarray:
+        unpack(x)
+        mujoco.mj_forward(model, data)
+        position_error, support_error, fat2, torso_pitch = kinematic_residuals()
+
+        data.qacc[:] = 0.0
+        mujoco.mj_inverse(model, data)
+        unactuated_force = data.qfrc_inverse[inverse_balance_v]
+        joint_torque = data.qfrc_inverse[robot_joint_v]
+        torque_ratio = np.abs(joint_torque) / effort_limits
+        torque_excess = np.sign(joint_torque) * np.maximum(
+            torque_ratio - cfg.torque_limit_fraction,
+            0.0,
+        )
+
         diagnostics["fat2"] = fat2
 
         return np.concatenate(
             (
-                np.concatenate(position_errors) / cfg.position_scale,
-                np.concatenate(rotation_errors) / cfg.rotation_scale,
+                position_error / cfg.position_scale,
                 support_error / cfg.support_scale,
-                unactuated / cfg.force_scale,
-                joint_torque / cfg.torque_scale,
+                unactuated_force / cfg.unactuated_force_scale,
+                torque_excess / (1.0 - cfg.torque_limit_fraction),
                 (x[joint_start:joint_end] - q_seed[robot_joint_q]) / cfg.posture_scale,
                 np.array(((torso_pitch - fat2) / cfg.fat2_scale, x[0] / 0.05, x[1] / 0.03)),
             )
@@ -503,75 +548,101 @@ def solve_mujoco_static_equilibrium(
         )
         unpack(result.x)
         mujoco.mj_forward(model, data)
-        final_qpos = data.qpos.copy()
-        final_residual = residual(result.x)
+        data.qacc[:] = 0.0
         mujoco.mj_inverse(model, data)
-        joint_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) or "" for index in robot_joint_ids]
-        stiffness = np.array(
-            [
-                200.0
-                if "ankle" in name
-                else 300.0
-                if "hip" in name or "knee" in name
-                else 5000.0
-                if "waist" in name
-                else 3000.0
-                for name in joint_names
-            ]
+        torque_seed = np.clip(
+            data.qfrc_inverse[robot_joint_v],
+            -effort_limits,
+            effort_limits,
         )
-        joint_target = final_qpos[robot_joint_q] + data.qfrc_inverse[robot_joint_v] / stiffness
+        acceleration_scale = np.ones(model.nv)
+
+        def forward_residual(joint_torque: np.ndarray) -> np.ndarray:
+            unpack(result.x)
+            data.qfrc_applied[robot_joint_v] = joint_torque
+            mujoco.mj_forward(model, data)
+            return np.concatenate(
+                (
+                    data.qacc / acceleration_scale,
+                    joint_torque / (100.0 * effort_limits),
+                )
+            )
+
+        forward_result = least_squares(
+            forward_residual,
+            torque_seed,
+            bounds=(-effort_limits, effort_limits),
+            max_nfev=cfg.forward_max_nfev,
+            diff_step=1.0e-4,
+            x_scale="jac",
+            xtol=1.0e-9,
+            ftol=1.0e-9,
+            gtol=1.0e-9,
+        )
+        final_residual = forward_residual(forward_result.x)
+        final_qpos = data.qpos.copy()
+        joint_torque = forward_result.x.copy()
+        actuator_target = final_qpos[robot_joint_q] + joint_torque / stiffness
+        actuator_torque_ratio = float(np.max(np.abs(joint_torque) / effort_limits))
+
+        data.qfrc_applied[:] = 0.0
+        if robot_actuator_ids.size:
+            data.ctrl[robot_actuator_ids] = actuator_target
+        else:
+            data.qfrc_applied[robot_joint_v] = joint_torque
+        mujoco.mj_forward(model, data)
+        _, _, final_fat2, _ = kinematic_residuals()
+        final_acceleration = data.qacc.copy()
+        applied_joint_torque = data.qfrc_actuator[robot_joint_v] + data.qfrc_applied[robot_joint_v]
         position_error = max(
             np.linalg.norm(data.site(f"robot/{side}_grasp_site").xpos - data.site(f"rickshaw/{side}_hitch_site").xpos)
             for side in ("left", "right")
         )
-        rotation_error = max(
-            np.linalg.norm(
-                _rotation_error(
-                    data.site(f"robot/{side}_grasp_site").xmat,
-                    data.site(f"rickshaw/{side}_hitch_site").xmat,
-                )
-            )
-            for side in ("left", "right")
-        )
         support_error = max(
-            *(abs(data.geom_xpos[index, 2] - model.geom_size[index, 0]) for index in foot_geoms),
-            *(abs(data.geom_xpos[index, 2] - model.geom_size[index, 0]) for index in wheel_geoms),
+            *(
+                abs(data.geom_xpos[index, 2] - model.geom_size[index, 0] - cfg.contact_penetration)
+                for index in foot_geoms
+            ),
+            *(
+                abs(data.geom_xpos[index, 2] - model.geom_size[index, 0] - cfg.contact_penetration)
+                for index in wheel_geoms
+            ),
         )
-        unactuated_error = float(
-            np.linalg.norm(
-                np.concatenate(
-                    (
-                        data.qfrc_inverse[robot_root_v : robot_root_v + 6],
-                        data.qfrc_inverse[cart_root_v : cart_root_v + 6],
-                        data.qfrc_inverse[wheel_v],
-                    )
-                ),
-                ord=np.inf,
-            )
+        actuator_torque_error = float(
+            np.linalg.norm(applied_joint_torque - joint_torque, ord=np.inf)
         )
+        acceleration_error = float(np.linalg.norm(final_acceleration, ord=np.inf))
         if not np.all(np.isfinite(final_residual)):
             raise RuntimeError("MuJoCo static solve produced non-finite residuals")
         converged = (
-            position_error <= cfg.position_scale
-            and rotation_error <= cfg.rotation_scale
-            and support_error <= cfg.support_scale
-            and unactuated_error <= cfg.force_scale
+            position_error <= cfg.position_tolerance
+            and support_error <= cfg.support_tolerance
+            and acceleration_error <= cfg.acceleration_tolerance
+            and actuator_torque_error <= cfg.actuator_torque_tolerance
+            and actuator_torque_ratio <= cfg.actuator_torque_ratio_tolerance + 1.0e-6
         )
-        if not result.success and not converged:
+        if not converged:
+            worst_torque_joint = joint_names[int(np.argmax(np.abs(joint_torque) / effort_limits))]
             raise RuntimeError(
                 "MuJoCo static solve failed: "
-                f"{result.message}; position={position_error:.6g}, rotation={rotation_error:.6g}, "
-                f"support={support_error:.6g}, force={unactuated_error:.6g}"
+                f"inverse={result.message}; forward={forward_result.message}; "
+                f"position={position_error:.6g}, "
+                f"support={support_error:.6g}, qacc={acceleration_error:.6g}, "
+                f"actuator_error={actuator_torque_error:.6g}, "
+                f"torque_ratio={actuator_torque_ratio:.6g}, "
+                f"torque_joint={worst_torque_joint}"
             )
         return MujocoStaticEquilibrium(
             gradient=gradient,
             qpos=final_qpos,
-            joint_position_target=joint_target,
-            fat2_reference_angle=diagnostics["fat2"],
+            joint_position_target=actuator_target,
+            joint_actuator_torque=joint_torque,
+            fat2_reference_angle=final_fat2,
             equality_position_error=float(position_error),
-            equality_rotation_error=float(rotation_error),
             support_height_error=float(support_error),
-            unactuated_force_error=unactuated_error,
+            acceleration_error=acceleration_error,
+            actuator_torque_error=actuator_torque_error,
+            actuator_torque_ratio=actuator_torque_ratio,
         )
     finally:
         model.opt.gravity[:] = gravity_original

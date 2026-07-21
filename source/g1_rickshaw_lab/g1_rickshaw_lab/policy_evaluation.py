@@ -1,7 +1,7 @@
 """Pure policy-diagnostic aggregation and artifact contracts.
 
 The simulator-facing runner lives in ``scripts/evaluate_policy.py``.  Keeping
-the reductions here free of Isaac Lab imports makes every reported diagnostic
+the reductions here free of simulator imports makes every reported diagnostic
 number independently testable on CPU.
 """
 
@@ -21,7 +21,7 @@ from .slope_contract import SLOPE_GRADIENTS
 
 POLICY_DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 1
 GUIDE_POLICY_EVALUATION_TASK: Final[str] = (
-    "Isaac-G1-Rickshaw-Directional-Slope-v0"
+    "Mjlab-G1-Rickshaw-Directional-Slope-Student"
 )
 SIGNED_SLOPES: Final[tuple[float, ...]] = SLOPE_GRADIENTS
 COMMAND_PHASE_LABELS: Final[tuple[str, ...]] = (
@@ -51,10 +51,10 @@ METRIC_DEFINITIONS: Final[dict[str, str]] = {
     "actions.processed_rate": "RMS joint norm of (q_t-q_t-1)/policy_dt",
     "actions.processed_jerk": "RMS joint norm of (q_t-2q_t-1+q_t-2)/policy_dt^2",
     "actuation.power": "sum(abs(applied_torque * joint_velocity)) over the 29 policy joints",
-    "d6.residual": "maximum of the two D6 spatial residual norms",
-    "d6.force/torque": "maximum left/right retained-link incoming D6 reaction force or torque norm",
-    "d6.asymmetry": "absolute left/right norm difference divided by their sum",
-    "analytic_force.relative_error": "instantaneous symmetric relative error after projecting robot-on-cart D6 force",
+    "connection.residual": "maximum position residual of the two MuJoCo site connections",
+    "connection.force/torque": "maximum left/right connection force or torque norm",
+    "connection.asymmetry": "absolute left/right norm difference divided by their sum",
+    "analytic_force.relative_error": "instantaneous symmetric relative error after projecting robot-on-cart connection force",
     "analytic_force.fat_window_consistency": "0.5 s impulse-bias gate normalized by mean absolute analytic force",
     "stability.zmp_margin": "signed ZMP support-polygon margin for valid samples",
     "actuation.arm/leg_torque_margin": (
@@ -69,13 +69,13 @@ METRIC_DEFINITIONS: Final[dict[str, str]] = {
 }
 
 
-def d6_wrench_channels(wrench: torch.Tensor) -> dict[str, torch.Tensor]:
-    """Reduce the two retained-link D6 reaction wrenches without discarding torque."""
+def connection_wrench_channels(wrench: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Reduce the two connection reaction wrenches without discarding torque."""
 
     if not torch.is_tensor(wrench) or wrench.ndim != 3 or wrench.shape[1:] != (2, 6):
-        raise ValueError("D6 reaction wrench must have shape [N, 2, 6]")
+        raise ValueError("connection reaction wrench must have shape [N, 2, 6]")
     if not torch.isfinite(wrench).all():
-        raise ValueError("D6 reaction wrench contains non-finite values")
+        raise ValueError("connection reaction wrench contains non-finite values")
     force_norm = torch.linalg.vector_norm(wrench[..., :3], dim=-1)
     torque_norm = torch.linalg.vector_norm(wrench[..., 3:], dim=-1)
     return {
@@ -467,12 +467,12 @@ class MetricStore:
                 "arm_torque_margin": distribution("arm_torque_margin"),
                 "leg_torque_margin": distribution("leg_torque_margin"),
             },
-            "d6": {
-                "residual_m_or_rad": distribution("d6_residual"),
-                "force_n": distribution("d6_force"),
-                "torque_nm": distribution("d6_torque"),
-                "force_asymmetry": distribution("d6_force_asymmetry"),
-                "torque_asymmetry": distribution("d6_torque_asymmetry"),
+            "connection": {
+                "residual_m": distribution("connection_residual"),
+                "force_n": distribution("connection_force"),
+                "torque_nm": distribution("connection_torque"),
+                "force_asymmetry": distribution("connection_force_asymmetry"),
+                "torque_asymmetry": distribution("connection_torque_asymmetry"),
             },
             "analytic_force": {
                 "t_s_relative_error": distribution("t_s_relative_error"),
@@ -685,7 +685,7 @@ __all__ = [
     "MetricStore",
     "PolicyEvaluationAccumulator",
     "command_phase_labels",
-    "d6_wrench_channels",
+    "connection_wrench_channels",
     "evaluate_s2_return_floor",
     "slope_label",
     "validate_s1_baseline_diagnostic_report",

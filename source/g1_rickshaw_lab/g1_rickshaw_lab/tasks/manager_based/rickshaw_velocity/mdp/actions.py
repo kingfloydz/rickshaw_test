@@ -1,14 +1,13 @@
 """Action processing for the 29-DoF G1 policy.
 
-The filter state in this module deliberately has no Isaac Lab dependency.  This
+The filter state in this module deliberately has no simulator dependency. This
 keeps the deployment-side action contract and the simulator action term on the
 same implementation.
 """
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass
-from typing import Any
+from dataclasses import dataclass
 
 import torch
 
@@ -26,13 +25,6 @@ ACTION_GROUP_DIMS = {
     "shoulder": 6,
     "elbow": 2,
     "wrist": 6,
-}
-ACTION_GROUP_SCALES = {
-    "lower": ACTION_SCALE[0],
-    "waist": ACTION_SCALE[12],
-    "shoulder": ACTION_SCALE[15],
-    "elbow": ACTION_SCALE[18],
-    "wrist": ACTION_SCALE[19],
 }
 ARM_ACTION_START_INDEX = ACTION_GROUP_DIMS["lower"] + ACTION_GROUP_DIMS["waist"]
 
@@ -59,7 +51,7 @@ def canonicalize_action_scale(
     *,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Return one action-scale row after validating Isaac Lab's batched representation."""
+    """Return one action-scale row after validating a batched representation."""
 
     value = torch.as_tensor(scale, device=device)
     if value.ndim == 0 or value.numel() == 1:
@@ -114,6 +106,7 @@ class ButterworthActionState:
 
     q_ref: torch.Tensor
     raw_action: torch.Tensor
+    prev_raw_action: torch.Tensor
     x_prev: torch.Tensor
     y_prev: torch.Tensor
     target: torch.Tensor
@@ -121,7 +114,7 @@ class ButterworthActionState:
     prev_prev_target: torch.Tensor
 
     @classmethod
-    def create(cls, q_ref: torch.Tensor) -> "ButterworthActionState":
+    def create(cls, q_ref: torch.Tensor) -> ButterworthActionState:
         if q_ref.ndim != 2:
             raise ValueError(f"q_ref must have shape [N, D], got {tuple(q_ref.shape)}")
         reference = q_ref.clone()
@@ -129,6 +122,7 @@ class ButterworthActionState:
         return cls(
             q_ref=reference,
             raw_action=zeros.clone(),
+            prev_raw_action=zeros.clone(),
             x_prev=reference.clone(),
             y_prev=reference.clone(),
             target=reference.clone(),
@@ -161,6 +155,7 @@ class ButterworthActionState:
 
         self.q_ref[ids] = q_ref
         self.raw_action[ids] = 0.0
+        self.prev_raw_action[ids] = 0.0
         self.x_prev[ids] = q_ref
         self.y_prev[ids] = q_ref
         self.target[ids] = q_ref
@@ -194,6 +189,7 @@ class ButterworthActionState:
             self.x_prev[ids],
             self.y_prev[ids],
         )
+        self.prev_raw_action[ids] = self.raw_action[ids]
         self.raw_action[ids] = normalized_action
         self.prev_prev_target[ids] = self.prev_target[ids]
         self.prev_target[ids] = self.target[ids]
@@ -220,166 +216,14 @@ def butterworth_gain(frequency_hz: float, sample_rate_hz: float = 50.0) -> float
     return float(torch.abs(response))
 
 
-def _resolve_nested_attr(obj: Any, path: str) -> Any:
-    result = obj
-    for item in path.split("."):
-        result = getattr(result, item)
-    return result
-
-
-try:  # Isaac Lab is intentionally optional for CPU-only validation.
-    from isaaclab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
-    from isaaclab.utils import configclass
-
-    ISAACLAB_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised in the lightweight test environment.
-    JointPositionAction = object  # type: ignore[assignment,misc]
-    JointPositionActionCfg = object  # type: ignore[assignment,misc]
-    ISAACLAB_AVAILABLE = False
-
-    def configclass(cls: type) -> type:
-        return cls
-
-
-if ISAACLAB_AVAILABLE:
-
-    class FilteredJointPositionAction(JointPositionAction):
-        """Isaac Lab action term using the episode's closed-chain IK reference."""
-
-        cfg: "FilteredJointPositionActionCfg"
-
-        def __init__(self, cfg: "FilteredJointPositionActionCfg", env: Any):
-            super().__init__(cfg, env)
-            self._env = env
-            self._reference_indices = cfg.reference_indices
-            self._new_policy_action = False
-            if cfg.physics_hook_owner:
-                if hasattr(env, "_rickshaw_physics_hook_action_term"):
-                    raise RuntimeError("exactly one FilteredJointPositionAction may own rickshaw physics hooks")
-                env._rickshaw_physics_hook_action_term = self
-            q_ref = self._read_q_ref(require=False)
-            self._filter_state = ButterworthActionState.create(q_ref)
-
-        def _read_q_ref(self, *, require: bool = True) -> torch.Tensor:
-            try:
-                q_ref = _resolve_nested_attr(self._env, self.cfg.reference_attribute)
-            except AttributeError:
-                if require:
-                    raise RuntimeError("closed-chain q_ref was not installed before ActionTerm reset") from None
-                return torch.zeros(
-                    (self._env.num_envs, self.action_dim),
-                    device=self._env.device,
-                    dtype=self._raw_actions.dtype,
-                )
-            if not torch.is_tensor(q_ref) or q_ref.ndim != 2:
-                raise ValueError(f"{self.cfg.reference_attribute} must be a [N, D] tensor")
-            if self._reference_indices is not None:
-                q_ref = q_ref[:, self._reference_indices]
-            elif q_ref.shape[-1] == self.action_dim:
-                pass
-            elif q_ref.shape[-1] == self._asset.num_joints:
-                q_ref = q_ref[:, self._joint_ids]
-            else:
-                raise ValueError(
-                    "q_ref is neither term-local nor articulation-sized; set reference_indices "
-                    "to the persisted checkpoint indices"
-                )
-            if q_ref.shape[-1] != self.action_dim:
-                raise ValueError("resolved q_ref dimension differs from this ActionTerm")
-            return q_ref
-
-        def process_actions(self, actions: torch.Tensor) -> None:
-            self._raw_actions[:] = actions
-            target = self._filter_state.process(actions, self._scale)
-            self._processed_actions[:] = target
-            self._new_policy_action = True
-
-        def _sync_global_action_state(self) -> None:
-            terms = self._env.action_manager._terms.values()
-            target = torch.cat([term.processed_actions for term in terms], dim=-1)
-            if target.shape[-1] != ACTION_DIM:
-                raise RuntimeError(f"ActionManager processed target is not {ACTION_DIM}-D")
-            state = self._env.action_state
-            state.prev_prev_target[:] = state.prev_target
-            state.prev_target[:] = state.target
-            state.target[:] = target
-            state.raw_action[:] = torch.cat([term.raw_actions for term in terms], dim=-1)
-
-        def apply_actions(self) -> None:
-            if self.cfg.physics_hook_owner:
-                self._env._g1_rickshaw_pre_physics_step()
-            # The reset state already includes the calibrated handle preload.
-            # Every substep therefore uses the normal policy controller target.
-            self._processed_actions[:] = self._filter_state.target
-            super().apply_actions()
-            if not self.cfg.physics_hook_owner:
-                return
-            if self._new_policy_action:
-                self._sync_global_action_state()
-                self._new_policy_action = False
-
-        def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
-            if env_ids is None or isinstance(env_ids, slice):
-                ids = None
-            else:
-                ids = env_ids
-            q_ref = self._read_q_ref()
-            self._filter_state.reset(q_ref if ids is None else q_ref[ids], ids)
-            if ids is None:
-                self._raw_actions.zero_()
-                self._processed_actions[:] = q_ref
-            else:
-                self._raw_actions[ids] = 0.0
-                self._processed_actions[ids] = q_ref[ids]
-
-        @property
-        def filter_state(self) -> ButterworthActionState:
-            return self._filter_state
-
-    @configclass
-    class FilteredJointPositionActionCfg(JointPositionActionCfg):
-        """Configuration for :class:`FilteredJointPositionAction`.
-
-        ``reference_indices`` is required when the shared reference tensor is in
-        the global 29-joint checkpoint order and this term controls one group.
-        """
-
-        class_type: type = FilteredJointPositionAction
-        reference_attribute: str = "action_state.q_ref"
-        reference_indices: tuple[int, ...] | None = None
-        physics_hook_owner: bool = False
-
-else:
-
-    class FilteredJointPositionAction:  # pragma: no cover - import compatibility only.
-        def __init__(self, *_: Any, **__: Any):
-            raise RuntimeError("FilteredJointPositionAction requires Isaac Lab")
-
-    @dataclass
-    class FilteredJointPositionActionCfg:
-        """Importable stand-in used by non-Isaac unit tests."""
-
-        joint_names: tuple[str, ...] = MISSING
-        scale: float | tuple[float, ...] = MISSING
-        asset_name: str = "robot"
-        preserve_order: bool = True
-        reference_attribute: str = "action_state.q_ref"
-        reference_indices: tuple[int, ...] | None = None
-        physics_hook_owner: bool = False
-        class_type: type = FilteredJointPositionAction
-
-
 __all__ = [
     "ACTION_DIM",
     "ACTION_GROUP_DIMS",
-    "ACTION_GROUP_SCALES",
     "ARM_ACTION_START_INDEX",
     "BUTTERWORTH_A1",
     "BUTTERWORTH_B0",
     "BUTTERWORTH_B1",
     "ButterworthActionState",
-    "FilteredJointPositionAction",
-    "FilteredJointPositionActionCfg",
     "action_scale_vector",
     "canonicalize_action_scale",
     "butterworth_dc_gain",

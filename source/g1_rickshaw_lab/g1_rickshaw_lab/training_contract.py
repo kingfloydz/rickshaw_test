@@ -1,32 +1,25 @@
 """Training-stage checkpoint ABI and deployment bundle helpers.
 
-This module intentionally has no Isaac Lab imports.  The command wrappers use
-it before Kit starts, while the runner hook imports RSL-RL only after the
+This module intentionally has no simulator imports. The command wrappers use
+it before Mjlab starts, while the runner hook imports RSL-RL only after the
 upstream training script has initialized its Python environment.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 import importlib.metadata
 import inspect
 import json
 import math
 import os
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-import tempfile
 from typing import Any
 
-from .slope_contract import (
-    SLOPE_GRADIENTS,
-    SLOPE_LABELS,
-    balanced_slope_counts,
-)
-
 import torch
-import yaml
 
-from .configuration import FIXED_G1_JOINT_ORDER
+from .artifact_io import write_json_atomic
+from .configuration import FIXED_G1_JOINT_ORDER, load_feasibility_envelope
 from .policy_schema import (
     ACTION_DIM,
     ACTION_SCALE,
@@ -37,23 +30,28 @@ from .policy_schema import (
     DEFAULT_CONTEXT_DIM,
     HISTORY_LENGTH,
     SUPPORTED_CONTEXT_DIMS,
+    SUPPORTED_HISTORY_LENGTHS,
     validate_context_dim,
+    validate_history_length,
 )
+from .project_paths import CONFIG_ROOT, PROJECT_ROOT
 from .provenance import (
     RSL_RL_VERSION,
     CheckpointMetadata,
     attach_checkpoint_metadata,
-    atomic_torch_save,
     collect_checkpoint_metadata,
     extract_checkpoint_metadata,
     load_checkpoint_with_validation,
-    validate_checkpoint,
 )
 from .reward_profile import (
     REWARD_WEIGHT_OVERRIDES_KEY,
     reward_weight_overrides_from_configuration,
 )
-
+from .slope_contract import (
+    SLOPE_GRADIENTS,
+    SLOPE_LABELS,
+    balanced_slope_counts,
+)
 
 CHECKPOINT_SCHEMA_VERSION = 1
 CHECKPOINT_STAGE_KEY = "g1_rickshaw_stage"
@@ -61,13 +59,13 @@ CHECKPOINT_LINEAGE_KEY = "g1_rickshaw_lineage"
 CHECKPOINT_CURRICULUM_ITERATION_KEY = "g1_rickshaw_curriculum_iteration"
 CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY = "g1_rickshaw_stability_rewards_active"
 TRAINING_CONFIGURATION_KEY = "g1_rickshaw_training_configuration"
-TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
+TRAINING_CONFIGURATION_SCHEMA_VERSION = 9
+LEGACY_TRAINING_CONFIGURATION_SCHEMA_VERSION = 8
 EXPECTED_RSL_RL_DISTRIBUTION_VERSION = RSL_RL_VERSION.removeprefix("v")
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_FEASIBILITY_PATH = REPOSITORY_ROOT / "config" / "feasibility_envelope.yaml"
-DEFAULT_RESET_POSES_PATH = REPOSITORY_ROOT / "config" / "reset_poses.yaml"
-GUIDE_TRAINING_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
+REPOSITORY_ROOT = PROJECT_ROOT
+DEFAULT_FEASIBILITY_PATH = CONFIG_ROOT / "feasibility_envelope.yaml"
+GUIDE_TRAINING_TASK = "Mjlab-G1-Rickshaw-Directional-Slope-Teacher"
 GUIDE_TRAINING_NUM_ENVS = 8192
 TRAINING_ARTIFACT_INTERVAL = 200
 S1_DETERMINISTIC_ALGORITHMS = False
@@ -82,12 +80,14 @@ TRAINING_PARAMETER_KEYS = (
     "fat2_weight",
     "rollout_steps",
     "latent_dim",
+    "history_length",
     "stability_reward_curriculum",
 )
 DEFAULT_TRAINING_PARAMETERS = {
-    "fat2_weight": 0.1,
+    "fat2_weight": 0.0,
     "rollout_steps": 48,
     "latent_dim": DEFAULT_CONTEXT_DIM,
+    "history_length": HISTORY_LENGTH,
     "stability_reward_curriculum": False,
 }
 SUPPORTED_FAT2_WEIGHTS = (0.0, 0.1, 0.2)
@@ -108,7 +108,7 @@ TRAINING_CONFIGURATION_FIELDS = {
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
         "domain_randomization": "startup_fixed",
-        "terrain_slopes": "startup_balanced_fixed",
+        "terrain_slopes": "startup_center_weighted_fixed",
         "observation_noise": "unitree_g1_uniform",
     },
     "s1_context_distillation": {
@@ -131,9 +131,9 @@ GUIDE_TRAINING_PARAMETERS = {
     },
 }
 GUIDE_MAX_ITERATIONS = {
-    "s0_teacher": 4000,
-    "s1_context_distillation": 3000,
-    "s2_student_ppo": 2000,
+    "s0_teacher": 2600,
+    "s1_context_distillation": 2000,
+    "s2_student_ppo": 1600,
 }
 BASELINE_ROLLOUT_STEPS = DEFAULT_TRAINING_PARAMETERS["rollout_steps"]
 
@@ -185,6 +185,77 @@ def finalize_training_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
     return json.loads(_canonical_training_configuration_json(value).decode("ascii"))
 
 
+def build_training_configuration(
+    *,
+    stage: str,
+    task: str,
+    num_envs: int | None,
+    seed: int,
+    max_iterations: int,
+    guide_parameters: Mapping[str, Any],
+    resolved_parameters: Mapping[str, Any],
+    actor_initialized_from_teacher: bool | None,
+    stage_coverage: Mapping[str, Any] | None,
+    fat2_weight: float = float(DEFAULT_TRAINING_PARAMETERS["fat2_weight"]),
+    latent_dim: int = int(DEFAULT_TRAINING_PARAMETERS["latent_dim"]),
+    rollout_steps: int = int(DEFAULT_TRAINING_PARAMETERS["rollout_steps"]),
+    history_length: int = int(DEFAULT_TRAINING_PARAMETERS["history_length"]),
+    stability_reward_curriculum: bool = bool(DEFAULT_TRAINING_PARAMETERS["stability_reward_curriculum"]),
+) -> dict[str, Any]:
+    """Build the canonical configuration shared by every training stage."""
+
+    return finalize_training_configuration(
+        {
+            "schema_version": TRAINING_CONFIGURATION_SCHEMA_VERSION,
+            "stage": stage,
+            "task": str(task),
+            "num_envs": num_envs,
+            "seed": seed,
+            "max_iterations": max_iterations,
+            "guide_parameters": dict(guide_parameters),
+            "resolved_parameters": dict(resolved_parameters),
+            "actor_initialized_from_teacher": actor_initialized_from_teacher,
+            "stage_coverage": None if stage_coverage is None else dict(stage_coverage),
+            "training_parameters": {
+                "fat2_weight": fat2_weight,
+                "rollout_steps": rollout_steps,
+                "latent_dim": latent_dim,
+                "history_length": history_length,
+                "stability_reward_curriculum": stability_reward_curriculum,
+            },
+        }
+    )
+
+
+def cli_value(
+    arguments: Sequence[str],
+    flag: str,
+    *,
+    hydra_keys: Sequence[str] = (),
+    default: Any,
+    cast,
+) -> Any:
+    """Resolve one scalar from CLI or Hydra-style overrides."""
+
+    result = default
+    index = 0
+    while index < len(arguments):
+        token = str(arguments[index])
+        if token == flag:
+            if index + 1 >= len(arguments):
+                raise ValueError(f"{flag} requires a value")
+            result = cast(arguments[index + 1])
+            index += 2
+            continue
+        if token.startswith(flag + "="):
+            result = cast(token.split("=", 1)[1])
+        for key in hydra_keys:
+            if token.startswith(key + "="):
+                result = cast(token.split("=", 1)[1])
+        index += 1
+    return result
+
+
 def validate_training_configuration(
     value: Any,
     *,
@@ -192,7 +263,15 @@ def validate_training_configuration(
 ) -> dict[str, Any]:
     """Validate the replayable CLI/Hydra configuration in a checkpoint."""
 
-    if not isinstance(value, Mapping) or value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
+    if not isinstance(value, Mapping):
+        raise ValueError("training configuration must be a mapping")
+    if value.get("schema_version") == LEGACY_TRAINING_CONFIGURATION_SCHEMA_VERSION:
+        value = dict(value)
+        parameters = dict(value["training_parameters"])
+        parameters["history_length"] = HISTORY_LENGTH
+        value["training_parameters"] = parameters
+        value["schema_version"] = TRAINING_CONFIGURATION_SCHEMA_VERSION
+    if value.get("schema_version") != TRAINING_CONFIGURATION_SCHEMA_VERSION:
         raise ValueError(f"training configuration requires schema_version: {TRAINING_CONFIGURATION_SCHEMA_VERSION}")
     if set(value) != TRAINING_CONFIGURATION_FIELDS:
         raise ValueError("training configuration has missing or unknown fields")
@@ -229,6 +308,8 @@ def validate_training_configuration(
         raise ValueError("rollout_steps must be an integer")
     if type(training_parameters["latent_dim"]) is not int:
         raise ValueError("latent_dim must be an integer")
+    if type(training_parameters["history_length"]) is not int:
+        raise ValueError("history_length must be an integer")
     if type(training_parameters["stability_reward_curriculum"]) is not bool:
         raise ValueError("stability_reward_curriculum must be boolean")
     raw_fat2_weight = training_parameters["fat2_weight"]
@@ -238,6 +319,7 @@ def validate_training_configuration(
         "fat2_weight": float(raw_fat2_weight),
         "rollout_steps": int(training_parameters["rollout_steps"]),
         "latent_dim": int(training_parameters["latent_dim"]),
+        "history_length": int(training_parameters["history_length"]),
         "stability_reward_curriculum": training_parameters["stability_reward_curriculum"],
     }
     if normalized_parameters["fat2_weight"] not in SUPPORTED_FAT2_WEIGHTS:
@@ -245,6 +327,7 @@ def validate_training_configuration(
     if normalized_parameters["rollout_steps"] not in SUPPORTED_ROLLOUT_STEPS:
         raise ValueError(f"rollout_steps must be one of {SUPPORTED_ROLLOUT_STEPS}")
     validate_context_dim(normalized_parameters["latent_dim"])
+    validate_history_length(normalized_parameters["history_length"])
     result = dict(value)
     result["training_parameters"] = normalized_parameters
     return finalize_training_configuration(result)
@@ -428,11 +511,9 @@ def validate_rollout_stage_coverage(manifest: Mapping[str, Any]) -> dict[str, in
 
 
 def feasibility_config_path() -> Path:
-    """Resolve and publish the canonical feasibility-envelope path."""
+    """Return the canonical feasibility-envelope path."""
 
-    resolved = Path(os.environ.get("G1_RICKSHAW_FEASIBILITY_ENVELOPE", DEFAULT_FEASIBILITY_PATH)).resolve()
-    os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(resolved)
-    return resolved
+    return DEFAULT_FEASIBILITY_PATH.resolve()
 
 
 def require_pinned_rsl_rl() -> str:
@@ -464,11 +545,10 @@ def require_pinned_rsl_rl() -> str:
 
 
 def normalize_rsl_rl_runner_configuration(agent_cfg: Any) -> Any:
-    """Apply Isaac Lab's required RSL-RL 5 configuration migration."""
+    """Validate the native Mjlab RSL-RL 5 configuration."""
 
-    from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
-
-    return handle_deprecated_rsl_rl_cfg(agent_cfg, require_pinned_rsl_rl())
+    require_pinned_rsl_rl()
+    return agent_cfg
 
 
 def collect_runtime_metadata() -> CheckpointMetadata:
@@ -692,24 +772,6 @@ def build_s2_bootstrap_checkpoint(
     return checkpoint
 
 
-def _atomic_json(value: Mapping[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    except BaseException:
-        try:
-            os.unlink(name)
-        except FileNotFoundError:
-            pass
-        raise
-
-
 def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     raw_training_configuration = checkpoint.get(TRAINING_CONFIGURATION_KEY)
     if not isinstance(raw_training_configuration, Mapping):
@@ -718,24 +780,34 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("deployment training configuration must be S2")
     training_configuration = dict(raw_training_configuration)
     latent_dim = int(training_configuration["training_parameters"]["latent_dim"])
-    with Path(os.environ.get("G1_RICKSHAW_RESET_POSES", DEFAULT_RESET_POSES_PATH)).open(
-        "r", encoding="utf-8"
-    ) as stream:
-        reset = yaml.safe_load(stream)
-    with feasibility_config_path().open("r", encoding="utf-8") as stream:
-        feasibility = yaml.safe_load(stream)
-    calibration = feasibility["calibration"]
-    ranges = feasibility["ranges"]
+    history_length = int(training_configuration["training_parameters"].get("history_length", HISTORY_LENGTH))
+    feasibility = load_feasibility_envelope(feasibility_config_path())
+    calibration = feasibility.calibration
+    ranges = feasibility.ranges
+    from .static_equilibrium import solve_mujoco_static_equilibrium
+    from .tasks.manager_based.rickshaw_velocity.closed_chain import (
+        build_assembled_spec,
+    )
+
+    model = build_assembled_spec().compile()
+    static_solutions = []
+    qpos_seed = None
+    for gradient in SLOPE_GRADIENTS:
+        solution = solve_mujoco_static_equilibrium(
+            model, gradient, qpos_seed=qpos_seed
+        )
+        static_solutions.append(solution)
+        qpos_seed = solution.qpos
     command_ranges: dict[str, dict[str, Any]] = {}
     for name, source_name, unit in (
         ("acceleration_limit", "command.acceleration_limit", "m/s^2"),
         ("jerk_limit", "command.jerk_limit", "m/s^3"),
     ):
-        interval = ranges.get(source_name) if isinstance(ranges, Mapping) else None
-        if not isinstance(interval, Mapping) or set(interval) != {"min", "max"}:
+        interval = ranges.get(source_name)
+        if interval is None:
             raise ValueError(f"feasibility envelope is missing ranges.{source_name}")
-        minimum = float(interval["min"])
-        maximum = float(interval["max"])
+        minimum = float(interval.minimum)
+        maximum = float(interval.maximum)
         if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum <= 0.0 or minimum > maximum:
             raise ValueError(f"feasibility envelope has invalid ranges.{source_name}")
         command_ranges[name] = {
@@ -751,7 +823,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "type": "deterministic_student_mean",
             "inputs": {
                 "current": [None, ACTOR_OBSERVATION_DIM],
-                "history": [None, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM],
+                "history": [None, history_length, ACTOR_OBSERVATION_DIM],
             },
             "context_dim": latent_dim,
             "output": {"normalized_action": [None, ACTION_DIM], "clip": [-1.0, 1.0]},
@@ -762,7 +834,7 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "stateless": True,
             "inputs": {
                 "current": [None, ACTOR_OBSERVATION_DIM],
-                "history": [None, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM],
+                "history": [None, history_length, ACTOR_OBSERVATION_DIM],
                 "q_ref": [None, ACTION_DIM],
                 "x_prev": [None, ACTION_DIM],
                 "y_prev": [None, ACTION_DIM],
@@ -782,8 +854,14 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
                 {"name": "joint_velocity", "slice": [38, 67], "scale": [0.05] * ACTION_DIM},
                 {
                     "name": "previous_processed_action",
-                    "slice": [67, ACTOR_OBSERVATION_DIM],
+                    "slice": [67, 67 + ACTION_DIM],
                     "scale": [1.0] * ACTION_DIM,
+                },
+                {
+                    "name": "gait_phase",
+                    "fields": ["sin_phase", "cos_phase"],
+                    "slice": [67 + ACTION_DIM, ACTOR_OBSERVATION_DIM],
+                    "scale": [1.0, 1.0],
                 },
             ],
         },
@@ -791,7 +869,20 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "action": {
             "joint_order": list(FIXED_G1_JOINT_ORDER),
             "scale_rad_per_normalized_action": list(ACTION_SCALE),
-            "q_ref_by_gradient": [{"gradient": pose["gradient"], "q_ref": pose["q_ref"]} for pose in reset["poses"]],
+            "q_ref_by_gradient": [
+                {
+                    "gradient": solution.gradient,
+                    "q_ref": solution.joint_position_target.tolist(),
+                }
+                for solution in static_solutions
+            ],
+            "feedforward_torque_by_gradient": [
+                {
+                    "gradient": solution.gradient,
+                    "torque_nm": solution.joint_actuator_torque.tolist(),
+                }
+                for solution in static_solutions
+            ],
             "butterworth": {
                 "sample_rate_hz": 50.0,
                 "cutoff_hz": 4.0,
@@ -834,274 +925,8 @@ def write_deployment_manifest(export_dir: str | Path, checkpoint_path: str | Pat
     manifest["source_checkpoint"] = os.fspath(Path(checkpoint_path).resolve())
     manifest["artifacts"] = sorted(required_files)
     destination = export_path / "manifest.json"
-    _atomic_json(manifest, destination)
+    write_json_atomic(destination, manifest)
     return destination
-
-
-def _unwrap_env(env: Any) -> Any:
-    visited: set[int] = set()
-    while id(env) not in visited:
-        visited.add(id(env))
-        next_env = getattr(env, "unwrapped", None)
-        if next_env is None or next_env is env:
-            next_env = getattr(env, "env", None)
-        if next_env is None or next_env is env:
-            break
-        env = next_env
-    return env
-
-
-def install_runner_hooks_from_environment() -> None:
-    """Install provenance and training-state hooks into pinned RSL's runner."""
-
-    if os.environ.get("G1_RICKSHAW_RUNNER_HOOK") != "1":
-        return
-    require_pinned_rsl_rl()
-    from rsl_rl.runners import OnPolicyRunner
-
-    if getattr(OnPolicyRunner, "_g1_rickshaw_hook_installed", False):
-        return
-    metadata = collect_runtime_metadata()
-    stage = os.environ.get("G1_RICKSHAW_CHECKPOINT_STAGE")
-    if not stage:
-        raise RuntimeError("G1_RICKSHAW_CHECKPOINT_STAGE is required when runner hooks are enabled")
-    lineage_raw = os.environ.get("G1_RICKSHAW_CHECKPOINT_LINEAGE", "{}")
-    lineage = json.loads(lineage_raw)
-    if not isinstance(lineage, Mapping):
-        raise RuntimeError("G1_RICKSHAW_CHECKPOINT_LINEAGE must encode a JSON mapping")
-    training_configuration: dict[str, Any] | None = None
-    training_configuration_raw = os.environ.get("G1_RICKSHAW_TRAINING_CONFIGURATION")
-    if training_configuration_raw is not None:
-        try:
-            raw_configuration = json.loads(training_configuration_raw)
-            training_configuration = validate_guide_training_configuration(
-                raw_configuration,
-                expected_stage=stage,
-            )
-        except ValueError as exc:
-            raise RuntimeError("G1_RICKSHAW_TRAINING_CONFIGURATION is not a valid audited configuration") from exc
-
-    original_init = OnPolicyRunner.__init__
-    original_learn = OnPolicyRunner.learn
-    original_load = OnPolicyRunner.load
-    original_export_jit = OnPolicyRunner.export_policy_to_jit
-    original_export_onnx = OnPolicyRunner.export_policy_to_onnx
-
-    def set_stability_rewards(runner: Any, active: bool) -> None:
-        env = _unwrap_env(runner.env)
-        for name, default_weight in runner._g1_stability_reward_weights.items():
-            env.reward_manager.get_term_cfg(name).weight = default_weight if active else 0.0
-        runner._g1_stability_rewards_active = active
-
-    def hooked_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        self._g1_stability_reward_curriculum = bool(
-            training_configuration and training_configuration["training_parameters"]["stability_reward_curriculum"]
-        )
-        if self._g1_stability_reward_curriculum:
-            env = _unwrap_env(self.env)
-            self._g1_stability_reward_weights = {
-                name: float(env.reward_manager.get_term_cfg(name).weight)
-                for name in ("fat2_prior_exp", "zmp_margin_barrier")
-            }
-            set_stability_rewards(self, False)
-        else:
-            self._g1_stability_rewards_active = True
-        if training_configuration is not None:
-            parameters = training_configuration["training_parameters"]
-            configured_steps = parameters["rollout_steps"]
-            actual_steps = int(self.cfg["num_steps_per_env"])
-            if configured_steps != actual_steps:
-                raise RuntimeError(
-                    "training rollout length differs from the published "
-                    f"configuration: actual={actual_steps}, configured={configured_steps}"
-                )
-            actual_latent_dim = int(self.alg.actor.latent_dim)
-            if actual_latent_dim != parameters["latent_dim"]:
-                raise RuntimeError("actor latent width differs from the published configuration")
-            if int(self.cfg["save_interval"]) != training_artifact_interval(configured_steps):
-                raise RuntimeError("checkpoint interval differs from the fixed transition cadence")
-        self._g1_training_iterations = 0
-        if stage == "s2_student_ppo":
-            raw_start = os.environ.get("G1_RICKSHAW_CURRICULUM_START_ITERATION")
-            if raw_start is None:
-                raise RuntimeError("S2/Play requires G1_RICKSHAW_CURRICULUM_START_ITERATION from checkpoint lineage")
-            try:
-                curriculum_start = int(raw_start)
-            except ValueError as exc:
-                raise RuntimeError("G1_RICKSHAW_CURRICULUM_START_ITERATION must be an integer") from exc
-            self._g1_curriculum_start_iteration = curriculum_start
-        else:
-            self._g1_curriculum_start_iteration = 0
-        self._g1_stage_policy_steps = 0
-        self._g1_curriculum_iteration = self._g1_curriculum_start_iteration
-        original_update = self.alg.update
-
-        def update_training_state(*update_args, **update_kwargs):
-            result = original_update(*update_args, **update_kwargs)
-            self._g1_training_iterations += 1
-            self._g1_stage_policy_steps += int(self.cfg["num_steps_per_env"])
-            self._g1_curriculum_iteration = self._g1_curriculum_start_iteration + (
-                self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
-            )
-            if (
-                self._g1_stability_reward_curriculum
-                and not self._g1_stability_rewards_active
-                and self.logger.lenbuffer
-                and sum(self.logger.lenbuffer) / len(self.logger.lenbuffer) > 500.0
-            ):
-                set_stability_rewards(self, True)
-                print("[INFO] FAT2 and ZMP rewards enabled at mean episode length > 500")
-            return result
-
-        self.alg.update = update_training_state
-
-    def hooked_learn(self, *args, **kwargs):
-        if stage in {"s0_teacher", "s2_student_ppo"} and training_configuration is not None:
-            call_args = list(args)
-            call_kwargs = dict(kwargs)
-            if call_args:
-                requested = call_args[0]
-            elif "num_learning_iterations" in call_kwargs:
-                requested = call_kwargs["num_learning_iterations"]
-            else:
-                raise RuntimeError("RSL learn call is missing num_learning_iterations")
-            if isinstance(requested, bool) or not isinstance(requested, int):
-                raise RuntimeError("RSL num_learning_iterations must be an integer")
-            if stage == "s0_teacher":
-                remaining = s0_remaining_learning_iterations(
-                    requested_iterations=requested,
-                    completed_iterations=int(self._g1_training_iterations),
-                )
-            else:
-                remaining = s2_remaining_learning_iterations(
-                    requested_iterations=requested,
-                    completed_iterations=int(self._g1_training_iterations),
-                )
-            if remaining == 0:
-                print(f"[INFO] {stage} reached the iteration target")
-                return None
-            if call_args:
-                call_args[0] = remaining
-            else:
-                call_kwargs["num_learning_iterations"] = remaining
-            args = tuple(call_args)
-            kwargs = call_kwargs
-        return original_learn(self, *args, **kwargs)
-
-    def hooked_save(self, path: str, infos: dict | None = None):
-        if training_configuration is None:
-            raise RuntimeError("training checkpoint save requires G1_RICKSHAW_TRAINING_CONFIGURATION")
-        saved = self.alg.save()
-        if not isinstance(saved, Mapping):
-            raise RuntimeError("RSL algorithm save payload must be a mapping")
-        checkpoint = dict(saved)
-        checkpoint["iter"] = self.current_learning_iteration
-        checkpoint["infos"] = infos
-        checkpoint["schema_version"] = CHECKPOINT_SCHEMA_VERSION
-        checkpoint[CHECKPOINT_STAGE_KEY] = stage
-        checkpoint[CHECKPOINT_CURRICULUM_ITERATION_KEY] = int(self._g1_curriculum_iteration)
-        checkpoint[CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY] = bool(self._g1_stability_rewards_active)
-        checkpoint[TRAINING_CONFIGURATION_KEY] = dict(training_configuration)
-        checkpoint[CHECKPOINT_LINEAGE_KEY] = dict(lineage)
-        attach_checkpoint_metadata(checkpoint, metadata, replace=True)
-        atomic_torch_save(checkpoint, path)
-        self.logger.save_model(path, self.current_learning_iteration)
-
-    def hooked_load(self, path: str, load_cfg=None, strict: bool = True, map_location=None):
-        checkpoint = _torch_load(path)
-        validate_checkpoint(
-            checkpoint,
-            expected=metadata,
-            validate_torch_runtime=True,
-        )
-        loaded_stage = checkpoint_stage(checkpoint)
-        if loaded_stage == "s2_bootstrap":
-            loaded_training_configuration = validate_training_configuration(
-                checkpoint.get(TRAINING_CONFIGURATION_KEY),
-                expected_stage=loaded_stage,
-            )
-        else:
-            loaded_training_configuration = validate_guide_training_configuration(
-                checkpoint.get(TRAINING_CONFIGURATION_KEY),
-                expected_stage=loaded_stage,
-            )
-        if (
-            training_configuration is not None
-            and loaded_training_configuration["training_parameters"] != training_configuration["training_parameters"]
-        ):
-            raise RuntimeError("loaded checkpoint training parameters differ from the active run")
-        if training_configuration is not None and reward_weight_overrides_from_configuration(
-            loaded_training_configuration
-        ) != reward_weight_overrides_from_configuration(training_configuration):
-            raise RuntimeError("loaded checkpoint reward weights differ from the active run")
-        if loaded_stage in {"s2_bootstrap", "s2_student_ppo"}:
-            validate_student_checkpoint_architecture(
-                checkpoint,
-                loaded_training_configuration,
-            )
-        if loaded_stage == "s0_teacher":
-            validate_teacher_checkpoint_architecture(
-                checkpoint,
-                loaded_training_configuration,
-            )
-        allowed_load_stages = {"s0_teacher"} if stage == "s0_teacher" else {"s2_bootstrap", "s2_student_ppo"}
-        if loaded_stage not in allowed_load_stages:
-            raise RuntimeError(f"runner stage {stage!r} cannot load checkpoint stage {loaded_stage!r}")
-        if loaded_stage == "s2_bootstrap":
-            load_cfg = {"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": False}
-            strict = True
-        result = original_load(self, path, load_cfg=load_cfg, strict=strict, map_location=map_location)
-        self._g1_rickshaw_checkpoint_path = os.fspath(path)
-        curriculum_iteration = checkpoint.get(CHECKPOINT_CURRICULUM_ITERATION_KEY)
-        if isinstance(curriculum_iteration, bool) or not isinstance(curriculum_iteration, int):
-            raise RuntimeError("loaded checkpoint is missing an audited curriculum iteration")
-        self._g1_curriculum_iteration = curriculum_iteration
-        if loaded_stage in {"s0_teacher", "s2_student_ppo"}:
-            saved_iteration = checkpoint.get("iter")
-            if isinstance(saved_iteration, bool) or not isinstance(saved_iteration, int) or saved_iteration < 0:
-                raise RuntimeError("loaded PPO checkpoint has no valid iteration")
-            self._g1_training_iterations = saved_iteration + 1
-            self._g1_stage_policy_steps = self._g1_training_iterations * int(self.cfg["num_steps_per_env"])
-            completed_curriculum_iterations = self._g1_stage_policy_steps // BASELINE_ROLLOUT_STEPS
-            self._g1_curriculum_start_iteration = curriculum_iteration - completed_curriculum_iterations
-            if self._g1_curriculum_start_iteration < 0:
-                raise RuntimeError("loaded checkpoint curriculum precedes its completed sample budget")
-            self.current_learning_iteration = self._g1_training_iterations
-        if self._g1_stability_reward_curriculum:
-            set_stability_rewards(
-                self,
-                bool(checkpoint.get(CHECKPOINT_STABILITY_REWARDS_ACTIVE_KEY, False)),
-            )
-        return result
-
-    def hooked_export_jit(self, path: str, filename: str = "policy.pt"):
-        result = original_export_jit(self, path, filename)
-        checkpoint_path = getattr(self, "_g1_rickshaw_checkpoint_path", None)
-        if checkpoint_path is None:
-            raise RuntimeError("deployment export requires a provenance-validated loaded checkpoint")
-        controller_factory = getattr(self.alg.get_policy(), "as_deployment_controller", None)
-        if not callable(controller_factory):
-            raise RuntimeError("student policy does not expose the deployment controller contract")
-        controller = controller_factory().to("cpu").eval()
-        torch.jit.script(controller).save(os.fspath(Path(path) / "deployment_controller.pt"))
-        return result
-
-    def hooked_export_onnx(self, path: str, filename: str = "policy.onnx", verbose: bool = False):
-        result = original_export_onnx(self, path, filename, verbose)
-        checkpoint_path = getattr(self, "_g1_rickshaw_checkpoint_path", None)
-        if checkpoint_path is None:
-            raise RuntimeError("deployment export requires a provenance-validated loaded checkpoint")
-        write_deployment_manifest(path, checkpoint_path)
-        return result
-
-    OnPolicyRunner.__init__ = hooked_init
-    OnPolicyRunner.learn = hooked_learn
-    OnPolicyRunner.save = hooked_save
-    OnPolicyRunner.load = hooked_load
-    OnPolicyRunner.export_policy_to_jit = hooked_export_jit
-    OnPolicyRunner.export_policy_to_onnx = hooked_export_onnx
-    OnPolicyRunner._g1_rickshaw_hook_installed = True
 
 
 __all__ = [
@@ -1118,6 +943,7 @@ __all__ = [
     "TRAINING_CONFIGURATION_SCHEMA_VERSION",
     "TRAINING_ARTIFACT_INTERVAL",
     "SUPPORTED_CONTEXT_DIMS",
+    "SUPPORTED_HISTORY_LENGTHS",
     "SUPPORTED_FAT2_WEIGHTS",
     "SUPPORTED_ROLLOUT_STEPS",
     "CHECKPOINT_CURRICULUM_ITERATION_KEY",
@@ -1129,15 +955,16 @@ __all__ = [
     "GUIDE_MAX_ITERATIONS",
     "GUIDE_TRAINING_PARAMETERS",
     "GUIDE_TRAINING_TASK",
+    "build_training_configuration",
     "build_s2_bootstrap_checkpoint",
     "checkpoint_stage",
+    "cli_value",
     "collect_runtime_metadata",
     "extract_gaussian_actor_state",
     "extract_student_rsl_actor_state",
     "finalize_training_configuration",
     "feasibility_config_path",
     "guide_max_iterations",
-    "install_runner_hooks_from_environment",
     "load_s0_resume_checkpoint",
     "load_s2_resume_checkpoint",
     "load_stage_checkpoint",

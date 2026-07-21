@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Produce fixed-seed, configured-slope policy diagnostics in Isaac Lab."""
+"""Produce fixed-seed, configured-slope policy diagnostics in Mjlab."""
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import asdict
 import json
-import math
 import os
 from pathlib import Path
 from typing import Any
 
-from _isaaclab_wrappers import (
-    add_isaaclab_sources_to_path,
+from _mjlab_wrappers import (
+    add_mjlab_sources_to_path,
     add_project_source_to_path,
+    load_mjlab_configs,
     require_existing_file,
 )
 
@@ -30,7 +30,7 @@ from g1_rickshaw_lab.policy_evaluation import (  # noqa: E402
     SIGNED_SLOPES,
     PolicyEvaluationAccumulator,
     command_phase_labels,
-    d6_wrench_channels,
+    connection_wrench_channels,
     evaluate_s2_return_floor,
     slope_label,
     validate_s1_baseline_diagnostic_report,
@@ -41,8 +41,6 @@ from g1_rickshaw_lab.reward_profile import (  # noqa: E402
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
-    SLOPE_TERRAIN_LEVELS,
-    SLOPE_TERRAIN_TYPES,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     CHECKPOINT_CURRICULUM_ITERATION_KEY,
@@ -52,13 +50,13 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     normalize_rsl_rl_runner_configuration,
     require_pinned_rsl_rl,
 )
-from g1_rickshaw_lab.validation import (  # noqa: E402
+from g1_rickshaw_lab.artifact_io import (  # noqa: E402
     utc_timestamp,
     write_json_atomic,
 )
 
 
-DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
+DEFAULT_TASK = "Mjlab-G1-Rickshaw-Directional-Slope-Student"
 SUPPORTED_STAGES = {
     "s0_teacher",
     "s1_context_distillation",
@@ -87,10 +85,8 @@ class PolicyHandle:
 
 
 def _parser() -> argparse.ArgumentParser:
-    add_isaaclab_sources_to_path()
+    add_mjlab_sources_to_path()
     require_pinned_rsl_rl()
-    from isaaclab.app import AppLauncher
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--checkpoint", required=True)
@@ -107,7 +103,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes-per-slope", type=int, default=100)
     parser.add_argument("--seeds", type=int, nargs="+", default=(42, 43, 44, 45, 46))
     parser.add_argument("--max-policy-steps-per-seed", type=int, default=6000)
-    AppLauncher.add_app_launcher_args(parser)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--headless", action="store_true")
     return parser
 
 
@@ -137,16 +134,12 @@ def _configure_evaluation(
     fat2_weight: float | None,
     reward_weight_overrides: Mapping[str, float],
 ) -> None:
-    env_cfg.curriculum = None
+    env_cfg.curriculum = {}
     env_cfg.scene.terrain.terrain_generator.curriculum = True
-    env_cfg.domain_randomization = replace(
-        env_cfg.domain_randomization,
-        enabled=False,
-    )
-    env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
+    env_cfg.domain_randomization.enabled = False
     apply_reward_weight_overrides(env_cfg, reward_weight_overrides)
     if fat2_weight is not None:
-        env_cfg.rewards.fat2_prior_exp.weight = float(fat2_weight)
+        env_cfg.rewards["fat2_prior_exp"].weight = float(fat2_weight)
 
 
 def _assign_fixed_slopes(base_env: Any) -> Any:
@@ -155,19 +148,11 @@ def _assign_fixed_slopes(base_env: Any) -> Any:
     import torch
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
-    slots = torch.arange(base_env.num_envs, device=base_env.device) % len(SIGNED_SLOPES)
-    levels_lut = torch.tensor(
-        SLOPE_TERRAIN_LEVELS, device=base_env.device, dtype=torch.long
+    slots, levels, columns = mdp.balanced_slope_assignment(
+        base_env.num_envs,
+        device=base_env.device,
     )
-    columns_lut = torch.tensor(
-        SLOPE_TERRAIN_TYPES, device=base_env.device, dtype=torch.long
-    )
-    levels = levels_lut[slots]
-    columns = columns_lut[slots]
-    terrain = base_env.scene.terrain
-    terrain.terrain_levels[:] = levels
-    terrain.terrain_types[:] = columns
-    terrain.env_origins[:] = terrain.terrain_origins[levels, columns]
+    mdp.apply_terrain_assignment(base_env, levels, columns)
     mdp.update_slope_frame(base_env)
     expected = torch.tensor(SIGNED_SLOPES, device=base_env.device)[slots]
     if not torch.allclose(base_env.slope, expected, atol=1.0e-7, rtol=0.0):
@@ -218,20 +203,23 @@ def _load_policy(
     latent_dim = int(
         checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
     )
+    history_length = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["history_length"]
+    )
     if stage == "s1_context_distillation":
         from g1_rickshaw_lab.rl import G1RickshawStudentActor
 
         state = checkpoint["model_state_dict"]
-        model = G1RickshawStudentActor(latent_dim).to(device)
+        model = G1RickshawStudentActor(latent_dim, history_length).to(device)
         model.load_state_dict(state, strict=True)
         model.eval()
         keepalive.append(model)
         return PolicyHandle(model, kind="standalone_student"), keepalive
 
-    from rsl_rl.runners import OnPolicyRunner
+    from mjlab.rl import MjlabOnPolicyRunner
     registry_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device, latent_dim)
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
+    agent_cfg = _load_rsl_runner_cfg(task, registry_key, device, latent_dim, history_length)
+    runner = MjlabOnPolicyRunner(env, asdict(agent_cfg), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
         load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False, "rnd": False},
@@ -246,7 +234,7 @@ def _load_policy(
 def _load_teacher_policy(
     env: Any, checkpoint_path: Path, device: str, task: str
 ) -> tuple[PolicyHandle, list[Any]]:
-    from rsl_rl.runners import OnPolicyRunner
+    from mjlab.rl import MjlabOnPolicyRunner
     checkpoint = load_stage_checkpoint(
         checkpoint_path,
         expected_stage="s0_teacher",
@@ -254,10 +242,13 @@ def _load_teacher_policy(
     latent_dim = int(
         checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["latent_dim"]
     )
-    agent_cfg = _load_rsl_runner_cfg(
-        task, "rsl_rl_cfg_entry_point", device, latent_dim
+    history_length = int(
+        checkpoint[TRAINING_CONFIGURATION_KEY]["training_parameters"]["history_length"]
     )
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
+    agent_cfg = _load_rsl_runner_cfg(
+        task, "rsl_rl_cfg_entry_point", device, latent_dim, history_length
+    )
+    runner = MjlabOnPolicyRunner(env, asdict(agent_cfg), log_dir=None, device=device)
     runner.load(
         os.fspath(checkpoint_path),
         load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False, "rnd": False},
@@ -268,38 +259,54 @@ def _load_teacher_policy(
 
 
 def _load_rsl_runner_cfg(
-    task: str, registry_key: str, device: str, latent_dim: int
+    task: str,
+    registry_key: str,
+    device: str,
+    latent_dim: int,
+    history_length: int,
 ):
     """Load the fixed RSL-RL 5 runner configuration."""
 
-    from isaaclab_tasks.utils import load_cfg_from_registry
+    del task, device
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.agents.rsl_rl_cfg import (
+        g1_rickshaw_student_ppo_runner_cfg,
+        g1_rickshaw_teacher_ppo_runner_cfg,
+    )
 
-    agent_cfg = load_cfg_from_registry(task, registry_key)
-    agent_cfg.device = device
+    agent_cfg = (
+        g1_rickshaw_teacher_ppo_runner_cfg()
+        if registry_key == "rsl_rl_cfg_entry_point"
+        else g1_rickshaw_student_ppo_runner_cfg()
+    )
     agent_cfg.actor.latent_dim = latent_dim
+    agent_cfg.actor.history_length = history_length
     return normalize_rsl_rl_runner_configuration(agent_cfg)
 
 
 def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  # noqa: C901
     import torch
-    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
+    from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.terrain_cfg import (
+        target_pitch_from_hitch_height,
+    )
 
     robot = base_env.scene["robot"]
     state = base_env.rickshaw_state
     stability = base_env.stability_state
     analytic = base_env.analytic_force_state
-    actual_speed = torch.sum(robot.data.root_lin_vel_w * base_env.path_tangent_w, dim=-1)
+    actual_speed = torch.sum(robot.data.root_link_lin_vel_w * base_env.path_tangent_w, dim=-1)
     speed_error = actual_speed - base_env.command_state.v_ref
-    persistent_cfg = base_env.cfg.terminations.persistent_safety.params["cfg"]
-    overspeed = actual_speed > base_env.command_state.v_ref + persistent_cfg.overspeed_margin
-    pitch_error = state.pitch - mdp.target_pitch_from_hitch_height(
+    overspeed_margin = float(
+        base_env.runtime_cfg.domain.calibration["safety.overspeed_margin"]
+    )
+    overspeed = actual_speed > base_env.command_state.v_ref + overspeed_margin
+    pitch_error = state.pitch - target_pitch_from_hitch_height(
         base_env.rickshaw_pose_cfg
     )
     hitch_error = state.hitch_height - float(base_env.rickshaw_pose_cfg.hitch_height_target)
 
     contact_sensor = base_env.scene["robot_contacts"]
-    foot_contact = contact_sensor.data.current_contact_time[:, base_env.foot_sensor_ids] > 0.0
-    foot_velocity = robot.data.body_lin_vel_w[:, base_env.foot_body_ids]
+    foot_contact = contact_sensor.data.found > 0
+    foot_velocity = robot.data.body_link_lin_vel_w[:, base_env.foot_body_ids]
     foot_s = torch.sum(foot_velocity * base_env.path_tangent_w[:, None, :], dim=-1)
     foot_y = torch.sum(foot_velocity * base_env.path_lateral_w[:, None, :], dim=-1)
     foot_slip = torch.sum(torch.sqrt(foot_s.square() + foot_y.square()) * foot_contact, dim=-1)
@@ -312,20 +319,31 @@ def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  #
     )
 
     ids = base_env.policy_joint_ids
-    torque = robot.data.applied_torque[:, ids]
+    torque = robot.data.actuator_force
     velocity = robot.data.joint_vel[:, ids]
-    effort = mdp.actuator_effort_limits(robot, ids)
+    from g1_rickshaw_lab.configuration import (
+        ARM_HARDWARE_EFFORT_LIMITS,
+        LOWER_HARDWARE_EFFORT_LIMITS,
+        WAIST_HARDWARE_EFFORT_LIMITS,
+    )
+
+    effort = torch.tensor(
+        LOWER_HARDWARE_EFFORT_LIMITS
+        + WAIST_HARDWARE_EFFORT_LIMITS
+        + ARM_HARDWARE_EFFORT_LIMITS,
+        device=base_env.device,
+    )
     torque_margin = 1.0 - torch.abs(torque) / effort
     leg_margin = torch.amin(torque_margin[:, :12], dim=-1)
     arm_margin = torch.amin(torque_margin[:, 15:], dim=-1)
     power = torch.sum(torch.abs(torque * velocity), dim=-1)
 
-    wrench = state.d6_wrench_w
-    d6_channels = d6_wrench_channels(wrench)
-    d6_force = d6_channels["force"]
-    d6_torque = d6_channels["torque"]
-    force_asymmetry = d6_channels["force_asymmetry"]
-    torque_asymmetry = d6_channels["torque_asymmetry"]
+    wrench = state.connection_wrench_w
+    connection_channels = connection_wrench_channels(wrench)
+    connection_force = connection_channels["force"]
+    connection_torque = connection_channels["torque"]
+    force_asymmetry = connection_channels["force_asymmetry"]
+    torque_asymmetry = connection_channels["torque_asymmetry"]
     # The adapter stores cart-on-robot reaction; analytic T_s/T_n are
     # robot-on-cart forces.
     force_on_cart_w = -state.hand_force_w
@@ -355,11 +373,11 @@ def _sample_metrics(base_env: Any, teacher_kl: Any | None) -> dict[str, Any]:  #
         "processed_action_rate": action_rate,
         "processed_action_jerk": action_jerk,
         "power": power,
-        "d6_residual": state.d6_residual,
-        "d6_force": d6_force,
-        "d6_torque": d6_torque,
-        "d6_force_asymmetry": force_asymmetry,
-        "d6_torque_asymmetry": torque_asymmetry,
+        "connection_residual": state.connection_residual,
+        "connection_force": connection_force,
+        "connection_torque": connection_torque,
+        "connection_force_asymmetry": force_asymmetry,
+        "connection_torque_asymmetry": torque_asymmetry,
         "t_s_relative_error": relative_error(analytic.t_s, projected_t_s),
         "t_n_relative_error": relative_error(analytic.t_n, projected_t_n),
         "t_s_sign_agreement": sign_s,
@@ -425,12 +443,7 @@ def _run_mode(
     episode_return = torch.zeros(base_env.num_envs, device=base_env.device)
     episode_phases: list[set[str]] = [set() for _ in range(base_env.num_envs)]
     episode_cross_cases: list[str | None] = [None] * base_env.num_envs
-    cause_names = tuple(
-        __import__(
-            "g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.terminations",
-            fromlist=["TERMINATION_CAUSES"],
-        ).TERMINATION_CAUSES
-    )
+    cause_names = tuple(base_env.termination_manager.active_terms)
 
     for seed_index, seed in enumerate(seeds):
         milestone = (seed_index + 1) * episodes_per_slope // len(seeds)
@@ -488,9 +501,6 @@ def _run_mode(
                 )
             active = enrolled
             _apply_evaluation_command_protocol(base_env, active)
-            # IsaacLab lazily allocates articulation state during env.step().
-            # inference_mode would turn those buffers into inference tensors,
-            # which later resets cannot update outside that mode.
             with torch.no_grad():
                 distribution = policy.distribution(observation)
                 teacher_kl = None
@@ -534,7 +544,6 @@ def _run_mode(
                 time_outs = extras["time_outs"]
                 if not torch.is_tensor(time_outs) or time_outs.shape != dones.shape:
                     raise RuntimeError("evaluation step did not expose per-environment timeout flags")
-                cause_state = base_env.termination_cause_state
                 reusable_ids: list[int] = []
                 for env_id in done_ids.detach().cpu().tolist():
                     if not bool(enrolled[env_id].item()) or not bool(active[env_id].item()):
@@ -545,11 +554,10 @@ def _run_mode(
                     slope_index = int(slope_slots[env_id].item())
                     case_index = 0
                     value = float(episode_return[env_id].item())
-                    cause_mask = cause_state.last_causes[env_id]
                     causes = [
                         name
-                        for index, name in enumerate(cause_names)
-                        if bool(cause_mask[index].item())
+                        for name in cause_names
+                        if bool(base_env.termination_manager.get_term(name)[env_id].item())
                     ]
                     fell = _episode_fell(
                         timed_out=bool(time_outs[env_id].item()),
@@ -642,6 +650,7 @@ def main() -> int:  # noqa: C901
     fat2_weight = float(training_parameters["fat2_weight"])
     rollout_steps = int(training_parameters["rollout_steps"])
     latent_dim = int(training_parameters["latent_dim"])
+    history_length = int(training_parameters["history_length"])
     reward_weight_overrides = reward_weight_overrides_from_configuration(
         training_configuration
     )
@@ -664,6 +673,7 @@ def main() -> int:  # noqa: C901
         baseline_parameters = s1_report["evaluation"]
         if (
             baseline_parameters.get("latent_dim") != latent_dim
+            or baseline_parameters.get("history_length") != history_length
             or baseline_parameters.get("rollout_steps") != rollout_steps
             or baseline_parameters.get("fat2_weight") != fat2_weight
             or baseline_parameters.get("reward_weight_overrides", {})
@@ -692,32 +702,39 @@ def main() -> int:  # noqa: C901
         ):
             raise ValueError("teacher checkpoint uses different training parameters")
 
-    from isaaclab.app import AppLauncher
-
-    app_launcher = AppLauncher(args)
-    simulation_app = app_launcher.app
     stage_reports: dict[str, Any] = {}
     omitted_diagnostics: list[str] = []
     try:
-        import gymnasium as gym
-        from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-        from isaaclab_tasks.utils import parse_env_cfg
+        import torch
+        from mjlab.envs import ManagerBasedRlEnv
+        from mjlab.rl import RslRlVecEnvWrapper
 
         import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
 
-        device = args.device
+        device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         raw_env = None
         env = None
         try:
-            env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
-            env_cfg.seed = args.seeds[0]
+            env_cfg, _ = load_mjlab_configs(
+                args.task,
+                play=True,
+                num_envs=args.num_envs,
+                seed=args.seeds[0],
+                history_length=history_length,
+            )
             _configure_evaluation(env_cfg, fat2_weight, reward_weight_overrides)
             if is_student and teacher_path is None:
-                env_cfg.observations.teacher_dynamic_history = None
-                env_cfg.observations.teacher_static = None
+                env_cfg.observations.pop("teacher_dynamic_history", None)
+                env_cfg.observations.pop("teacher_static", None)
             agent_key = "rsl_rl_cfg_entry_point" if stage == "s0_teacher" else "rsl_rl_student_cfg_entry_point"
-            agent_cfg = _load_rsl_runner_cfg(args.task, agent_key, device, latent_dim)
-            raw_env = gym.make(args.task, cfg=env_cfg)
+            agent_cfg = _load_rsl_runner_cfg(
+                args.task,
+                agent_key,
+                device,
+                latent_dim,
+                history_length,
+            )
+            raw_env = ManagerBasedRlEnv(env_cfg, device=device)
             env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
             base_env = raw_env.unwrapped
             slope_slots = _assign_fixed_slopes(base_env)
@@ -757,8 +774,6 @@ def main() -> int:  # noqa: C901
             elif raw_env is not None:
                 raw_env.close()
     except BaseException:
-        # Process teardown releases Kit resources. Closing SimulationApp here
-        # can terminate the interpreter and hide the original exception.
         raise
 
     if is_student and teacher_checkpoint is None:
@@ -800,6 +815,7 @@ def main() -> int:  # noqa: C901
             "fat2_weight": fat2_weight,
             "rollout_steps": rollout_steps,
             "latent_dim": latent_dim,
+            "history_length": history_length,
             "reward_weight_overrides": reward_weight_overrides,
         },
         "metric_definitions": METRIC_DEFINITIONS,
@@ -809,7 +825,6 @@ def main() -> int:  # noqa: C901
     write_json_atomic(args.output, report)
 
     print(f"wrote policy diagnostic report: {Path(args.output).resolve()}")
-    simulation_app.close()
     return 0
 
 

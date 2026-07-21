@@ -8,7 +8,7 @@ can be called from a ManagerBasedRLEnv pre-physics hook.
 from __future__ import annotations
 
 import math
-from dataclasses import MISSING, dataclass, replace
+from dataclasses import MISSING, dataclass
 from typing import Any
 
 import torch
@@ -145,7 +145,7 @@ def compute_slope_frame(
     lateral = torch.stack((zeros, ones, zeros), dim=-1)
     normal = torch.stack((-torch.sin(gamma), zeros, torch.cos(gamma)), dim=-1)
 
-    # The frame matrix has [e_s, e_y, e_n] as columns.  In Isaac Lab's wxyz
+    # The frame matrix has [e_s, e_y, e_n] as columns. In wxyz
     # convention this is a rotation of -gamma about world Y.
     quaternion = torch.stack(
         (torch.cos(0.5 * gamma), zeros, -torch.sin(0.5 * gamma), zeros), dim=-1
@@ -168,43 +168,6 @@ def low_pass(
         raise ValueError("cutoff_hz and dt must be positive")
     gain = 1.0 - math.exp(-2.0 * math.pi * cutoff_hz * dt)
     return previous + gain * (sample - previous)
-
-
-@dataclass
-class RollingResistanceCfg:
-    enabled: bool = True
-    velocity_epsilon: float = 0.05
-    normal_force_filter_hz: float = 20.0
-
-    def validate(self) -> None:
-        if type(self.enabled) is not bool:
-            raise ValueError("rolling-resistance enabled must be boolean")
-        if self.velocity_epsilon <= 0.0:
-            raise ValueError("velocity_epsilon must be positive")
-        if self.normal_force_filter_hz <= 0.0:
-            raise ValueError("normal_force_filter_hz must be positive")
-
-
-def configure_rolling_resistance(env_cfg: Any, *, enabled: bool) -> RollingResistanceCfg:
-    """Replace the rolling-resistance config at both runtime bindings."""
-
-    if type(enabled) is not bool:
-        raise ValueError("rolling-resistance enabled must be boolean")
-    current = getattr(env_cfg, "rolling_resistance", None)
-    if not isinstance(current, RollingResistanceCfg):
-        raise TypeError("env_cfg.rolling_resistance must be a RollingResistanceCfg")
-    events = getattr(env_cfg, "events", None)
-    initialize_mdp = getattr(events, "initialize_mdp", None)
-    params = getattr(initialize_mdp, "params", None)
-    if not isinstance(params, dict) or "rolling_resistance_cfg" not in params:
-        raise RuntimeError(
-            "env_cfg.events.initialize_mdp.params must contain rolling_resistance_cfg"
-        )
-
-    configured = replace(current, enabled=enabled)
-    env_cfg.rolling_resistance = configured
-    params["rolling_resistance_cfg"] = configured
-    return configured
 
 
 def rolling_resistance_wrench(
@@ -351,7 +314,7 @@ def articulation_center_of_mass(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return mass-weighted whole-articulation CoM position and velocity.
 
-    Isaac Lab's ``root_com_*`` fields describe only the root rigid body.  ZMP
+    Root-link ``root_com_*`` fields describe only the root rigid body. ZMP
     and FAT require the system CoM across every retained articulation body.
     """
 
@@ -439,12 +402,12 @@ def update_cart_interaction_wrench(
 ) -> torch.Tensor:
     """Recover the measured cart-on-robot force from whole-cart momentum balance."""
 
-    if not hasattr(env, "read_d6_reaction_residual"):
-        raise RuntimeError("D6 residual/impulse adapter was not installed at startup")
-    # The per-side proxy is the only complete D6 wrench available to privileged
+    if not hasattr(env, "read_connection_reaction_residual"):
+        raise RuntimeError("connection residual/impulse adapter was not installed at startup")
+    # The per-side proxy is the only complete connection wrench available to privileged
     # observations. Whole-cart momentum balance below remains the physical force
     # source used by FAT2 and the analytic interaction-force diagnostics.
-    d6_wrench_w, _, _ = env.read_d6_reaction_residual()
+    connection_wrench_w, _, _ = env.read_connection_reaction_residual()
     state = getattr(env, "cart_interaction_wrench_state", None)
     if state is None:
         raise RuntimeError("cart interaction wrench state is not initialized")
@@ -467,9 +430,9 @@ def update_cart_interaction_wrench(
     hand_force_w = -force_on_cart_w
     env.rickshaw_state.hand_force_w[:] = hand_force_w
     env.rickshaw_state.hand_torque_w.zero_()
-    # Keep the PhysX truth separate from its diagnostic/checkpoint mirror.
-    env.rickshaw_state.d6_truth_wrench_w[:] = d6_wrench_w
-    env.rickshaw_state.d6_wrench_w[:] = d6_wrench_w
+    # Keep physical truth separate from its diagnostic/checkpoint mirror.
+    env.rickshaw_state.connection_truth_wrench_w[:] = connection_wrench_w
+    env.rickshaw_state.connection_wrench_w[:] = connection_wrench_w
     env.cart_interaction_wrench_valid = valid
     return hand_force_w
 
@@ -1026,7 +989,7 @@ def actual_rickshaw_geometry_in_slope_frame(
 
 
 def quat_apply_wxyz(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
-    """Rotate vectors by wxyz quaternions without an Isaac Lab dependency."""
+    """Rotate vectors by wxyz quaternions without a simulator dependency."""
 
     if quaternion.shape[-1] != 4 or vector.shape[-1] != 3:
         raise ValueError("quaternion/vector dimensions must end in 4/3")
@@ -1178,10 +1141,10 @@ def sagittal_com_radius(
     return torch.sqrt(torch.square(offset_s) + torch.square(offset_n))
 
 
-def adapt_d6_reaction_wrench(
+def adapt_connection_reaction_wrench(
     reaction_wrench: torch.Tensor, *, reaction_is_joint_on_body: bool
 ) -> torch.Tensor:
-    """Apply the D6 sign convention once at the simulator API boundary."""
+    """Apply the connection-wrench sign convention at the simulator boundary."""
 
     if reaction_wrench.shape[-1] != 6:
         raise ValueError("reaction_wrench must end in six force/torque components")
@@ -1419,283 +1382,6 @@ def foot_support_polygon(
     return points, point_mask, support_center
 
 
-def update_analytic_rickshaw_force(
-    env: Any,
-    cfg: AnalyticForceCfg,
-    *,
-    cart_speed_s: torch.Tensor | None = None,
-    pitch: torch.Tensor | None = None,
-    geometry_sn: tuple[torch.Tensor, torch.Tensor] | None = None,
-) -> None:
-    """Policy-step manager adapter for filtered analytic ``T_s/T_n``."""
-
-    if not hasattr(env, "rickshaw_mass_properties"):
-        raise RuntimeError("payload reset must install env.rickshaw_mass_properties")
-    cart = env.scene["rickshaw"]
-    if cart_speed_s is None:
-        cart_speed_s = torch.sum(
-            cart.data.root_lin_vel_w * env.path_tangent_w, dim=-1
-        )
-    if pitch is None:
-        pitch = rickshaw_pitch_from_quaternion(
-            cart.data.root_quat_w, env.path_tangent_w, env.path_normal_w
-        )
-    if geometry_sn is None:
-        geometry_sn = actual_rickshaw_geometry_in_slope_frame(env)
-    handle_sn, com_sn = geometry_sn
-    update_analytic_handle_force_state(
-        env.analytic_force_state,
-        cart_speed_s,
-        pitch,
-        env.gamma,
-        env.c_rr,
-        env.rickshaw_state.wheel_normal_force,
-        env.rickshaw_mass_properties,
-        env.step_dt,
-        cfg,
-        handle_from_axle_sn=handle_sn,
-        com_from_axle_sn=com_sn,
-    )
-
-
-def update_support_polygon(env: Any, cfg: SupportPolygonCfg) -> None:
-    """Read actual foot poses/contact state and build the current convex support."""
-
-    cfg.validate()
-    robot = env.scene["robot"]
-    contact_sensor = env.scene["robot_contacts"]
-    if not hasattr(contact_sensor.data, "current_contact_time"):
-        raise AttributeError("support polygon requires contact sensor current_contact_time")
-    foot_contact = contact_sensor.data.current_contact_time[:, env.foot_sensor_ids] > 0.0
-    points, mask, center = foot_support_polygon(
-        robot.data.body_pos_w[:, env.foot_body_ids],
-        robot.data.body_quat_w[:, env.foot_body_ids],
-        foot_contact,
-        env.scene.terrain.env_origins,
-        env.path_tangent_w,
-        env.path_lateral_w,
-        foot_half_length=cfg.foot_half_length,
-        foot_half_width=cfg.foot_half_width,
-        foot_center_offset_x=cfg.foot_center_offset_x,
-    )
-    env.stability_state.support_points_sy[:] = points
-    env.stability_state.support_point_mask[:] = mask
-    env.stability_state.support_center_w[:] = center
-
-
-def update_fat2_reference(
-    env: Any,
-    cfg: FAT2Cfg,
-    *,
-    robot_kinematics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    hitch_w: torch.Tensor | None = None,
-) -> None:
-    """Update the weak FAT2 reference from analytic cart force balance."""
-
-    cfg.validate()
-    cart = env.scene["rickshaw"]
-    if hitch_w is None:
-        hitch_w = torch.mean(cart.data.body_pos_w[:, env.hitch_body_ids], dim=1)
-    support_center = env.stability_state.support_center_w
-    handle_from_support = hitch_w - support_center
-    handle_s = torch.sum(handle_from_support * env.path_tangent_w, dim=-1)
-    handle_n = torch.sum(handle_from_support * env.path_normal_w, dim=-1)
-    analytic = env.analytic_force_state
-    consistency_state = getattr(env, "fat2_wrench_consistency_state", None)
-    if consistency_state is None:
-        consistency_state = WrenchConsistencyState.zeros(
-            env.num_envs,
-            cfg.wrench_consistency_window_steps,
-            device=env.device,
-            dtype=analytic.t_s.dtype,
-        )
-        env.fat2_wrench_consistency_state = consistency_state
-    elif consistency_state.window_steps != cfg.wrench_consistency_window_steps:
-        raise RuntimeError("FAT2 wrench consistency window changed after initialization")
-    measured_force_on_cart_w = -env.rickshaw_state.hand_force_w
-    measured_force_sn = torch.stack(
-        (
-            torch.sum(measured_force_on_cart_w * env.path_tangent_w, dim=-1),
-            torch.sum(measured_force_on_cart_w * env.path_normal_w, dim=-1),
-        ),
-        dim=-1,
-    )
-    wrench_consistent, wrench_relative_error, filtered_analytic_force_sn = (
-        update_wrench_consistency_state(
-            consistency_state,
-            torch.stack((analytic.t_s, analytic.t_n), dim=-1),
-            measured_force_sn,
-            analytic.valid & env.cart_interaction_wrench_valid,
-            relative_tolerance=cfg.wrench_consistency_relative_tolerance,
-            absolute_floor_n=cfg.wrench_consistency_absolute_floor_n,
-        )
-    )
-    env.stability_state.fat_wrench_consistent[:] = wrench_consistent
-    env.stability_state.fat_wrench_relative_error[:] = wrench_relative_error
-    if robot_kinematics is None:
-        robot_kinematics = robot_system_mass_kinematics(env)
-    robot_com_w, _, robot_mass = robot_kinematics
-    current_com_radius = sagittal_com_radius(
-        robot_com_w,
-        support_center,
-        env.path_tangent_w,
-        env.path_normal_w,
-    )
-    radius_state = getattr(env, "fat2_com_radius_state", None)
-    if radius_state is None:
-        radius_state = FAT2ComRadiusState.initialized(
-            env.num_envs,
-            cfg.wrench_consistency_window_steps,
-            cfg.com_radius,
-            device=env.device,
-            dtype=current_com_radius.dtype,
-        )
-        env.fat2_com_radius_state = radius_state
-        env.fat_com_radius = radius_state.filtered_radius
-        env.fat_com_radius_raw = current_com_radius.clone()
-    elif radius_state.window_steps != cfg.wrench_consistency_window_steps:
-        raise RuntimeError("FAT2 CoM radius window changed after initialization")
-    env.fat_com_radius_raw[:] = current_com_radius
-    radius_min, radius_max = cfg.com_radius_bounds
-    radius_state.update(
-        current_com_radius,
-        torch.any(env.stability_state.support_point_mask, dim=-1),
-        minimum=radius_min,
-        maximum=radius_max,
-    )
-    # T_s/T_n are robot-on-cart; FAT2 needs the cart-on-robot force.  Use the
-    # same low-frequency window as the gate so the weak torso prior does not
-    # chase gait-impact force peaks.
-    hand_force_s = -filtered_analytic_force_sn[:, 0]
-    hand_force_n = -filtered_analytic_force_sn[:, 1]
-    theta = fat2_reference_angle(
-        handle_s,
-        handle_n,
-        hand_force_s,
-        hand_force_n,
-        robot_mass,
-        env.fat_com_radius,
-        cfg.theta_max,
-    )
-    env.stability_state.theta_fat[:] = theta
-    env.stability_state.fat_valid[:] = (
-        analytic.valid
-        & wrench_consistent
-        & torch.any(env.stability_state.support_point_mask, dim=-1)
-    )
-    robot = env.scene["robot"]
-    env.stability_state.torso_pitch[:] = torso_pitch_from_world_vertical(
-        robot.data.body_quat_w[:, env.torso_body_id],
-        env.path_tangent_w,
-    )
-
-
-def update_zmp_stability(
-    env: Any,
-    cfg: ZMPCfg,
-    *,
-    robot_kinematics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    hitch_w: torch.Tensor | None = None,
-) -> None:
-    """Update measured-handle-force ZMP and its signed support-polygon margin."""
-
-    if cfg.min_ground_reaction <= 0.0:
-        raise ValueError("min_ground_reaction must come from feasibility validation")
-    if robot_kinematics is None:
-        robot_kinematics = robot_system_mass_kinematics(env)
-    robot_com_w, robot_com_velocity_w, robot_mass = robot_kinematics
-    origin = env.scene.terrain.env_origins
-    com_relative = robot_com_w - origin
-    com_s = torch.sum(com_relative * env.path_tangent_w, dim=-1)
-    com_n = torch.sum(com_relative * env.path_normal_w, dim=-1)
-    velocity_s = torch.sum(robot_com_velocity_w * env.path_tangent_w, dim=-1)
-    velocity_n = torch.sum(robot_com_velocity_w * env.path_normal_w, dim=-1)
-    if not hasattr(env, "zmp_kinematic_state"):
-        env.zmp_kinematic_state = ZMPKinematicState.initialized(velocity_s, velocity_n)
-    state = env.zmp_kinematic_state
-    acceleration_s = filtered_first_derivative(
-        velocity_s, state.tangential_velocity_filter, env.step_dt, cutoff_hz=20.0
-    )
-    acceleration_n = filtered_first_derivative(
-        velocity_n, state.normal_velocity_filter, env.step_dt, cutoff_hz=20.0
-    )
-    state.acceleration_s[:] = acceleration_s
-    state.acceleration_n[:] = acceleration_n
-
-    cart = env.scene["rickshaw"]
-    if hitch_w is None:
-        hitch_w = torch.mean(cart.data.body_pos_w[:, env.hitch_body_ids], dim=1)
-    hand_force_w = env.rickshaw_state.hand_force_w
-    # The crossbar pitch axis is physically free in both D6 joints. Equal
-    # half-force bookkeeping at the two symmetric hitch points contributes no
-    # sagittal moment about their midpoint.
-    hand_torque_w = torch.zeros_like(hand_force_w)
-    hand_relative = hitch_w - origin
-    handle_s = torch.sum(hand_relative * env.path_tangent_w, dim=-1)
-    handle_n = torch.sum(hand_relative * env.path_normal_w, dim=-1)
-    force_s, force_n, torque_y = project_hand_wrench_to_slope(
-        hand_force_w,
-        hand_torque_w,
-        env.path_tangent_w,
-        env.path_normal_w,
-        env.path_lateral_w,
-    )
-    zmp_s, _, reaction_n, dynamics_valid = slope_zmp(
-        com_s,
-        com_n,
-        acceleration_s,
-        acceleration_n,
-        handle_s,
-        handle_n,
-        force_s,
-        force_n,
-        torque_y,
-        robot_mass,
-        env.gamma,
-        min_ground_reaction=cfg.min_ground_reaction,
-    )
-    support_relative = env.stability_state.support_center_w - origin
-    support_y = torch.sum(support_relative * env.path_lateral_w, dim=-1)
-    margin, polygon_valid = convex_support_margin(
-        env.stability_state.support_points_sy,
-        torch.stack((zmp_s, support_y), dim=-1),
-        env.stability_state.support_point_mask,
-    )
-    valid = dynamics_valid & polygon_valid & env.cart_interaction_wrench_valid
-    env.stability_state.zmp_s[:] = zmp_s
-    env.stability_state.ground_reaction_normal[:] = reaction_n
-    env.stability_state.zmp_margin[:] = torch.where(valid, margin, torch.zeros_like(margin))
-    env.stability_state.zmp_valid[:] = valid
-
-
-def apply_rolling_resistance(env: Any, cfg: RollingResistanceCfg) -> torch.Tensor:
-    """Isaac Lab pre-physics adapter that applies wheel-center resistance."""
-
-    cart = env.scene["rickshaw"]
-    wheel_velocity = cart.data.body_lin_vel_w[:, env.wheel_body_ids]
-    contact_force = env.scene["wheel_contacts"].data.net_forces_w[:, env.wheel_sensor_ids]
-    effective_c_rr = env.c_rr if cfg.enabled else torch.zeros_like(env.c_rr)
-    force_w, normal_force, _ = rolling_resistance_wrench(
-        wheel_velocity,
-        contact_force,
-        env.path_tangent_w,
-        env.path_normal_w,
-        effective_c_rr,
-        env.rickshaw_state.wheel_normal_force,
-        velocity_epsilon=cfg.velocity_epsilon,
-        normal_force_filter_hz=cfg.normal_force_filter_hz,
-        dt=env.physics_dt,
-    )
-    env.rickshaw_state.wheel_normal_force[:] = normal_force
-    cart.permanent_wrench_composer.set_forces_and_torques(
-        force_w,
-        torch.zeros_like(force_w),
-        body_ids=env.wheel_body_ids,
-        is_global=True,
-    )
-    return force_w
-
-
 def update_slope_frame(env: Any, env_ids: torch.Tensor | None = None) -> SlopeFrame:
     """Recompute the path frame after a terrain-level change."""
 
@@ -1729,7 +1415,6 @@ __all__ = [
     "FAT2ComRadiusState",
     "GRAVITY",
     "RickshawMassProperties",
-    "RollingResistanceCfg",
     "SecondOrderLowPassState",
     "SlopeFrame",
     "SpeedReferenceCfg",
@@ -1738,14 +1423,12 @@ __all__ = [
     "WrenchConsistencyState",
     "ZMPCfg",
     "ZMPKinematicState",
-    "adapt_d6_reaction_wrench",
+    "adapt_connection_reaction_wrench",
     "actual_rickshaw_geometry_in_slope_frame",
     "accumulate_cart_interaction_wrench",
     "analytic_handle_force",
-    "apply_rolling_resistance",
     "articulation_center_of_mass",
     "combine_mass_properties",
-    "configure_rolling_resistance",
     "cart_system_mass_kinematics",
     "cart_ground_contact_force_w",
     "compute_slope_frame",
@@ -1768,12 +1451,8 @@ __all__ = [
     "torso_tilt_from_slope_normal",
     "torso_pitch_from_world_vertical",
     "update_analytic_handle_force_state",
-    "update_analytic_rickshaw_force",
     "update_cart_interaction_wrench",
-    "update_fat2_reference",
     "update_slope_frame",
     "update_speed_reference",
-    "update_support_polygon",
     "update_wrench_consistency_state",
-    "update_zmp_stability",
 ]

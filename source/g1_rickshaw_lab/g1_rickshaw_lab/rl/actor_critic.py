@@ -14,6 +14,7 @@ from g1_rickshaw_lab.policy_schema import (
     ACTOR_OBSERVATION_DIM,
     CRITIC_PRIVILEGED_DIM,
     DEFAULT_CONTEXT_DIM,
+    HISTORY_LENGTH,
     validate_context_dim,
 )
 
@@ -129,9 +130,13 @@ class PrivilegedCritic(nn.Module):
 class G1RickshawStudentActor(nn.Module):
     """Deployable student composed only of observation TCN and actor."""
 
-    def __init__(self, latent_dim: int = DEFAULT_CONTEXT_DIM) -> None:
+    def __init__(
+        self,
+        latent_dim: int = DEFAULT_CONTEXT_DIM,
+        history_length: int = HISTORY_LENGTH,
+    ) -> None:
         super().__init__()
-        self.context_encoder = ContextEncoder(latent_dim)
+        self.context_encoder = ContextEncoder(latent_dim, history_length)
         self.actor = GaussianActor(latent_dim)
 
     def encode(self, history: torch.Tensor) -> torch.Tensor:

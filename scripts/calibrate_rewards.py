@@ -5,20 +5,24 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 from typing import Any
 
-from _isaaclab_wrappers import add_isaaclab_sources_to_path, add_project_source_to_path
+from _mjlab_wrappers import (
+    add_mjlab_sources_to_path,
+    add_project_source_to_path,
+    load_mjlab_configs,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 add_project_source_to_path()
 
+from g1_rickshaw_lab.provenance import atomic_torch_save  # noqa: E402
 from g1_rickshaw_lab.reward_calibration import (  # noqa: E402
     C1_NOMINAL_PHYSICS_FIELDS,
     GUIDE_REWARD_NORMALIZATION_SCALES,
@@ -55,19 +59,15 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
 )
 from g1_rickshaw_lab.slope_contract import (  # noqa: E402
     FORMAL_EVALUATION_NUM_ENVS,
-    SLOPE_TERRAIN_LEVELS,
-    SLOPE_TERRAIN_TYPES,
 )
 
 
-DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
+DEFAULT_TASK = "Mjlab-G1-Rickshaw-Directional-Slope-Teacher"
 SIGNED_SLOPES = SIGNED_C1_SLOPES
 
 
 def _parser() -> argparse.ArgumentParser:
-    add_isaaclab_sources_to_path()
-    from isaaclab.app import AppLauncher
-
+    add_mjlab_sources_to_path()
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint", type=Path)
@@ -85,21 +85,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-slope", type=int, default=10_000)
     parser.add_argument("--max-policy-steps", type=int, default=5_000)
     parser.add_argument(
-        "--feasibility-envelope",
-        type=Path,
-        default=REPOSITORY_ROOT / "config/feasibility_envelope.yaml",
-    )
-    parser.add_argument(
-        "--reset-poses",
-        type=Path,
-        default=REPOSITORY_ROOT / "config/reset_poses.yaml",
-    )
-    parser.add_argument(
         "--output-dir",
         type=Path,
         default=REPOSITORY_ROOT / "outputs/reward_calibration",
     )
-    AppLauncher.add_app_launcher_args(parser)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--headless", action="store_true")
     return parser
 
 
@@ -110,12 +101,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     else:
         if not args.checkpoint.is_file():
             parser.error(f"checkpoint does not exist: {args.checkpoint}")
-    for label, path in (
-        ("feasibility envelope", args.feasibility_envelope),
-        ("reset poses", args.reset_poses),
-    ):
-        if not path.is_file():
-            parser.error(f"{label} does not exist: {path}")
     if args.samples is not None:
         return
     if args.seed < 0:
@@ -131,25 +116,9 @@ def _load_torch_mapping(path: Path) -> dict[str, Any]:
 
 
 def _write_raw_samples(output_dir: Path, artifact: dict[str, Any]) -> Path:
-    import torch
-
-    output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=output_dir, prefix=".reward_samples.", suffix=".tmp"
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        torch.save(artifact, temporary)
-        with temporary.open("rb+") as stream:
-            os.fsync(stream.fileno())
-        destination = output_dir / "reward_samples.pt"
-        os.replace(temporary, destination)
-        return destination
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    destination = output_dir.resolve() / "reward_samples.pt"
+    atomic_torch_save(artifact, destination)
+    return destination
 
 
 def _checkpoint_header(
@@ -190,30 +159,20 @@ def _resolve_policy_kind(requested: str, checkpoint: dict[str, Any]) -> str:
 
 
 def _configure_training(env_cfg: Any) -> None:
-    env_cfg.curriculum = None
+    env_cfg.curriculum = {}
     env_cfg.scene.terrain.terrain_generator.curriculum = True
-    env_cfg.domain_randomization = replace(
-        env_cfg.domain_randomization,
-        enabled=False,
-    )
-    env_cfg.events.initialize_domain.params = {"cfg": env_cfg.domain_randomization}
+    env_cfg.domain_randomization.enabled = False
 
 
 def _assign_fixed_slopes(base_env: Any):
     import torch
     from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity import mdp
 
-    slots = torch.arange(base_env.num_envs, device=base_env.device) % len(SIGNED_SLOPES)
-    levels = torch.tensor(
-        SLOPE_TERRAIN_LEVELS, device=base_env.device, dtype=torch.long
-    )[slots]
-    columns = torch.tensor(
-        SLOPE_TERRAIN_TYPES, device=base_env.device, dtype=torch.long
-    )[slots]
-    terrain = base_env.scene.terrain
-    terrain.terrain_levels[:] = levels
-    terrain.terrain_types[:] = columns
-    terrain.env_origins[:] = terrain.terrain_origins[levels, columns]
+    slots, levels, columns = mdp.balanced_slope_assignment(
+        base_env.num_envs,
+        device=base_env.device,
+    )
+    mdp.apply_terrain_assignment(base_env, levels, columns)
     mdp.update_slope_frame(base_env)
     expected = torch.tensor(SIGNED_SLOPES, device=base_env.device)[slots]
     if not torch.allclose(base_env.slope, expected, atol=1.0e-7, rtol=0.0):
@@ -253,17 +212,6 @@ def _physics_snapshot(
         raise RewardCalibrationError("C1 environment has no fixed physics values")
     num_envs = base_env.num_envs
     device = base_env.device
-    d6_cfg = base_env.d6_constraint_manager.cfg
-    d6_fields = (
-        "linear_stiffness",
-        "linear_damping",
-        "angular_stiffness",
-        "angular_damping",
-        "max_force",
-        "max_torque",
-        "linear_limit",
-        "angular_limit",
-    )
     actual_values = {
         "torso.mass_delta": base_env.torso_mass_delta,
         "payload.mass": base_env._payload_mass,
@@ -275,16 +223,9 @@ def _physics_snapshot(
         "wheel.left_damping": base_env._wheel_damping[:, 0],
         "wheel.right_damping": base_env._wheel_damping[:, 1],
     }
-    for field in d6_fields:
-        actual_values[f"d6.{field}"] = torch.full(
-            (num_envs,), float(getattr(d6_cfg, field)), device=device
-        )
     if set(actual_values) != set(C1_NOMINAL_PHYSICS_FIELDS):
         raise RewardCalibrationError("C1 runtime physical fields are incomplete")
     nominal_values = dict(nominal_source)
-    nominal_values.update(
-        {f"d6.{field}": float(getattr(d6_cfg, field)) for field in d6_fields}
-    )
     missing_nominal = sorted(set(C1_NOMINAL_PHYSICS_FIELDS) - set(nominal_values))
     if missing_nominal:
         raise RewardCalibrationError(
@@ -308,13 +249,9 @@ def _physics_snapshot(
 
 
 def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
-    import gymnasium as gym
     import torch
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-    from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
-    from rsl_rl.runners import OnPolicyRunner
-
-    import g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity  # noqa: F401
+    from mjlab.envs import ManagerBasedRlEnv
+    from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
     checkpoint, _checkpoint_payload, training_configuration = _checkpoint_header(
         args.checkpoint
@@ -324,26 +261,28 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         raise RewardCalibrationError(
             "reward calibration task differs from the checkpoint training task"
         )
-    device = args.device
-    env_cfg = parse_env_cfg(args.task, device=device, num_envs=args.num_envs)
-    env_cfg.seed = args.seed
-    _configure_training(env_cfg)
+    device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     training_parameters = training_configuration["training_parameters"]
+    env_cfg, agent_cfg = load_mjlab_configs(
+        args.task,
+        play=False,
+        num_envs=args.num_envs,
+        seed=args.seed,
+        history_length=int(training_parameters["history_length"]),
+    )
+    _configure_training(env_cfg)
     apply_reward_weight_overrides(
         env_cfg,
         reward_weight_overrides_from_configuration(training_configuration),
     )
-    env_cfg.rewards.fat2_prior_exp.weight = float(training_parameters["fat2_weight"])
-    registry_key = (
-        "rsl_rl_cfg_entry_point"
-        if policy_kind == "teacher"
-        else "rsl_rl_student_cfg_entry_point"
-    )
-    agent_cfg = load_cfg_from_registry(args.task, registry_key)
-    agent_cfg.device = device
+    env_cfg.rewards["fat2_prior_exp"].weight = float(training_parameters["fat2_weight"])
     agent_cfg.actor.latent_dim = int(training_parameters["latent_dim"])
     agent_cfg = normalize_rsl_rl_runner_configuration(agent_cfg)
-    raw_env = gym.make(args.task, cfg=env_cfg)
+    expected_groups = {"policy", "history", "teacher_dynamic_history", "teacher_static"}
+    actual_groups = set(agent_cfg.obs_groups["actor"])
+    if (policy_kind == "teacher") != (actual_groups == expected_groups):
+        raise RewardCalibrationError("task runner type differs from checkpoint policy kind")
+    raw_env = ManagerBasedRlEnv(env_cfg, device=device)
     env = None
     try:
         env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
@@ -352,7 +291,7 @@ def _collect_runtime_samples(args: argparse.Namespace) -> tuple[dict[str, Any], 
         slope_slots = _assign_fixed_slopes(base_env)
         observation, _ = env.reset()
         c1_physics, c1_nominal_values = _physics_snapshot(base_env)
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=device)
+        runner = MjlabOnPolicyRunner(env, asdict(agent_cfg), log_dir=None, device=device)
         runner.load(
             os.fspath(args.checkpoint),
             load_cfg={
@@ -483,23 +422,11 @@ def main() -> int:
     parser = _parser()
     args = parser.parse_args()
     _validate_args(parser, args)
-    simulation_app = None
     try:
         if args.samples is not None:
             artifact = _load_torch_mapping(args.samples)
             sample_path = args.samples
         else:
-            os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(
-                args.feasibility_envelope.resolve()
-            )
-            os.environ["G1_RICKSHAW_RESET_POSES"] = os.fspath(
-                args.reset_poses.resolve()
-            )
-            from isaaclab.app import AppLauncher
-
-            args.headless = True
-            app_launcher = AppLauncher(args)
-            simulation_app = app_launcher.app
             artifact, sample_path = _collect_runtime_samples(args)
         report = _report_from_artifact(
             artifact,
@@ -525,11 +452,7 @@ def main() -> int:
             )
         )
     except BaseException:
-        # Process teardown releases Kit resources. Closing SimulationApp here
-        # can terminate the interpreter and hide the original exception.
         raise
-    if simulation_app is not None:
-        simulation_app.close()
     return 0
 
 

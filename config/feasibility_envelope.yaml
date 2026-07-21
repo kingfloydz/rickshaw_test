@@ -1,6 +1,5 @@
-# Feasibility envelope for the fixed 40.04 kg cart and calibrated D6 constraints.
-# Only runtime domain parameters are scanned over the 19-slope Isaac Sim 5.1 sweep.
-# D6 values are fixed calibration entries and are not randomized or endpoint-scanned.
+# Feasibility envelope for the fixed 40.04 kg cart and MuJoCo connections.
+# Runtime domain parameters are scanned over the 19-slope Mjlab sweep.
 schema_version: 1
 slopes:
   [-0.08, -0.07, -0.06, -0.05, -0.04, -0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
@@ -55,15 +54,6 @@ calibration:
   rickshaw_pose.hitch_vertical_speed_tolerance: 0.02
   rolling_resistance.c_rr_nominal: 0.02
   terrain.friction_nominal: 1.0
-  # C1 values are explicit calibration outputs and are versioned independently.
-  d6.linear_stiffness_nominal: 24000.0
-  d6.linear_damping_nominal: 900.0
-  d6.angular_stiffness_nominal: 300.0
-  d6.angular_damping_nominal: 30.0
-  d6.max_force_nominal: 300.0
-  d6.max_torque_nominal: 35.0
-  d6.linear_limit_nominal: 0.01
-  d6.angular_limit_nominal: 0.17453292519943295
   fat.robot_mass: 34.1299349
   fat.com_radius: 0.715092420262594
   # Broad physical guard around the observed 19-slope reset range. Runtime uses
@@ -88,8 +78,6 @@ calibration:
   safety.cart_ground_contact_force_threshold: 5.0
   safety.minimum_wheel_normal_force: 25.0
   safety.min_ground_reaction: 100.0
-  safety.d6_residual_limit: 0.06
-  safety.d6_impulse_limit: 1.7
   safety.hitch_height_bounds: [0.70, 0.95]
   safety.rickshaw_pitch_bounds: [0.15, 0.45]
   safety.corridor_half_width: 0.3
@@ -97,36 +85,3 @@ calibration:
   safety.overspeed_margin: 0.25
   # Normalized by each arm joint's hardware effort limit at runtime.
   safety.arm_torque_limit: 1.0
-  d6.robot_body_paths:
-    - Robot/left_dex1_base_link
-    - Robot/right_dex1_base_link
-  d6.hitch_body_paths:
-    - Rickshaw/left_tow_hitch_link
-    - Rickshaw/right_tow_hitch_link
-  # The physical crossbar runs along the hitch-frame +Y axis.
-  d6.rotation_free_axes: [false, true, false]
-  d6.rotation_driven_axes: [true, false, true]
-  d6.reaction_is_joint_on_robot: true
-  reset.hand_position_tolerance: 0.005
-  # Explicitly shared by static-preload IK and the Isaac Lab actuators.
-  control.leg_stiffness: 300.0
-  control.leg_damping: 10.0
-  control.foot_stiffness: 200.0
-  control.foot_damping: 5.0
-  control.waist_stiffness: 5000.0
-  control.waist_damping: 5.0
-  control.arm_stiffness: 3000.0
-  control.arm_damping: 10.0
-  dex.actuator_stiffness: 100.0
-  dex.actuator_damping: 1.0
-  dex.effort_limit: 20.0
-  dex.velocity_limit: 0.2
-  dex.q_open: [0.0245, 0.0245, 0.0245, 0.0245]
-  # 13.700 mm CAD crossbar diameter with the Dex collision-jaw inner faces.
-  dex.q_grasp: [-0.01609, -0.01609, -0.01609, -0.01609]
-  dex.grasp_velocity: 0.1
-  dex.grasp_timeout: 0.5
-  dex.left_grasp_center_frame:
-    [0.11066269, 0.0, 0.0, 0.7071067811865476, 0.7071067811865475, 0.0, 0.0]
-  dex.right_grasp_center_frame:
-    [0.11066269, 0.0, 0.0, 0.7071067811865476, -0.7071067811865475, 0.0, 0.0]

@@ -2,15 +2,31 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import math
+from collections.abc import Mapping, Sequence
 from typing import Any
-
-from .reward_calibration import GUIDE_REWARD_TERMS
-
 
 FAT2_REWARD_TERM = "fat2_prior_exp"
 REWARD_WEIGHT_OVERRIDES_KEY = "reward_weight_overrides"
+GUIDE_REWARD_TERMS = (
+    "track_speed_exp",
+    "lateral_error_l2",
+    "heading_error_l2",
+    "zmp_margin_barrier",
+    "hitch_height_exp",
+    "hitch_height_recovery_l2",
+    "fat2_prior_exp",
+    "feet_gait",
+    "feet_swing_height",
+    "feet_slide",
+    "terrain_normal_velocity_l2",
+    "joint_power_l1",
+    "processed_action_rate_l2",
+    "hip_yaw_roll_reference_l2",
+    "pelvis_height_limits_l2",
+    "joint_position_limits",
+    "termination",
+)
 
 
 def validate_reward_weight_overrides(value: Any) -> dict[str, float]:
@@ -58,27 +74,26 @@ def reward_weight_overrides_from_configuration(
     resolved = configuration.get("resolved_parameters")
     if not isinstance(resolved, Mapping):
         raise ValueError("training configuration has no resolved parameters")
-    return validate_reward_weight_overrides(
-        resolved.get(REWARD_WEIGHT_OVERRIDES_KEY, {})
-    )
+    return validate_reward_weight_overrides(resolved.get(REWARD_WEIGHT_OVERRIDES_KEY, {}))
 
 
 def reward_weight_hydra_overrides(
     overrides: Mapping[str, float],
 ) -> list[str]:
     validated = validate_reward_weight_overrides(overrides)
-    return [
-        f"env.rewards.{name}.weight={validated[name]!r}" for name in validated
-    ]
+    return [f"env.rewards.{name}.weight={validated[name]!r}" for name in validated]
 
 
 def apply_reward_weight_overrides(env_cfg: Any, overrides: Mapping[str, float]) -> None:
     for name, weight in validate_reward_weight_overrides(overrides).items():
-        getattr(env_cfg.rewards, name).weight = weight
+        rewards = env_cfg.rewards
+        term = rewards[name] if isinstance(rewards, Mapping) else getattr(rewards, name)
+        term.weight = weight
 
 
 __all__ = [
     "FAT2_REWARD_TERM",
+    "GUIDE_REWARD_TERMS",
     "REWARD_WEIGHT_OVERRIDES_KEY",
     "apply_reward_weight_overrides",
     "parse_reward_weight_arguments",

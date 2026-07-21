@@ -11,10 +11,28 @@ from pathlib import Path
 import mujoco
 
 from g1_rickshaw_lab.project_paths import ASSET_ROOT
+from g1_rickshaw_lab.g1_motor_defaults import (
+    ARMATURE_4010,
+    ARMATURE_5020,
+    ARMATURE_7520_14,
+    ARMATURE_7520_22,
+    DAMPING_4010,
+    DAMPING_5020,
+    DAMPING_7520_14,
+    DAMPING_7520_22,
+    G1_JOINT_ARMATURE,
+    G1_JOINT_DAMPING,
+    G1_JOINT_EFFORT_LIMITS,
+    G1_JOINT_STIFFNESS,
+    G1_MOTOR_PARAMETERS_BY_JOINT,
+    STIFFNESS_4010,
+    STIFFNESS_5020,
+    STIFFNESS_7520_14,
+    STIFFNESS_7520_22,
+)
 
 from .mujoco_spec import (
-    ALL_COLLISION_BITS,
-    GRIPPER_COLLISION_BIT,
+    GROUND_COLLISION_BIT,
     ROBOT_COLLISION_BIT,
     add_free_joint,
     load_urdf_spec,
@@ -44,7 +62,6 @@ LOWER_JOINT_PATTERN = r".*_(hip|knee|ankle)_.*"
 WAIST_JOINT_PATTERN = r"waist_.*_joint"
 ARM_JOINT_PATTERN = r".*_(shoulder|elbow|wrist)_.*"
 EXPECTED_GROUP_COUNTS = {"lower": 12, "waist": 3, "arm": 14}
-
 
 class AssetValidationError(ValueError):
     """Raised when the fixed-gripper G1 asset violates its contract."""
@@ -145,14 +162,20 @@ def get_g1_spec() -> mujoco.MjSpec:
     spec = load_urdf_spec(G1_DEX1_URDF_PATH)
     add_free_joint(spec, "pelvis")
 
+    for joint_name, (_, _, effort_limit, _) in G1_MOTOR_PARAMETERS_BY_JOINT.items():
+        joint = spec.joint(joint_name)
+        joint.actfrclimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        joint.actfrcrange[:] = (-effort_limit, effort_limit)
+
     for geom in spec.geoms:
+        # Unitree FULL_COLLISION_WITHOUT_SELF plus tow-rod interaction.
         geom.contype = ROBOT_COLLISION_BIT
-        geom.conaffinity = ALL_COLLISION_BITS
+        geom.conaffinity = GROUND_COLLISION_BIT
     set_body_collision(
         spec,
         GRIPPER_BODY_NAMES,
-        contype=GRIPPER_COLLISION_BIT,
-        conaffinity=1 | ROBOT_COLLISION_BIT,
+        contype=0,
+        conaffinity=GROUND_COLLISION_BIT,
     )
 
     site_frames = (
@@ -171,6 +194,33 @@ def get_g1_spec() -> mujoco.MjSpec:
     return spec
 
 
+def add_g1_position_actuators(spec: mujoco.MjSpec, *, prefix: str = "") -> None:
+    """Install the official Unitree position actuators on an assembled spec."""
+
+    for joint_name, stiffness, damping, effort_limit, armature in zip(
+        G1_MOTOR_PARAMETERS_BY_JOINT,
+        G1_JOINT_STIFFNESS,
+        G1_JOINT_DAMPING,
+        G1_JOINT_EFFORT_LIMITS,
+        G1_JOINT_ARMATURE,
+        strict=True,
+    ):
+        target = f"{prefix}{joint_name}"
+        actuator = spec.add_actuator(name=target, target=target)
+        actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
+        actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
+        actuator.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+        actuator.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+        actuator.gainprm[0] = stiffness
+        actuator.biasprm[1] = -stiffness
+        actuator.biasprm[2] = -damping
+        actuator.inheritrange = 0.0
+        actuator.ctrllimited = False
+        actuator.forcelimited = True
+        actuator.forcerange[:] = (-effort_limit, effort_limit)
+        spec.joint(target).armature = armature
+
+
 def get_g1_robot_cfg():
     """Return a fresh mjlab EntityCfg; imports mjlab only when requested."""
 
@@ -179,29 +229,57 @@ def get_g1_robot_cfg():
 
     actuator_groups = (
         BuiltinPositionActuatorCfg(
-            target_names_expr=(r".*_(hip|knee)_joint",), stiffness=300.0, damping=10.0, effort_limit=139.0
-        ),
-        BuiltinPositionActuatorCfg(
-            target_names_expr=(r".*_ankle_(pitch|roll)_joint",), stiffness=200.0, damping=5.0, effort_limit=50.0
-        ),
-        BuiltinPositionActuatorCfg(
-            target_names_expr=(r"waist_.*_joint",), stiffness=5000.0, damping=5.0, effort_limit=50.0
-        ),
-        BuiltinPositionActuatorCfg(
-            target_names_expr=(r".*_(shoulder_.*|elbow|wrist_roll)_joint",),
-            stiffness=3000.0,
-            damping=10.0,
+            target_names_expr=(
+                r".*_elbow_joint",
+                r".*_shoulder_pitch_joint",
+                r".*_shoulder_roll_joint",
+                r".*_shoulder_yaw_joint",
+                r".*_wrist_roll_joint",
+            ),
+            stiffness=STIFFNESS_5020,
+            damping=DAMPING_5020,
             effort_limit=25.0,
+            armature=ARMATURE_5020,
         ),
         BuiltinPositionActuatorCfg(
-            target_names_expr=(r".*_wrist_(pitch|yaw)_joint",),
-            stiffness=3000.0,
-            damping=10.0,
-            effort_limit=13.4,
+            target_names_expr=(r".*_hip_pitch_joint", r".*_hip_yaw_joint", r"waist_yaw_joint"),
+            stiffness=STIFFNESS_7520_14,
+            damping=DAMPING_7520_14,
+            effort_limit=88.0,
+            armature=ARMATURE_7520_14,
+        ),
+        BuiltinPositionActuatorCfg(
+            target_names_expr=(r".*_hip_roll_joint", r".*_knee_joint"),
+            stiffness=STIFFNESS_7520_22,
+            damping=DAMPING_7520_22,
+            effort_limit=139.0,
+            armature=ARMATURE_7520_22,
+        ),
+        BuiltinPositionActuatorCfg(
+            target_names_expr=(r".*_wrist_pitch_joint", r".*_wrist_yaw_joint"),
+            stiffness=STIFFNESS_4010,
+            damping=DAMPING_4010,
+            effort_limit=5.0,
+            armature=ARMATURE_4010,
+        ),
+        BuiltinPositionActuatorCfg(
+            target_names_expr=(r"waist_(roll|pitch)_joint",),
+            stiffness=2.0 * STIFFNESS_5020,
+            damping=2.0 * DAMPING_5020,
+            effort_limit=50.0,
+            armature=2.0 * ARMATURE_5020,
+        ),
+        BuiltinPositionActuatorCfg(
+            target_names_expr=(r".*_ankle_(pitch|roll)_joint",),
+            stiffness=2.0 * STIFFNESS_5020,
+            damping=2.0 * DAMPING_5020,
+            effort_limit=50.0,
+            armature=2.0 * ARMATURE_5020,
         ),
     )
     return EntityCfg(
         spec_fn=get_g1_spec,
+        sort_actuators=True,
         init_state=EntityCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.72),
             joint_pos={
@@ -236,10 +314,15 @@ __all__ = [
     "G1_DEX1_URDF",
     "G1_DEX1_URDF_PATH",
     "G1_DOF_COUNT",
+    "G1_JOINT_ARMATURE",
+    "G1_JOINT_DAMPING",
+    "G1_JOINT_EFFORT_LIMITS",
+    "G1_JOINT_STIFFNESS",
     "G1_RICKSHAW_CFG",
     "G1_TOTAL_MASS",
     "GRASP_SITE_NAMES",
     "JointPartition",
+    "add_g1_position_actuators",
     "build_g1_rickshaw_cfg",
     "get_g1_robot_cfg",
     "get_g1_spec",

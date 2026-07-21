@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Train the S0 privileged teacher with Isaac Lab RSL-RL."""
+"""Train the S0 privileged teacher with Mjlab RSL-RL."""
 
 from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
-from _isaaclab_wrappers import (
+from _mjlab_wrappers import (
     add_project_source_to_path,
     require_existing_file,
-    run_isaaclab_rsl_rl,
+    run_mjlab_rsl_rl,
 )
 
 add_project_source_to_path()
 
+from g1_rickshaw_lab.reward_profile import (  # noqa: E402
+    REWARD_WEIGHT_OVERRIDES_KEY,
+    parse_reward_weight_arguments,
+    reward_weight_hydra_overrides,
+    reward_weight_overrides_from_configuration,
+)
+from g1_rickshaw_lab.rl.runner import RunnerContext  # noqa: E402
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
     DEFAULT_TRAINING_PARAMETERS,
     GUIDE_TRAINING_NUM_ENVS,
@@ -23,25 +30,15 @@ from g1_rickshaw_lab.training_contract import (  # noqa: E402
     GUIDE_TRAINING_TASK,
     SUPPORTED_CONTEXT_DIMS,
     SUPPORTED_FAT2_WEIGHTS,
+    SUPPORTED_HISTORY_LENGTHS,
     SUPPORTED_ROLLOUT_STEPS,
     TRAINING_CONFIGURATION_KEY,
-    feasibility_config_path,
+    build_training_configuration,
+    cli_value,
     guide_max_iterations,
     load_s0_resume_checkpoint,
     require_pinned_rsl_rl,
     training_artifact_interval,
-    validate_guide_training_configuration,
-)
-from g1_rickshaw_lab.reward_profile import (  # noqa: E402
-    REWARD_WEIGHT_OVERRIDES_KEY,
-    parse_reward_weight_arguments,
-    reward_weight_hydra_overrides,
-    reward_weight_overrides_from_configuration,
-)
-from _training_configuration import (  # noqa: E402
-    build_training_configuration,
-    cli_value,
-    publish_training_configuration,
 )
 
 DEFAULT_TASK = GUIDE_TRAINING_TASK
@@ -57,18 +54,11 @@ def main() -> int:
         help="Optional isolated RSL-RL experiment root for a fresh S0 run.",
     )
     parser.add_argument("--resume-checkpoint", default=None)
-    parser.add_argument(
-        "--fat2-weight", type=float, choices=SUPPORTED_FAT2_WEIGHTS, default=None
-    )
-    parser.add_argument(
-        "--latent-dim", type=int, choices=SUPPORTED_CONTEXT_DIMS, default=None
-    )
-    parser.add_argument(
-        "--rollout-steps", type=int, choices=SUPPORTED_ROLLOUT_STEPS, default=None
-    )
-    parser.add_argument(
-        "--stability-reward-curriculum", action="store_true", default=None
-    )
+    parser.add_argument("--fat2-weight", type=float, choices=SUPPORTED_FAT2_WEIGHTS, default=None)
+    parser.add_argument("--latent-dim", type=int, choices=SUPPORTED_CONTEXT_DIMS, default=None)
+    parser.add_argument("--history-length", type=int, choices=SUPPORTED_HISTORY_LENGTHS, default=None)
+    parser.add_argument("--rollout-steps", type=int, choices=SUPPORTED_ROLLOUT_STEPS, default=None)
+    parser.add_argument("--stability-reward-curriculum", action="store_true", default=None)
     parser.add_argument(
         "--reward-weight",
         action="append",
@@ -88,20 +78,9 @@ def main() -> int:
     owned_resume_flags = ("--resume", "--load_run", "--checkpoint", "--agent")
     if args.resume_checkpoint is not None:
         owned_resume_flags += ("--experiment_name",)
-    if any(
-        token == flag or token.startswith(flag + "=")
-        for token in remaining
-        for flag in owned_resume_flags
-    ):
-        raise ValueError(
-            "S0 owns its agent and resume selection; use --resume-checkpoint"
-        )
-    feasibility_path = feasibility_config_path()
-    os.environ["G1_RICKSHAW_FEASIBILITY_ENVELOPE"] = os.fspath(feasibility_path)
+    if any(token == flag or token.startswith(flag + "=") for token in remaining for flag in owned_resume_flags):
+        raise ValueError("S0 owns its agent and resume selection; use --resume-checkpoint")
     require_pinned_rsl_rl()
-    os.environ["G1_RICKSHAW_RUNNER_HOOK"] = "1"
-    os.environ["G1_RICKSHAW_TASK"] = args.task
-    os.environ["G1_RICKSHAW_CHECKPOINT_STAGE"] = "s0_teacher"
     resume_path: Path | None = None
     resume_configuration = None
     if args.resume_checkpoint is not None:
@@ -114,35 +93,19 @@ def main() -> int:
             validate_runtime=True,
         )
         resume_configuration = loaded[TRAINING_CONFIGURATION_KEY]
-    resume_parameters = (
-        None
-        if resume_configuration is None
-        else resume_configuration["training_parameters"]
-    )
+    resume_parameters = None if resume_configuration is None else resume_configuration["training_parameters"]
     if resume_configuration is None:
         reward_weight_overrides = requested_reward_overrides
     else:
-        resumed_reward_overrides = reward_weight_overrides_from_configuration(
-            resume_configuration
-        )
-        if (
-            requested_reward_overrides
-            and requested_reward_overrides != resumed_reward_overrides
-        ):
+        resumed_reward_overrides = reward_weight_overrides_from_configuration(resume_configuration)
+        if requested_reward_overrides and requested_reward_overrides != resumed_reward_overrides:
             raise ValueError("S0 resume cannot change reward weights")
         reward_weight_overrides = resumed_reward_overrides
-    defaults = (
-        DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
-    )
-    fat2_weight = float(
-        defaults["fat2_weight"] if args.fat2_weight is None else args.fat2_weight
-    )
-    latent_dim = int(
-        defaults["latent_dim"] if args.latent_dim is None else args.latent_dim
-    )
-    rollout_steps = int(
-        defaults["rollout_steps"] if args.rollout_steps is None else args.rollout_steps
-    )
+    defaults = DEFAULT_TRAINING_PARAMETERS if resume_parameters is None else resume_parameters
+    fat2_weight = float(defaults["fat2_weight"] if args.fat2_weight is None else args.fat2_weight)
+    latent_dim = int(defaults["latent_dim"] if args.latent_dim is None else args.latent_dim)
+    history_length = int(defaults["history_length"] if args.history_length is None else args.history_length)
+    rollout_steps = int(defaults["rollout_steps"] if args.rollout_steps is None else args.rollout_steps)
     stability_reward_curriculum = bool(
         defaults["stability_reward_curriculum"]
         if args.stability_reward_curriculum is None
@@ -151,14 +114,11 @@ def main() -> int:
     if resume_parameters is not None and (
         fat2_weight != float(resume_parameters["fat2_weight"])
         or latent_dim != int(resume_parameters["latent_dim"])
+        or history_length != int(resume_parameters["history_length"])
         or rollout_steps != int(resume_parameters["rollout_steps"])
-        or stability_reward_curriculum
-        != bool(resume_parameters["stability_reward_curriculum"])
+        or stability_reward_curriculum != bool(resume_parameters["stability_reward_curriculum"])
     ):
-        raise ValueError(
-            "S0 resume cannot change FAT2, latent_dim, rollout_steps, or stability reward curriculum"
-        )
-    os.environ["G1_RICKSHAW_CHECKPOINT_LINEAGE"] = "{}"
+        raise ValueError("S0 resume cannot change FAT2, latent_dim, history_length, rollout_steps, or stability reward curriculum")
     seed = cli_value(
         remaining,
         "--seed",
@@ -196,31 +156,28 @@ def main() -> int:
         stage_coverage=None,
         fat2_weight=fat2_weight,
         latent_dim=latent_dim,
+        history_length=history_length,
         rollout_steps=rollout_steps,
         stability_reward_curriculum=stability_reward_curriculum,
     )
-    validate_guide_training_configuration(
-        training_configuration,
-        expected_stage="s0_teacher",
+    runner_context = RunnerContext.training(
+        stage="s0_teacher",
+        training_configuration=training_configuration,
     )
-    publish_training_configuration(training_configuration)
     runtime_overrides = [
         f"agent.num_steps_per_env={rollout_steps}",
         f"agent.save_interval={training_artifact_interval(rollout_steps)}",
         f"agent.actor.latent_dim={latent_dim}",
+        f"agent.actor.history_length={history_length}",
+        f"env.history_length={history_length}",
         *reward_weight_hydra_overrides(reward_weight_overrides),
         f"env.rewards.fat2_prior_exp.weight={fat2_weight}",
     ]
     experiment_arguments: list[str] = []
     if resume_path is not None:
         experiment_root = resume_path.parent.parent
-        if (
-            args.experiment_dir is not None
-            and Path(args.experiment_dir).resolve() != experiment_root.resolve()
-        ):
-            raise ValueError(
-                "--experiment-dir must match the resume checkpoint experiment root"
-            )
+        if args.experiment_dir is not None and Path(args.experiment_dir).resolve() != experiment_root.resolve():
+            raise ValueError("--experiment-dir must match the resume checkpoint experiment root")
         experiment_arguments = [
             "--experiment_name",
             os.fspath(experiment_root),
@@ -235,8 +192,8 @@ def main() -> int:
             "--experiment_name",
             os.fspath(Path(args.experiment_dir).resolve()),
         ]
-    run_isaaclab_rsl_rl(
-        "train.py",
+    run_mjlab_rsl_rl(
+        "train",
         [
             "--task",
             args.task,
@@ -252,6 +209,7 @@ def main() -> int:
             *remaining,
             *runtime_overrides,
         ],
+        runner_context=runner_context,
     )
     return 0
 

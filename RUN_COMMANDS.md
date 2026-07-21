@@ -6,23 +6,35 @@ Install the project in the mjlab environment:
 python -m pip install -e source/g1_rickshaw_lab
 ```
 
-Validate the MuJoCo assets, fixed grippers, welds, collision masks, and hitch geometry:
+Validate the MuJoCo assets, fixed grippers, point connections, collision masks, and hitch geometry:
 
 ```bash
 python scripts/validate_mjlab_assets.py --output mjlab_asset_validation.json
 ```
 
-Train with the same CLI convention as `unitree_rl_mjlab`:
+Validate all 19 MuJoCo static equilibria:
 
 ```bash
-python scripts/train.py Unitree-G1-Rickshaw-Flat --env.scene.num-envs 4096
+python scripts/validate_static_initialization.py
 ```
 
-Play a checkpoint:
+Train the teacher:
 
 ```bash
-python scripts/play.py Unitree-G1-Rickshaw-Flat \
-  --checkpoint-file logs/rsl_rl/g1_rickshaw_velocity/<run>/model_<iteration>.pt
+python scripts/train_teacher.py --num-envs 8192
 ```
 
-Initialization is produced by MuJoCo inverse-dynamics equilibrium solving on first reset and cached by gradient. There is no USD conversion, Kit process, reset-pose file, gain ramp, or settling controller.
+Play or export the student:
+
+```bash
+python scripts/play_student.py --checkpoint <student-checkpoint.pt>
+```
+
+Render the solved initialization state:
+
+```bash
+python scripts/render_initialization.py --output outputs/initialization.png
+```
+
+Initialization precomputes all 19 MuJoCo inverse-dynamics equilibria at startup.
+There is no asset conversion, reset-pose file, gain ramp, or settling controller.

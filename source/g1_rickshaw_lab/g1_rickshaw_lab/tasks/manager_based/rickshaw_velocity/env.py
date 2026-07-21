@@ -1,4 +1,4 @@
-"""The task uses mjlab's standard ManagerBasedRlEnv directly."""
+"""Environment class export for downstream launchers."""
 
 from __future__ import annotations
 
@@ -9,6 +9,9 @@ def get_environment_class():
     return ManagerBasedRlEnv
 
 
-G1RickshawRLEnv = get_environment_class
+try:
+    G1RickshawRLEnv = get_environment_class()
+except ModuleNotFoundError:  # Lightweight configuration/unit-test environment.
+    G1RickshawRLEnv = None
 
 __all__ = ["G1RickshawRLEnv", "get_environment_class"]

@@ -1,15 +1,10 @@
-"""Directional-slope terrain and rickshaw reset geometry.
-
-The array geometry helpers have no Isaac Lab or trimesh dependency. This keeps
-the 10-level directional frame and hitch-height round-trip invariants independently
-testable before launching the simulator.
-"""
+"""Directional-slope terrain and rickshaw reset geometry for Mjlab."""
 
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass
 import math
-from typing import ClassVar, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -32,25 +27,6 @@ ALL_SIGNED_TERRAIN_GRADIENTS = (
     *TERRAIN_GRADIENT_MAGNITUDES,
     *(-value for value in TERRAIN_GRADIENT_MAGNITUDES),
 )
-
-
-class IsaacLabUnavailableError(RuntimeError):
-    """Raised when a simulator-only terrain operation lacks Isaac Lab."""
-
-
-try:
-    from isaaclab.terrains import SubTerrainBaseCfg, TerrainGeneratorCfg
-    from isaaclab.utils import configclass
-except ModuleNotFoundError as exc:  # Expected in lightweight unit-test environments.
-    SubTerrainBaseCfg = None
-    TerrainGeneratorCfg = None
-    _ISAACLAB_IMPORT_ERROR: ModuleNotFoundError | None = exc
-
-    def configclass(cls):
-        return dataclass(cls, kw_only=True)
-
-else:
-    _ISAACLAB_IMPORT_ERROR = None
 
 
 @dataclass(frozen=True)
@@ -135,16 +111,13 @@ def directional_plane_slope_geometry(difficulty: float, cfg) -> DirectionalSlope
 
 
 def directional_plane_slope(difficulty: float, cfg):
-    """Isaac Lab sub-terrain callback returning a trimesh and its origin."""
+    """Return the legacy mesh representation used by offline geometry checks."""
 
     geometry = directional_plane_slope_geometry(difficulty, cfg)
     try:
         import trimesh
     except ModuleNotFoundError as exc:
-        raise IsaacLabUnavailableError(
-            "directional_plane_slope requires trimesh (installed with Isaac Lab); "
-            "use directional_plane_slope_geometry for dependency-free tests"
-        ) from exc
+        raise RuntimeError("directional_plane_slope requires trimesh") from exc
     mesh = trimesh.Trimesh(
         vertices=geometry.vertices,
         faces=geometry.faces,
@@ -153,70 +126,44 @@ def directional_plane_slope(difficulty: float, cfg):
     return [mesh], geometry.origin
 
 
-if SubTerrainBaseCfg is not None:
+@dataclass(kw_only=True)
+class DirectionalPlaneSlopeCfg:
+    """Dependency-free parameters for directional-plane geometry checks."""
 
-    @configclass
-    class DirectionalPlaneSlopeCfg(SubTerrainBaseCfg):
-        """A planar patch whose elevation changes only along local +X."""
+    proportion: float = 1.0
+    size: tuple[float, float] = TERRAIN_SIZE
+    direction: int = 0
+    spawn_x: float = TERRAIN_SPAWN_X
 
-        function = directional_plane_slope
-        direction: int = 0
-        spawn_x: float = TERRAIN_SPAWN_X
-
-
-    DIRECTIONAL_SLOPES_CFG = TerrainGeneratorCfg(
-        seed=TERRAIN_SEED,
-        curriculum=True,
-        size=TERRAIN_SIZE,
-        num_rows=TERRAIN_NUM_ROWS,
-        num_cols=TERRAIN_NUM_COLS,
-        border_width=0.0,
-        use_cache=False,
-        sub_terrains={
-            "flat": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=0),
-            "uphill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=1),
-            "downhill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=-1),
-        },
-    )
-else:
-
-    @dataclass(kw_only=True)
-    class DirectionalPlaneSlopeCfg:
-        """Dependency-free mirror of the Isaac Lab sub-terrain config."""
-
-        function: ClassVar = directional_plane_slope
-        proportion: float = 1.0
-        size: tuple[float, float] = TERRAIN_SIZE
-        direction: int = 0
-        spawn_x: float = TERRAIN_SPAWN_X
+    function = staticmethod(directional_plane_slope)
 
 
-    @dataclass(frozen=True)
-    class _TerrainGeneratorCfgFallback:
-        seed: int
-        curriculum: bool
-        size: tuple[float, float]
-        num_rows: int
-        num_cols: int
-        border_width: float
-        use_cache: bool
-        sub_terrains: dict[str, DirectionalPlaneSlopeCfg]
+@dataclass(frozen=True)
+class DirectionalSlopesMetadata:
+    seed: int
+    curriculum: bool
+    size: tuple[float, float]
+    num_rows: int
+    num_cols: int
+    border_width: float
+    use_cache: bool
+    sub_terrains: dict[str, DirectionalPlaneSlopeCfg]
 
 
-    DIRECTIONAL_SLOPES_CFG = _TerrainGeneratorCfgFallback(
-        seed=TERRAIN_SEED,
-        curriculum=True,
-        size=TERRAIN_SIZE,
-        num_rows=TERRAIN_NUM_ROWS,
-        num_cols=TERRAIN_NUM_COLS,
-        border_width=0.0,
-        use_cache=False,
-        sub_terrains={
-            "flat": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=0),
-            "uphill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=1),
-            "downhill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=-1),
-        },
-    )
+DIRECTIONAL_SLOPES_CFG = DirectionalSlopesMetadata(
+    seed=TERRAIN_SEED,
+    curriculum=True,
+    size=TERRAIN_SIZE,
+    num_rows=TERRAIN_NUM_ROWS,
+    num_cols=TERRAIN_NUM_COLS,
+    border_width=0.0,
+    use_cache=False,
+    sub_terrains={
+        "flat": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=0),
+        "uphill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=1),
+        "downhill": DirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=-1),
+    },
+)
 
 
 def signed_gradient_from_terrain(levels, columns):
@@ -281,6 +228,62 @@ def slope_frame_from_terrain(levels, columns) -> SlopeFrame:
     return slope_frame_from_gradient(signed_gradient_from_terrain(levels, columns))
 
 
+def make_mjlab_directional_slopes_cfg():
+    """Build the exact 10-by-27 directional slope grid for mjlab."""
+
+    import mujoco
+    from mjlab.terrains.terrain_generator import (
+        SubTerrainCfg,
+        TerrainGeneratorCfg,
+        TerrainGeometry,
+        TerrainOutput,
+    )
+
+    @dataclass(kw_only=True)
+    class MjlabDirectionalPlaneSlopeCfg(SubTerrainCfg):
+        direction: int = 0
+        spawn_x: float = TERRAIN_SPAWN_X
+        thickness: float = 1.0
+
+        def function(self, difficulty, spec, rng):
+            del rng
+            gradient, _ = directional_slope_gradient(difficulty, self.direction)
+            gamma = math.atan(gradient)
+            length, width = self.size
+            half_length = length / (2.0 * math.cos(gamma))
+            surface_center = np.array(
+                (length / 2.0, width / 2.0, gradient * (length / 2.0 - self.spawn_x)),
+                dtype=np.float64,
+            )
+            normal = np.array((-math.sin(gamma), 0.0, math.cos(gamma)), dtype=np.float64)
+            geom = spec.body("terrain").add_geom(
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=(half_length, width / 2.0, self.thickness / 2.0),
+                pos=surface_center - 0.5 * self.thickness * normal,
+                quat=(math.cos(0.5 * gamma), 0.0, -math.sin(0.5 * gamma), 0.0),
+            )
+            return TerrainOutput(
+                origin=np.array((self.spawn_x, width / 2.0, 0.0), dtype=np.float64),
+                geometries=[TerrainGeometry(geom=geom, color=(0.45, 0.48, 0.46, 1.0))],
+            )
+
+    return TerrainGeneratorCfg(
+        seed=TERRAIN_SEED,
+        curriculum=True,
+        size=TERRAIN_SIZE,
+        num_rows=TERRAIN_NUM_ROWS,
+        num_cols=TERRAIN_NUM_COLS,
+        border_width=0.0,
+        color_scheme="none",
+        difficulty_range=(0.0, 1.0),
+        sub_terrains={
+            "flat": MjlabDirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=0),
+            "uphill": MjlabDirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=1),
+            "downhill": MjlabDirectionalPlaneSlopeCfg(proportion=1.0 / 3.0, direction=-1),
+        },
+    )
+
+
 class _RickshawPoseLike(Protocol):
     wheel_radius: float
     hitch_x: float
@@ -289,7 +292,7 @@ class _RickshawPoseLike(Protocol):
     hitch_height_target: float
 
 
-@configclass
+@dataclass(kw_only=True)
 class RickshawPoseTargetCfg:
     """Rickshaw front-lift target and reset acceptance tolerances."""
 
@@ -368,7 +371,6 @@ __all__ = [
     "DIRECTIONAL_SLOPES_CFG",
     "DirectionalPlaneSlopeCfg",
     "DirectionalSlopeGeometry",
-    "IsaacLabUnavailableError",
     "RickshawPoseTargetCfg",
     "SlopeFrame",
     "TERRAIN_COLUMNS_PER_TYPE",
@@ -384,6 +386,7 @@ __all__ = [
     "directional_slope_gradient",
     "hitch_height_from_pitch",
     "hitch_height_round_trip_error",
+    "make_mjlab_directional_slopes_cfg",
     "signed_gradient_from_terrain",
     "slope_frame_from_gradient",
     "slope_frame_from_terrain",

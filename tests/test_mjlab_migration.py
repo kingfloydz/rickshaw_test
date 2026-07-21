@@ -46,7 +46,51 @@ def test_rickshaw_has_0_6m_wheels_aligned_with_lowered_body() -> None:
         assert math.isclose(model.geom_size[geom_id, 0] * 2.0, 0.6, abs_tol=1.0e-12)
 
 
-def test_assembled_model_uses_two_welds_and_filters_gripper_cart_collision() -> None:
+def test_g1_uses_official_builtin_position_actuator_defaults() -> None:
+    from mjlab.actuator import BuiltinPositionActuatorCfg
+
+    from g1_rickshaw_lab.assets.g1_dex1 import get_g1_robot_cfg
+    from g1_rickshaw_lab.g1_motor_defaults import (
+        ARMATURE_4010,
+        ARMATURE_5020,
+        ARMATURE_7520_14,
+        ARMATURE_7520_22,
+        DAMPING_4010,
+        DAMPING_5020,
+        DAMPING_7520_14,
+        DAMPING_7520_22,
+        DAMPING_RATIO,
+        NATURAL_FREQUENCY,
+        STIFFNESS_4010,
+        STIFFNESS_5020,
+        STIFFNESS_7520_14,
+        STIFFNESS_7520_22,
+    )
+
+    actuators = get_g1_robot_cfg().articulation.actuators
+    assert len(actuators) == 6
+    assert all(isinstance(actuator, BuiltinPositionActuatorCfg) for actuator in actuators)
+    assert math.isclose(NATURAL_FREQUENCY, 20.0 * 3.1415926535)
+    assert DAMPING_RATIO == 2.0
+    expected = (
+        (STIFFNESS_5020, DAMPING_5020, 25.0, ARMATURE_5020),
+        (STIFFNESS_7520_14, DAMPING_7520_14, 88.0, ARMATURE_7520_14),
+        (STIFFNESS_7520_22, DAMPING_7520_22, 139.0, ARMATURE_7520_22),
+        (STIFFNESS_4010, DAMPING_4010, 5.0, ARMATURE_4010),
+        (2.0 * STIFFNESS_5020, 2.0 * DAMPING_5020, 50.0, 2.0 * ARMATURE_5020),
+        (2.0 * STIFFNESS_5020, 2.0 * DAMPING_5020, 50.0, 2.0 * ARMATURE_5020),
+    )
+    for actuator, values in zip(actuators, expected, strict=True):
+        actual = (
+            actuator.stiffness,
+            actuator.damping,
+            actuator.effort_limit,
+            actuator.armature,
+        )
+        assert all(math.isclose(value, target) for value, target in zip(actual, values, strict=True))
+
+
+def test_assembled_model_uses_two_connections_and_only_tow_rod_collision() -> None:
     model = build_assembled_spec().compile()
     assert validate_assembled_model(model) == ()
     assert model.neq == 2

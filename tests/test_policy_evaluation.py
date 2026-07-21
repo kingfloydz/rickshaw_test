@@ -12,7 +12,7 @@ from g1_rickshaw_lab.policy_evaluation import (
     MetricStore,
     PolicyEvaluationAccumulator,
     command_phase_labels,
-    d6_wrench_channels,
+    connection_wrench_channels,
     evaluate_s2_return_floor,
     slope_label,
 )
@@ -49,7 +49,7 @@ def test_command_phase_labels_are_deterministic() -> None:
     ]
 
 
-def test_d6_wrench_channels_report_force_torque_and_asymmetry() -> None:
+def test_connection_wrench_channels_report_force_torque_and_asymmetry() -> None:
     wrench = torch.tensor(
         [
             [
@@ -58,7 +58,7 @@ def test_d6_wrench_channels_report_force_torque_and_asymmetry() -> None:
             ]
         ]
     )
-    channels = d6_wrench_channels(wrench)
+    channels = connection_wrench_channels(wrench)
     torch.testing.assert_close(channels["force"], torch.tensor([5.0]))
     torch.testing.assert_close(channels["torque"], torch.tensor([5.0]))
     torch.testing.assert_close(channels["force_asymmetry"], torch.tensor([0.0]))

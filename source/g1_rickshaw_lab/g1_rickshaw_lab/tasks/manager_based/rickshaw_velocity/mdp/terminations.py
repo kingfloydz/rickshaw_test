@@ -26,7 +26,7 @@ IMMEDIATE_CAUSES = (
     "non_finite",
     "illegal_body_contact",
     "wheel_lift",
-    "d6_constraint_failure",
+    "connection_constraint_failure",
     "joint_hard_limit",
 )
 TERMINATION_CAUSES = ("time_out", *IMMEDIATE_CAUSES, *PERSISTENT_CAUSES)
@@ -36,8 +36,8 @@ TERMINATION_CAUSES = ("time_out", *IMMEDIATE_CAUSES, *PERSISTENT_CAUSES)
 class ImmediateSafetyCfg:
     illegal_contact_force_threshold: float = MISSING
     wheel_lift_normal_force_threshold: float = MISSING
-    d6_residual_limit: float = MISSING
-    d6_impulse_limit: float = MISSING
+    connection_residual_limit: float = MISSING
+    connection_impulse_limit: float = MISSING
 
 
 @dataclass(kw_only=True)
@@ -221,14 +221,14 @@ def wheel_lift_violation(
     return torch.any(wheel_normal_force < lift_threshold, dim=-1)
 
 
-def d6_safety_violation(
+def connection_safety_violation(
     residual: torch.Tensor,
     impulse: torch.Tensor,
     residual_limit: float,
     impulse_limit: float,
 ) -> torch.Tensor:
     if residual_limit <= 0.0 or impulse_limit <= 0.0:
-        raise ValueError("D6 residual and impulse limits must be positive")
+        raise ValueError("connection residual and impulse limits must be positive")
     residual_value = torch.amax(residual.reshape(residual.shape[0], -1), dim=-1)
     impulse_value = torch.amax(torch.abs(impulse).reshape(impulse.shape[0], -1), dim=-1)
     return (residual_value > residual_limit) | (impulse_value > impulse_limit)
@@ -317,8 +317,8 @@ def non_finite_state(env: Any) -> torch.Tensor:
                 "hitch_height",
                 "hitch_vertical_speed",
                 "pitch",
-                "d6_residual",
-                "d6_impulse",
+                "connection_residual",
+                "connection_impulse",
                 "hand_force_w",
             ),
         ),
@@ -358,12 +358,12 @@ def wheel_lift(env: Any, threshold: float) -> torch.Tensor:
     return violation
 
 
-def d6_constraint_failure(
+def connection_constraint_failure(
     env: Any, residual_limit: float, impulse_limit: float
 ) -> torch.Tensor:
-    violation = d6_safety_violation(
-        env.rickshaw_state.d6_residual,
-        env.rickshaw_state.d6_impulse,
+    violation = connection_safety_violation(
+        env.rickshaw_state.connection_residual,
+        env.rickshaw_state.connection_impulse,
         residual_limit,
         impulse_limit,
     )
@@ -428,8 +428,8 @@ def immediate_safety_violation(
     wheel_violation = wheel_lift(
         env, cfg.wheel_lift_normal_force_threshold
     )
-    d6_violation = d6_constraint_failure(
-        env, cfg.d6_residual_limit, cfg.d6_impulse_limit
+    connection_violation = connection_constraint_failure(
+        env, cfg.connection_residual_limit, cfg.connection_impulse_limit
     )
     causes = torch.stack(
         (
@@ -438,7 +438,7 @@ def immediate_safety_violation(
                 env, illegal_contact_sensor_cfg, cfg.illegal_contact_force_threshold
             ),
             wheel_violation,
-            d6_violation,
+            connection_violation,
             joint_hard_limit(env, robot_asset_cfg),
         ),
         dim=-1,
@@ -458,8 +458,8 @@ __all__ = [
     "TerminationCauseState",
     "ROOT_NORMAL_HEIGHT_MIN",
     "contact_force_violation",
-    "d6_constraint_failure",
-    "d6_safety_violation",
+    "connection_constraint_failure",
+    "connection_safety_violation",
     "finite_tensor_violation",
     "hard_joint_limit_violation",
     "illegal_body_contact",

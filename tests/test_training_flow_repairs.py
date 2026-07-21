@@ -6,6 +6,7 @@ import sys
 import pytest
 import torch
 
+from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -25,8 +26,8 @@ from train_context import _normalize_shard, seed_s1_training  # noqa: E402
 
 def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
     return {
-        "current": torch.zeros(batch_size, 96),
-        "history": torch.zeros(batch_size, 61, 96),
+        "current": torch.zeros(batch_size, ACTOR_OBSERVATION_DIM),
+        "history": torch.zeros(batch_size, 61, ACTOR_OBSERVATION_DIM),
         "teacher_action_mean": torch.zeros(batch_size, ACTION_DIM),
         "teacher_action_std": torch.ones(batch_size, ACTION_DIM),
         "z_star": torch.zeros(batch_size, 16),
@@ -70,7 +71,7 @@ def test_formal_rollout_shard_accepts_only_canonical_tensor_shapes(tmp_path: Pat
 
     normalized = _normalize_shard(shard)
 
-    assert normalized["current"].shape == (2, 96)
+    assert normalized["current"].shape == (2, ACTOR_OBSERVATION_DIM)
     assert normalized["teacher_action_std"].shape == (2, ACTION_DIM)
 
 

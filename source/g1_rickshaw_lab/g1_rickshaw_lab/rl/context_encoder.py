@@ -12,6 +12,7 @@ from g1_rickshaw_lab.policy_schema import (
     ACTOR_OBSERVATION_DIM,
     DEFAULT_CONTEXT_DIM,
     HISTORY_LENGTH,
+    validate_history_length,
     validate_context_dim,
 )
 
@@ -19,6 +20,7 @@ OBSERVATION_DIM: Final[int] = ACTOR_OBSERVATION_DIM
 FEATURE_DIM: Final[int] = 64
 KERNEL_SIZE: Final[int] = 5
 DILATIONS: Final[tuple[int, ...]] = (1, 2, 4, 8)
+HISTORY_KERNEL_SIZES: Final[dict[int, int]] = {61: 5, 91: 7}
 
 
 def temporal_receptive_field(
@@ -32,13 +34,18 @@ def temporal_receptive_field(
 class CausalBlock(nn.Module):
     """One residual causal convolution and one channel-mixing projection."""
 
-    def __init__(self, channels: int, dilation: int) -> None:
+    def __init__(
+        self,
+        channels: int,
+        dilation: int,
+        kernel_size: int = KERNEL_SIZE,
+    ) -> None:
         super().__init__()
-        self.left_pad = (KERNEL_SIZE - 1) * dilation
+        self.left_pad = (kernel_size - 1) * dilation
         self.conv = nn.Conv1d(
             channels,
             channels,
-            kernel_size=KERNEL_SIZE,
+            kernel_size=kernel_size,
             dilation=dilation,
         )
         self.mix = nn.Conv1d(channels, channels, kernel_size=1)
@@ -53,10 +60,12 @@ def validate_history(
     *,
     feature_dim: int,
     name: str,
+    history_length: int = HISTORY_LENGTH,
 ) -> None:
-    if history.ndim != 3 or history.shape[1:] != (HISTORY_LENGTH, feature_dim):
+    history_length = validate_history_length(history_length)
+    if history.ndim != 3 or history.shape[1:] != (history_length, feature_dim):
         raise ValueError(
-            f"{name} must have shape [N, {HISTORY_LENGTH}, {feature_dim}], "
+            f"{name} must have shape [N, {history_length}, {feature_dim}], "
             f"got {tuple(history.shape)}"
         )
     if not history.is_floating_point():
@@ -66,22 +75,39 @@ def validate_history(
 class ContextEncoder(nn.Module):
     """Encode the preceding 61 actor observations into the selected latent."""
 
-    history_length: Final[int] = HISTORY_LENGTH
     observation_dim: Final[int] = OBSERVATION_DIM
     feature_dim: Final[int] = FEATURE_DIM
     receptive_field: Final[int] = temporal_receptive_field()
 
-    def __init__(self, latent_dim: int = DEFAULT_CONTEXT_DIM) -> None:
+    def __init__(
+        self,
+        latent_dim: int = DEFAULT_CONTEXT_DIM,
+        history_length: int = HISTORY_LENGTH,
+    ) -> None:
         super().__init__()
         self.latent_dim = validate_context_dim(latent_dim)
+        self.history_length = validate_history_length(history_length)
+        self.kernel_size = HISTORY_KERNEL_SIZES[self.history_length]
+        self.receptive_field = temporal_receptive_field(
+            self.kernel_size,
+            DILATIONS,
+        )
         self.input = nn.Conv1d(OBSERVATION_DIM, FEATURE_DIM, kernel_size=1)
         self.blocks = nn.Sequential(
-            *(CausalBlock(FEATURE_DIM, dilation) for dilation in DILATIONS)
+            *(
+                CausalBlock(FEATURE_DIM, dilation, self.kernel_size)
+                for dilation in DILATIONS
+            )
         )
         self.context = nn.Linear(FEATURE_DIM, self.latent_dim)
 
     def extract_feature(self, history: torch.Tensor) -> torch.Tensor:
-        validate_history(history, feature_dim=OBSERVATION_DIM, name="history")
+        validate_history(
+            history,
+            feature_dim=OBSERVATION_DIM,
+            name="history",
+            history_length=self.history_length,
+        )
         encoded = self.blocks(self.input(history.transpose(1, 2)))
         return encoded[:, :, -1]
 
@@ -96,6 +122,7 @@ __all__ = [
     "DEFAULT_CONTEXT_DIM",
     "DILATIONS",
     "FEATURE_DIM",
+    "HISTORY_KERNEL_SIZES",
     "HISTORY_LENGTH",
     "KERNEL_SIZE",
     "OBSERVATION_DIM",

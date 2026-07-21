@@ -1,4 +1,4 @@
-"""Regression tests for startup-fixed balanced slopes."""
+"""Regression tests for startup-fixed slope allocation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import torch
 
 from g1_rickshaw_lab.slope_contract import (
     SLOPE_COUNT,
+    SLOPE_GRADIENTS,
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
     TERRAIN_NUM_COLS,
@@ -16,6 +17,7 @@ from g1_rickshaw_lab.slope_contract import (
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import (
     balanced_slope_assignment,
     randomize_startup_slopes,
+    weighted_slope_assignment,
 )
 
 
@@ -31,7 +33,7 @@ def test_balanced_assignment_covers_every_configured_slope() -> None:
     assert int(torch.max(counts) - torch.min(counts)) <= 1
 
 
-def test_startup_randomizes_environment_mapping_without_changing_balance() -> None:
+def test_startup_randomizes_center_weighted_environment_mapping() -> None:
     num_envs = 8192
     terrain_origins = torch.arange(
         TERRAIN_NUM_ROWS * TERRAIN_NUM_COLS * 3, dtype=torch.float32
@@ -58,7 +60,15 @@ def test_startup_randomizes_environment_mapping_without_changing_balance() -> No
     counts = torch.tensor(
         [torch.all(pairs == pair, dim=-1).sum() for pair in expected_pairs]
     )
-    assert int(torch.max(counts) - torch.min(counts)) <= 1
+    expected_slots, _, _ = weighted_slope_assignment(
+        num_envs, device="cpu", shuffle=False
+    )
+    torch.testing.assert_close(
+        counts, torch.bincount(expected_slots, minlength=SLOPE_COUNT)
+    )
+    zero_index = SLOPE_GRADIENTS.index(0.0)
+    assert counts[zero_index] > counts[0]
+    assert counts[zero_index] > counts[-1]
     assert not torch.equal(
         terrain.terrain_levels[:SLOPE_COUNT],
         torch.tensor(SLOPE_TERRAIN_LEVELS),

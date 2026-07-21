@@ -15,11 +15,11 @@ setup(
     install_requires=[
         "torch",
         "numpy",
-        "mujoco>=3.3.6",
+        "mujoco==3.5.0",
         "mjlab==1.2.0",
         "mujoco-warp==3.5.0",
         "rsl-rl-lib==5.0.1",
-        "scipy",
+        "scipy>=1.15.0",
     ],
     extras_require={
         "test": ["pytest", "trimesh"],

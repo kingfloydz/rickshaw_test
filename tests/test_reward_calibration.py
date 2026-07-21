@@ -84,7 +84,7 @@ def _artifact(checkpoint: Path | None = None) -> dict:
         "runtime_versions": {
             "torch": "test",
             "rsl_rl": "test",
-            "isaaclab": "test",
+            "mjlab": "test",
         },
         "c1_physics": {
             name: {"minimum": value, "maximum": value}
@@ -236,50 +236,6 @@ def test_c1_snapshot_requires_every_field_at_its_nominal_value() -> None:
         )
 
 
-def test_runtime_snapshot_reads_fixed_d6_nominals_from_constraint_cfg() -> None:
-    d6_fields = (
-        "linear_stiffness",
-        "linear_damping",
-        "angular_stiffness",
-        "angular_damping",
-        "max_force",
-        "max_torque",
-        "linear_limit",
-        "angular_limit",
-    )
-    d6_values = {name: float(index + 2) for index, name in enumerate(d6_fields)}
-    domain_nominal = {
-        "torso.mass_delta": 0.0,
-        "payload.mass": 1.0,
-        "payload.com.x": 1.0,
-        "payload.com.y": 1.0,
-        "payload.com.z": 1.0,
-        "rolling_resistance.c_rr": 1.0,
-        "terrain.friction": 1.0,
-        "wheel.left_damping": 1.0,
-        "wheel.right_damping": 1.0,
-    }
-    ones = torch.ones(2)
-    base_env = SimpleNamespace(
-        cfg=SimpleNamespace(
-            domain_randomization=SimpleNamespace(nominal=domain_nominal)
-        ),
-        num_envs=2,
-        device="cpu",
-        d6_constraint_manager=SimpleNamespace(cfg=SimpleNamespace(**d6_values)),
-        torso_mass_delta=torch.zeros(2),
-        _payload_mass=ones,
-        _payload_com=torch.ones(2, 3),
-        c_rr=ones,
-        terrain_friction=ones,
-        _wheel_damping=torch.ones(2, 2),
-    )
-
-    _, nominal = _physics_snapshot(base_env)
-
-    assert {name: nominal[f"d6.{name}"] for name in d6_fields} == d6_values
-
-
 def test_report_recomputes_statistics_from_bound_raw_samples(tmp_path: Path) -> None:
     checkpoint = tmp_path / "teacher.pt"
     checkpoint.write_bytes(b"teacher")
@@ -324,8 +280,8 @@ def test_reward_report_uses_one_stable_path(tmp_path: Path) -> None:
 def test_reward_normalization_constants_match_runtime() -> None:
     assert rewards.REWARD_NORMALIZATION_SCALES == GUIDE_REWARD_NORMALIZATION_SCALES
     assert set(rewards.REWARD_WEIGHTS) == set(GUIDE_REWARD_TERMS)
-    assert rewards.REWARD_WEIGHTS["zmp_margin_barrier"] == pytest.approx(-2.0)
-    assert rewards.REWARD_WEIGHTS["fat2_prior_exp"] == pytest.approx(0.1)
+    assert rewards.REWARD_WEIGHTS["zmp_margin_barrier"] == pytest.approx(0.0)
+    assert rewards.REWARD_WEIGHTS["fat2_prior_exp"] == pytest.approx(0.0)
     power = rewards.joint_power_l1_value(
         torch.tensor([[2.0, -3.0]]), torch.tensor([[4.0, 5.0]])
     )

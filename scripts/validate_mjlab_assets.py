@@ -13,6 +13,7 @@ from g1_rickshaw_lab.assets import (
     validate_g1_urdf,
     validate_rickshaw_urdf,
 )
+from g1_rickshaw_lab.assets.rickshaw import TOW_ROD_COLLISION_GEOM_NAMES
 from g1_rickshaw_lab.project_paths import ASSET_ROOT
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.closed_chain import (
     build_assembled_spec,
@@ -51,7 +52,18 @@ def main() -> int:
     report = {
         "status": "passed" if not issues else "failed",
         "issues": issues,
-        "model": {"nq": model.nq, "nv": model.nv, "njnt": model.njnt, "neq": model.neq},
+        "model": {
+            "nq": model.nq,
+            "nv": model.nv,
+            "njnt": model.njnt,
+            "ngeom": model.ngeom,
+            "neq": model.neq,
+        },
+        "collision_filter": {
+            "g1_rickshaw_pairs": "tow_rods_only",
+            "tow_rod_geoms": list(TOW_ROD_COLLISION_GEOM_NAMES),
+            "gripper_rickshaw_collision": False,
+        },
         "hitches": hitch_mesh_evidence(),
     }
     with open(args.output, "w", encoding="utf-8") as stream:

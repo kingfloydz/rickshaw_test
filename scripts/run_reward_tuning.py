@@ -15,7 +15,7 @@ import sys
 import threading
 from typing import Any
 
-from _isaaclab_wrappers import REPOSITORY_ROOT, add_project_source_to_path
+from _mjlab_wrappers import REPOSITORY_ROOT, add_project_source_to_path
 
 add_project_source_to_path()
 
@@ -40,11 +40,10 @@ from g1_rickshaw_lab.reward_tuning import (  # noqa: E402
     policy_diagnostic_rank_metrics,
 )
 from g1_rickshaw_lab.training_contract import (  # noqa: E402
-    CHECKPOINT_STAGE_KEY,
     TRAINING_CONFIGURATION_KEY,
     load_stage_checkpoint,
 )
-from g1_rickshaw_lab.validation import utc_timestamp, write_json_atomic  # noqa: E402
+from g1_rickshaw_lab.artifact_io import utc_timestamp, write_json_atomic  # noqa: E402
 
 
 DEFAULT_CONFIG = REPOSITORY_ROOT / "config" / "reward_tuning.yaml"
@@ -184,6 +183,8 @@ def _checkpoint(
         "fat2_weight": fixed["fat2_weight"],
         "rollout_steps": fixed["rollout_steps"],
         "latent_dim": fixed["latent_dim"],
+        "history_length": 61,
+        "stability_reward_curriculum": False,
     }
     records: list[multi_gpu.CheckpointRecord] = []
     for path in directory.rglob("model_*.pt"):
@@ -246,6 +247,7 @@ def _valid_diagnostic(
             and evaluation["fat2_weight"] == config["fixed"]["fat2_weight"]
             and evaluation["rollout_steps"] == config["fixed"]["rollout_steps"]
             and evaluation["latent_dim"] == config["fixed"]["latent_dim"]
+            and evaluation.get("history_length", 61) == 61
             and evaluation["reward_weight_overrides"]
             == job.profile["reward_weight_overrides"]
             and path.stat().st_mtime_ns >= checkpoint.stat().st_mtime_ns
@@ -482,9 +484,10 @@ def _run_job(
 
 
 def _validate_runtime(args: argparse.Namespace) -> None:
-    isaaclab = os.environ.get("ISAACLAB_PATH")
-    if not isaaclab or not Path(isaaclab).is_dir():
-        raise RuntimeError("ISAACLAB_PATH must name the existing IsaacLab checkout")
+    import importlib.util
+
+    if importlib.util.find_spec("mjlab") is None:
+        raise RuntimeError("mjlab==1.2.0 is not installed")
     if args.output_dir.exists() and not args.resume and any(args.output_dir.iterdir()):
         raise RuntimeError("output directory is not empty; use --resume")
 

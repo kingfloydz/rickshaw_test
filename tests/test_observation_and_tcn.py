@@ -1,4 +1,4 @@
-"""Acceptance tests for the fixed 96-D observation and sole causal history."""
+"""Acceptance tests for the fixed actor observation and causal history."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import rewards
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations import (
     ACTOR_OBSERVATION_DIM,
     BASE_ANGULAR_VELOCITY_SLICE,
+    GAIT_PHASE_SLICE,
     HISTORY_LENGTH,
     JOINT_POSITION_SLICE,
     JOINT_VELOCITY_SLICE,
@@ -33,7 +34,7 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.observations impo
 )
 
 
-def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
+def test_actor_observation_has_the_fixed_scaled_order() -> None:
     dtype = torch.float64
     angular_velocity = torch.tensor([[4.0, -2.0, 1.0]], dtype=dtype)
     gravity = torch.tensor([[0.1, 0.2, -0.9]], dtype=dtype)
@@ -45,6 +46,7 @@ def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
     joint_position = q_ref + position_error
     joint_velocity = torch.linspace(-2.0, 2.0, 29, dtype=dtype).unsqueeze(0)
     previous_processed_action = torch.linspace(-0.5, 0.5, 29, dtype=dtype).unsqueeze(0)
+    gait_phase = torch.tensor([[0.0, 1.0]], dtype=dtype)
 
     observation = assemble_actor_observation(
         angular_velocity,
@@ -56,10 +58,11 @@ def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
         q_ref,
         joint_velocity,
         previous_processed_action,
+        gait_phase,
     )
 
     assert observation.shape == (1, ACTOR_OBSERVATION_DIM)
-    assert ACTOR_OBSERVATION_DIM == 96
+    assert ACTOR_OBSERVATION_DIM == 98
     torch.testing.assert_close(
         observation[:, BASE_ANGULAR_VELOCITY_SLICE], angular_velocity * 0.25
     )
@@ -75,6 +78,7 @@ def test_actor_observation_is_exactly_96d_in_fixed_scaled_order() -> None:
     torch.testing.assert_close(
         observation[:, PREVIOUS_ACTION_SLICE], previous_processed_action
     )
+    torch.testing.assert_close(observation[:, GAIT_PHASE_SLICE], gait_phase)
 
 
 def test_observation_and_reward_interfaces_do_not_read_v_sample() -> None:
@@ -88,24 +92,31 @@ def test_observation_and_reward_interfaces_do_not_read_v_sample() -> None:
         command_state=command,
         policy_robot_speed_s=torch.tensor([0.5], dtype=torch.float64),
     )
-    before = rewards.track_speed_exp(env)
+    lateral_speed = torch.zeros_like(env.policy_robot_speed_s)
+    before = rewards.track_speed_exp_value(
+        env.command_state.v_ref, env.policy_robot_speed_s, lateral_speed
+    )
     command.v_sample[:] = -100.0
-    after_sample_change = rewards.track_speed_exp(env)
+    after_sample_change = rewards.track_speed_exp_value(
+        env.command_state.v_ref, env.policy_robot_speed_s, lateral_speed
+    )
     torch.testing.assert_close(before, after_sample_change)
     command.v_ref[:] = 0.5
-    after_reference_change = rewards.track_speed_exp(env)
+    after_reference_change = rewards.track_speed_exp_value(
+        env.command_state.v_ref, env.policy_robot_speed_s, lateral_speed
+    )
     assert after_reference_change.item() > before.item()
 
 
-def test_history_is_61x96_and_explicitly_excludes_current() -> None:
+def test_history_excludes_current_observation() -> None:
     state = ObservationHistoryState.zeros(1, dtype=torch.float64)
-    first = torch.full((1, 96), 10.0, dtype=torch.float64)
-    second = torch.full((1, 96), 20.0, dtype=torch.float64)
-    third = torch.full((1, 96), 30.0, dtype=torch.float64)
+    first = torch.full((1, ACTOR_OBSERVATION_DIM), 10.0, dtype=torch.float64)
+    second = torch.full((1, ACTOR_OBSERVATION_DIM), 20.0, dtype=torch.float64)
+    third = torch.full((1, ACTOR_OBSERVATION_DIM), 30.0, dtype=torch.float64)
 
     state.advance(first)
     assert state.history.shape == (1, HISTORY_LENGTH, ACTOR_OBSERVATION_DIM)
-    assert (HISTORY_LENGTH, ACTOR_OBSERVATION_DIM) == (61, 96)
+    assert (HISTORY_LENGTH, ACTOR_OBSERVATION_DIM) == (61, 98)
     torch.testing.assert_close(state.history, first[:, None, :].expand(-1, 61, -1))
     torch.testing.assert_close(state.current, first)
 
@@ -156,11 +167,12 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
         assert len(dilated_convolutions) == 1
         assert dilated_convolutions[0].stride == (1,)
 
-    assert encoder(torch.zeros(2, 61, 96)).shape == (2, 16)
-    with pytest.raises(ValueError, match=r"\[N, 61, 96\]"):
-        encoder(torch.zeros(2, 60, 96))
-    with pytest.raises(ValueError, match=r"\[N, 61, 96\]"):
-        encoder(torch.zeros(2, 61, 95))
+    assert encoder(torch.zeros(2, 61, ACTOR_OBSERVATION_DIM)).shape == (2, 16)
+    expected_shape = rf"\[N, 61, {ACTOR_OBSERVATION_DIM}\]"
+    with pytest.raises(ValueError, match=expected_shape):
+        encoder(torch.zeros(2, 60, ACTOR_OBSERVATION_DIM))
+    with pytest.raises(ValueError, match=expected_shape):
+        encoder(torch.zeros(2, 61, ACTOR_OBSERVATION_DIM - 1))
 
     student = G1RickshawStudentActor()
     history_encoders = [
@@ -178,8 +190,8 @@ def test_tcn_schema_receptive_field_and_single_history_path() -> None:
 def test_fixed_teacher_and_student_context_interfaces() -> None:
     teacher = G1RickshawTeacherActor().eval()
     student = G1RickshawStudentActor().eval()
-    current = torch.zeros(2, 96)
-    observation_history = torch.zeros(2, 61, 96)
+    current = torch.zeros(2, ACTOR_OBSERVATION_DIM)
+    observation_history = torch.zeros(2, 61, ACTOR_OBSERVATION_DIM)
     dynamic_history = torch.zeros(2, 61, 21)
     static_privilege = torch.zeros(2, 10)
     with torch.no_grad():
@@ -198,8 +210,8 @@ def test_fixed_teacher_and_student_context_interfaces() -> None:
     assert student_context.shape == (2, 16)
     assert teacher_distribution.mean.shape == (2, 29)
     assert student_distribution.mean.shape == (2, 29)
-    assert teacher.actor.network[0].in_features == 96 + 16
-    assert student.actor.network[0].in_features == 96 + 16
+    assert teacher.actor.network[0].in_features == ACTOR_OBSERVATION_DIM + 16
+    assert student.actor.network[0].in_features == ACTOR_OBSERVATION_DIM + 16
     assert not hasattr(teacher, "context_projection")
     assert not hasattr(student, "context_projection")
     assert not any("aux" in name for name, _ in teacher.named_modules())
@@ -210,8 +222,8 @@ def test_fixed_teacher_and_student_context_interfaces() -> None:
 def test_teacher_and_student_use_the_selected_latent_width(latent_dim: int) -> None:
     teacher = G1RickshawTeacherActor(latent_dim).eval()
     student = G1RickshawStudentActor(latent_dim).eval()
-    current = torch.zeros(2, 96)
-    history = torch.zeros(2, 61, 96)
+    current = torch.zeros(2, ACTOR_OBSERVATION_DIM)
+    history = torch.zeros(2, 61, ACTOR_OBSERVATION_DIM)
     with torch.no_grad():
         teacher_distribution, teacher_context = teacher.forward_with_context(
             current,
@@ -224,8 +236,8 @@ def test_teacher_and_student_use_the_selected_latent_width(latent_dim: int) -> N
         )
 
     assert teacher_context.shape == student_context.shape == (2, latent_dim)
-    assert teacher.actor.network[0].in_features == 96 + latent_dim
-    assert student.actor.network[0].in_features == 96 + latent_dim
+    assert teacher.actor.network[0].in_features == ACTOR_OBSERVATION_DIM + latent_dim
+    assert student.actor.network[0].in_features == ACTOR_OBSERVATION_DIM + latent_dim
     assert set(teacher.actor.state_dict()) == set(student.actor.state_dict())
     assert teacher_distribution.mean.shape == student_distribution.mean.shape == (2, 29)
 
@@ -237,7 +249,7 @@ def test_tcn_oldest_frame_is_used_but_outside_and_future_frames_are_causal() -> 
             parameter.fill_(0.01)
 
     # At output index 61 the exact 61-frame receptive field is input 1..61.
-    probe = torch.full((1, 62, 96), 0.01)
+    probe = torch.full((1, 62, ACTOR_OBSERVATION_DIM), 0.01)
     outside_perturbed = probe.clone()
     outside_perturbed[:, 0] += 10.0
     with torch.no_grad():
@@ -258,8 +270,8 @@ def test_tcn_oldest_frame_is_used_but_outside_and_future_frames_are_causal() -> 
         oldest_context = encoder.context(oldest_feature)
     assert not torch.allclose(base_context, oldest_context)
 
-    prefix = torch.randn(1, 61, 96)
-    future = torch.randn(1, 7, 96)
+    prefix = torch.randn(1, 61, ACTOR_OBSERVATION_DIM)
+    future = torch.randn(1, 7, ACTOR_OBSERVATION_DIM)
     with torch.no_grad():
         prefix_outputs = encoder.blocks(encoder.input(prefix.transpose(1, 2)))
         extended_outputs = encoder.blocks(

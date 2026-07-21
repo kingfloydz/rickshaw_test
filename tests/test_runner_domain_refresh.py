@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import g1_rickshaw_lab.training_contract as contract
+from g1_rickshaw_lab.rl.runner import RunnerContext, create_rickshaw_runner_type
 
 
 class _FakeAlgorithm:
@@ -28,8 +27,8 @@ class _FakeAlgorithm:
 class _RewardManager:
     def __init__(self) -> None:
         self.terms = {
-            "fat2_prior_exp": SimpleNamespace(weight=0.1),
-            "zmp_margin_barrier": SimpleNamespace(weight=-2.0),
+            "fat2_prior_exp": SimpleNamespace(weight=0.2),
+            "zmp_margin_barrier": SimpleNamespace(weight=-1.0),
         }
 
     def get_term_cfg(self, name: str) -> SimpleNamespace:
@@ -82,34 +81,22 @@ def _install_fake_runner(
         def export_policy_to_onnx(self, *args: Any, **kwargs: Any) -> None:
             del args, kwargs
 
-    runners_module = ModuleType("rsl_rl.runners")
-    runners_module.OnPolicyRunner = FakeOnPolicyRunner
-    package_module = ModuleType("rsl_rl")
-    package_module.runners = runners_module
-    monkeypatch.setitem(sys.modules, "rsl_rl", package_module)
-    monkeypatch.setitem(sys.modules, "rsl_rl.runners", runners_module)
-    monkeypatch.setenv("G1_RICKSHAW_RUNNER_HOOK", "1")
-    monkeypatch.setenv("G1_RICKSHAW_CHECKPOINT_STAGE", "s0_teacher")
-    monkeypatch.setenv("G1_RICKSHAW_CHECKPOINT_LINEAGE", "{}")
-
+    del monkeypatch
     configuration = {
         "training_parameters": {
-            "fat2_weight": 0.1,
+            "fat2_weight": 0.0,
             "rollout_steps": rollout_steps,
             "latent_dim": 16,
+            "history_length": 61,
             "stability_reward_curriculum": stability_reward_curriculum,
         }
     }
-    monkeypatch.setenv("G1_RICKSHAW_TRAINING_CONFIGURATION", json.dumps(configuration))
-    monkeypatch.setattr(
-        contract,
-        "validate_guide_training_configuration",
-        lambda value, **kwargs: value,
+    context = RunnerContext(
+        stage="s0_teacher",
+        training_configuration=configuration,
+        metadata=object(),
     )
-    monkeypatch.setattr(contract, "require_pinned_rsl_rl", lambda: None)
-    monkeypatch.setattr(contract, "collect_runtime_metadata", lambda: object())
-    contract.install_runner_hooks_from_environment()
-    return FakeOnPolicyRunner
+    return create_rickshaw_runner_type(context, base_runner_type=FakeOnPolicyRunner)
 
 
 def test_runner_never_resamples_or_resets_fixed_startup_domain(
@@ -143,6 +130,6 @@ def test_stability_rewards_enable_once_logged_mean_length_exceeds_500(
     runner.logger.lenbuffer[:] = [501.0]
     runner.alg.update()
     assert runner._g1_stability_rewards_active is True
-    assert env.reward_manager.get_term_cfg("fat2_prior_exp").weight == 0.1
-    assert env.reward_manager.get_term_cfg("zmp_margin_barrier").weight == -2.0
+    assert env.reward_manager.get_term_cfg("fat2_prior_exp").weight == 0.2
+    assert env.reward_manager.get_term_cfg("zmp_margin_barrier").weight == -1.0
     assert env.global_reset_calls == 1

@@ -19,7 +19,7 @@ from typing import Any
 from .configuration import FIXED_G1_JOINT_ORDER, validate_joint_order
 
 
-PROVENANCE_SCHEMA_VERSION = 2
+PROVENANCE_SCHEMA_VERSION = 3
 CHECKPOINT_METADATA_KEY = "g1_rickshaw_provenance"
 RSL_RL_VERSION = "5.0.1"
 CUDA_NOT_AVAILABLE = "none"
@@ -39,7 +39,7 @@ def _require_torch():
     except ModuleNotFoundError as exc:
         raise ProvenanceDependencyError(
             "PyTorch is required for G1 rickshaw checkpoint IO and runtime provenance; "
-            "install the PyTorch build required by Isaac Lab."
+            "install the PyTorch build required by Mjlab."
         ) from exc
     return torch
 
@@ -54,8 +54,8 @@ def _required_text(value: Any, path: str) -> str:
 class CheckpointMetadata:
     """The immutable policy ABI persisted under ``CHECKPOINT_METADATA_KEY``."""
 
-    isaac_sim_version: str
-    isaaclab_version: str
+    mujoco_version: str
+    mjlab_version: str
     pytorch_version: str
     cuda_version: str
     joint_order: tuple[str, ...] = FIXED_G1_JOINT_ORDER
@@ -72,8 +72,8 @@ class CheckpointMetadata:
                 f"unsupported provenance schema_version={self.schema_version!r}; "
                 f"expected {PROVENANCE_SCHEMA_VERSION}"
             )
-        isaac_sim_version = _required_text(self.isaac_sim_version, "isaac_sim_version")
-        isaaclab_version = _required_text(self.isaaclab_version, "isaaclab_version")
+        mujoco_version = _required_text(self.mujoco_version, "mujoco_version")
+        mjlab_version = _required_text(self.mjlab_version, "mjlab_version")
         pytorch_version = _required_text(self.pytorch_version, "pytorch_version")
         cuda_version = _required_text(self.cuda_version, "cuda_version")
         rsl_rl_version = _required_text(self.rsl_rl_version, "rsl_rl_version")
@@ -83,8 +83,8 @@ class CheckpointMetadata:
                 f"project requires {RSL_RL_VERSION!r}"
             )
         joint_order = validate_joint_order(self.joint_order, path="checkpoint joint_order")
-        object.__setattr__(self, "isaac_sim_version", isaac_sim_version)
-        object.__setattr__(self, "isaaclab_version", isaaclab_version)
+        object.__setattr__(self, "mujoco_version", mujoco_version)
+        object.__setattr__(self, "mjlab_version", mjlab_version)
         object.__setattr__(self, "pytorch_version", pytorch_version)
         object.__setattr__(self, "cuda_version", cuda_version)
         object.__setattr__(self, "rsl_rl_version", rsl_rl_version)
@@ -96,8 +96,8 @@ class CheckpointMetadata:
             raise ProvenanceError("checkpoint provenance metadata must be a mapping")
         expected = {
             "schema_version",
-            "isaac_sim_version",
-            "isaaclab_version",
+            "mujoco_version",
+            "mjlab_version",
             "rsl_rl_version",
             "pytorch_version",
             "cuda_version",
@@ -115,8 +115,8 @@ class CheckpointMetadata:
             raise ProvenanceError("invalid checkpoint provenance fields: " + ", ".join(details))
         return cls(
             schema_version=value["schema_version"],
-            isaac_sim_version=value["isaac_sim_version"],
-            isaaclab_version=value["isaaclab_version"],
+            mujoco_version=value["mujoco_version"],
+            mjlab_version=value["mjlab_version"],
             rsl_rl_version=value["rsl_rl_version"],
             pytorch_version=value["pytorch_version"],
             cuda_version=value["cuda_version"],
@@ -126,8 +126,8 @@ class CheckpointMetadata:
     def to_mapping(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "isaac_sim_version": self.isaac_sim_version,
-            "isaaclab_version": self.isaaclab_version,
+            "mujoco_version": self.mujoco_version,
+            "mjlab_version": self.mjlab_version,
             "rsl_rl_version": self.rsl_rl_version,
             "pytorch_version": self.pytorch_version,
             "cuda_version": self.cuda_version,
@@ -135,23 +135,21 @@ class CheckpointMetadata:
         }
 
 
-def discover_isaac_sim_version() -> str:
-    """Discover Isaac Sim's version without importing or starting Kit."""
+def discover_mujoco_version() -> str:
+    """Return the active MuJoCo runtime version."""
 
-    environment_value = os.environ.get("ISAAC_SIM_VERSION")
+    environment_value = os.environ.get("MUJOCO_VERSION")
     if environment_value:
-        return _required_text(environment_value, "ISAAC_SIM_VERSION")
-    for distribution in ("isaacsim", "isaac-sim", "isaac_sim"):
-        try:
-            version = importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-        if version:
-            return version
-    raise ProvenanceError(
-        "cannot determine Isaac Sim version; pass isaac_sim_version explicitly or set "
-        "ISAAC_SIM_VERSION inside the Isaac Sim environment"
-    )
+        return _required_text(environment_value, "MUJOCO_VERSION")
+    try:
+        module = importlib.import_module("mujoco")
+    except (ImportError, ModuleNotFoundError):
+        version = None
+    else:
+        version = getattr(module, "__version__", None)
+    if version is None:
+        raise ProvenanceError("cannot determine the MuJoCo version")
+    return _required_text(version, "MuJoCo version")
 
 
 def _discover_package_version(distribution: str, module_name: str) -> str | None:
@@ -168,19 +166,16 @@ def _discover_package_version(distribution: str, module_name: str) -> str | None
     return getattr(module, "__version__", None)
 
 
-def discover_isaaclab_version() -> str:
-    """Discover the installed Isaac Lab release without inspecting Git state."""
+def discover_mjlab_version() -> str:
+    """Return the active Mjlab runtime version."""
 
-    environment_value = os.environ.get("ISAACLAB_VERSION")
+    environment_value = os.environ.get("MJLAB_VERSION")
     if environment_value:
-        return _required_text(environment_value, "ISAACLAB_VERSION")
-    version = _discover_package_version("isaaclab", "isaaclab")
+        return _required_text(environment_value, "MJLAB_VERSION")
+    version = _discover_package_version("mjlab", "mjlab")
     if version is None:
-        raise ProvenanceError(
-            "cannot determine Isaac Lab version; pass isaaclab_version explicitly or set "
-            "ISAACLAB_VERSION inside the Isaac Lab environment"
-        )
-    return _required_text(version, "Isaac Lab version")
+        raise ProvenanceError("cannot determine the Mjlab version")
+    return _required_text(version, "Mjlab version")
 
 
 def discover_rsl_rl_version() -> str:
@@ -215,23 +210,23 @@ def torch_cuda_versions() -> tuple[str, str]:
 
 def collect_checkpoint_metadata(
     *,
-    isaac_sim_version: str | None = None,
-    isaaclab_version: str | None = None,
+    mujoco_version: str | None = None,
+    mjlab_version: str | None = None,
     rsl_rl_version: str | None = None,
     joint_order: Sequence[str] = FIXED_G1_JOINT_ORDER,
 ) -> CheckpointMetadata:
     """Collect the runtime versions and joint order needed to reload a policy."""
 
     torch_version, cuda_version = torch_cuda_versions()
-    resolved_isaac_sim = (
-        discover_isaac_sim_version()
-        if isaac_sim_version is None
-        else _required_text(isaac_sim_version, "isaac_sim_version")
+    resolved_mujoco = (
+        discover_mujoco_version()
+        if mujoco_version is None
+        else _required_text(mujoco_version, "mujoco_version")
     )
-    resolved_isaaclab_version = (
-        discover_isaaclab_version()
-        if isaaclab_version is None
-        else _required_text(isaaclab_version, "isaaclab_version")
+    resolved_mjlab = (
+        discover_mjlab_version()
+        if mjlab_version is None
+        else _required_text(mjlab_version, "mjlab_version")
     )
     resolved_rsl_rl_version = (
         discover_rsl_rl_version()
@@ -239,8 +234,8 @@ def collect_checkpoint_metadata(
         else _required_text(rsl_rl_version, "rsl_rl_version").removeprefix("v")
     )
     return CheckpointMetadata(
-        isaac_sim_version=resolved_isaac_sim,
-        isaaclab_version=resolved_isaaclab_version,
+        mujoco_version=resolved_mujoco,
+        mjlab_version=resolved_mjlab,
         rsl_rl_version=resolved_rsl_rl_version,
         pytorch_version=torch_version,
         cuda_version=cuda_version,
@@ -289,8 +284,8 @@ def validate_checkpoint_metadata(
     *,
     expected: CheckpointMetadata | Mapping[str, Any] | None = None,
     joint_order: Sequence[str] = FIXED_G1_JOINT_ORDER,
-    isaac_sim_version: str | None = None,
-    isaaclab_version: str | None = None,
+    mujoco_version: str | None = None,
+    mjlab_version: str | None = None,
     pytorch_version: str | None = None,
     cuda_version: str | None = None,
     validate_torch_runtime: bool = False,
@@ -315,8 +310,8 @@ def validate_checkpoint_metadata(
         )
         if parsed.to_mapping() != expected_parsed.to_mapping():
             fields = (
-                "isaac_sim_version",
-                "isaaclab_version",
+                "mujoco_version",
+                "mjlab_version",
                 "rsl_rl_version",
                 "pytorch_version",
                 "cuda_version",
@@ -327,17 +322,17 @@ def validate_checkpoint_metadata(
             ]
             raise ProvenanceError(f"checkpoint metadata differs from expected fields: {differing}")
 
-    if isaac_sim_version is not None:
+    if mujoco_version is not None:
         _assert_equal(
-            "Isaac Sim version",
-            parsed.isaac_sim_version,
-            _required_text(isaac_sim_version, "isaac_sim_version"),
+            "MuJoCo version",
+            parsed.mujoco_version,
+            _required_text(mujoco_version, "mujoco_version"),
         )
-    if isaaclab_version is not None:
+    if mjlab_version is not None:
         _assert_equal(
-            "Isaac Lab version",
-            parsed.isaaclab_version,
-            _required_text(isaaclab_version, "isaaclab_version"),
+            "Mjlab version",
+            parsed.mjlab_version,
+            _required_text(mjlab_version, "mjlab_version"),
         )
     if validate_torch_runtime:
         runtime_torch, runtime_cuda = torch_cuda_versions()
@@ -379,7 +374,10 @@ def atomic_torch_save(value: Any, path: str | Path) -> Path:
     temporary = Path(temporary_name)
     try:
         torch.save(value, temporary)
-        with temporary.open("rb") as stream:
+        # Windows rejects fsync on a read-only descriptor; reopen writable
+        # after torch.save has closed its own handle.
+        with temporary.open("r+b") as stream:
+            stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
         try:
@@ -444,8 +442,8 @@ __all__ = [
     "atomic_torch_save",
     "attach_checkpoint_metadata",
     "collect_checkpoint_metadata",
-    "discover_isaac_sim_version",
-    "discover_isaaclab_version",
+    "discover_mjlab_version",
+    "discover_mujoco_version",
     "discover_rsl_rl_version",
     "extract_checkpoint_metadata",
     "load_checkpoint_with_validation",
