@@ -64,6 +64,25 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--output must end in .mp4")
 
 
+def _run_play_child(
+    launcher_arguments: list[str],
+    *,
+    runner_context: RunnerContext,
+    play_options: PlayOptions,
+) -> None:
+    previous_argv = sys.argv
+    sys.argv = [previous_argv[0], *launcher_arguments]
+    try:
+        run_isaaclab_rsl_rl(
+            "play",
+            launcher_arguments,
+            runner_context=runner_context,
+            play_options=play_options,
+        )
+    finally:
+        sys.argv = previous_argv
+
+
 def _label_video(
     source: Path,
     destination: Path,
@@ -255,8 +274,7 @@ def main() -> int:
     if args.headless:
         launcher_arguments.append("--headless")
     try:
-        run_isaaclab_rsl_rl(
-            "play",
+        _run_play_child(
             launcher_arguments,
             runner_context=runner_context,
             play_options=play_options,
