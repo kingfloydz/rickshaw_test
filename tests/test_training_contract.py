@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM
+
 from g1_rickshaw_lab.training_contract import (
     DISTILLATION_ROLLOUT_STEPS,
     GUIDE_MAX_ITERATIONS,
@@ -35,7 +37,7 @@ def test_mainline_has_fixed_stage_budgets_and_19_slopes() -> None:
     assert guide_max_iterations("s0_teacher") == 2600
     assert GUIDE_TRAINING_PARAMETERS["s0_teacher"] == {
         "domain_randomization": "startup_fixed",
-        "terrain_slopes": "startup_balanced_fixed",
+        "terrain_slopes": "startup_center_weighted_fixed",
         "observation_noise": "unitree_g1_uniform",
     }
     with pytest.raises(ValueError, match="unknown training stage"):
@@ -134,20 +136,28 @@ def test_checkpoint_tensor_widths_match_the_recorded_latent(latent_dim: int) -> 
     student = {
         "model_state_dict": {
             "context_encoder.context.weight": torch.zeros(latent_dim, 64),
-            "actor.network.0.weight": torch.zeros(512, 96 + latent_dim),
+            "actor.network.0.weight": torch.zeros(
+                512, ACTOR_OBSERVATION_DIM + latent_dim
+            ),
         }
     }
     teacher = {
         "actor_state_dict": {
-            "encoder.context.weight": torch.zeros(latent_dim, 96),
-            "policy.network.0.weight": torch.zeros(512, 96 + latent_dim),
+            "encoder.context.weight": torch.zeros(latent_dim, ACTOR_OBSERVATION_DIM),
+            "policy.network.0.weight": torch.zeros(
+                512, ACTOR_OBSERVATION_DIM + latent_dim
+            ),
         }
     }
     validate_student_checkpoint_architecture(student, configuration)
     validate_teacher_checkpoint_architecture(teacher, configuration)
 
-    student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(512, 112)
+    student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(
+        512, ACTOR_OBSERVATION_DIM + 16
+    )
     if latent_dim == 16:
-        student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(512, 111)
+        student["model_state_dict"]["actor.network.0.weight"] = torch.zeros(
+            512, ACTOR_OBSERVATION_DIM + 15
+        )
     with pytest.raises(ValueError, match="recorded latent width"):
         validate_student_checkpoint_architecture(student, configuration)

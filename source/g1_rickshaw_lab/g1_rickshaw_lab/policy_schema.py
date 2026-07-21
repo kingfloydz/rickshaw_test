@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-
-ACTOR_OBSERVATION_DIM: Final[int] = 96
+ACTOR_OBSERVATION_DIM: Final[int] = 98
 HISTORY_LENGTH: Final[int] = 61
 SUPPORTED_HISTORY_LENGTHS: Final[tuple[int, ...]] = (61, 91)
 DEFAULT_CONTEXT_DIM: Final[int] = 16

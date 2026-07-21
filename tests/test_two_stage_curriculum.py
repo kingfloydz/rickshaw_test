@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from g1_rickshaw_lab.slope_contract import (
     SLOPE_COUNT,
@@ -17,12 +18,15 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.curricula import 
     balanced_slope_assignment,
     randomize_startup_slopes,
     speed_command_levels,
+    weighted_slope_assignment,
 )
 
 
 class _RewardManager:
     def __init__(self, reward: float, episode_length_s: float) -> None:
-        self._episode_sums = {"track_speed_exp": torch.tensor([reward * episode_length_s])}
+        self._episode_sums = {
+            "track_speed_exp": torch.tensor([reward * episode_length_s])
+        }
 
     @staticmethod
     def get_term_cfg(_name: str) -> SimpleNamespace:
@@ -60,7 +64,18 @@ def test_balanced_assignment_covers_every_configured_slope() -> None:
     assert int(torch.max(counts) - torch.min(counts)) <= 1
 
 
-def test_startup_randomizes_environment_mapping_without_changing_balance() -> None:
+def test_training_slope_assignment_tapers_from_level_ground() -> None:
+    slots, _, _ = weighted_slope_assignment(8192, device="cpu")
+    counts = torch.bincount(slots, minlength=SLOPE_COUNT)
+    flat_index = 8
+
+    assert torch.all(torch.diff(counts[: flat_index + 1]) >= 0)
+    assert torch.all(torch.diff(counts[flat_index:]) <= 0)
+    assert counts[flat_index] / counts[0] == pytest.approx(2.0, rel=0.02)
+    assert counts[flat_index] / counts[-1] == pytest.approx(2.0, rel=0.02)
+
+
+def test_startup_randomizes_environment_mapping_without_changing_distribution() -> None:
     num_envs = 8192
     terrain_origins = torch.arange(
         TERRAIN_NUM_ROWS * TERRAIN_NUM_COLS * 3, dtype=torch.float32
@@ -87,7 +102,10 @@ def test_startup_randomizes_environment_mapping_without_changing_balance() -> No
     counts = torch.tensor(
         [torch.all(pairs == pair, dim=-1).sum() for pair in expected_pairs]
     )
-    assert int(torch.max(counts) - torch.min(counts)) <= 1
+    expected_slots, _, _ = weighted_slope_assignment(num_envs, device="cpu")
+    torch.testing.assert_close(
+        counts, torch.bincount(expected_slots, minlength=SLOPE_COUNT)
+    )
     assert not torch.equal(
         terrain.terrain_levels[:SLOPE_COUNT],
         torch.tensor(SLOPE_TERRAIN_LEVELS),

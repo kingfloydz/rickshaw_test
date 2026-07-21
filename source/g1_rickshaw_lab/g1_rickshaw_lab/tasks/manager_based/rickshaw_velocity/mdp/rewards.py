@@ -6,8 +6,6 @@ from typing import Any
 
 import torch
 
-from g1_rickshaw_lab.policy_schema import ACTION_SCALE
-
 REWARD_WEIGHTS = {
     "track_speed_exp": 1.5,
     "lateral_error_l2": -0.5,
@@ -16,12 +14,12 @@ REWARD_WEIGHTS = {
     "hitch_height_exp": 0.5,
     "hitch_height_recovery_l2": -0.25,
     "fat2_prior_exp": 0.0,
-    "feet_gait": 0.5,
-    "feet_clearance": 0.75,
+    "feet_gait": 0.25,
+    "feet_swing_height": -20.0,
     "feet_slide": -0.20,
     "terrain_normal_velocity_l2": -0.25,
     "joint_power_l1": -2.0e-4,
-    "processed_action_rate_l2": -0.01,
+    "processed_action_rate_l2": -0.03,
     "hip_yaw_roll_reference_l2": -0.05,
     "pelvis_height_limits_l2": -1.0,
     "joint_position_limits": -1.0,
@@ -38,13 +36,10 @@ HITCH_HEIGHT_RECOVERY_DEADBAND_M = 0.05
 HITCH_HEIGHT_RECOVERY_SCALE_M = 0.05
 FAT2_ERROR_SCALE_RAD = 0.12
 MOVING_COMMAND_THRESHOLD_MPS = 0.05
-GAIT_PERIOD_S = 0.80
+GAIT_PERIOD_S = 1.20
 GAIT_PHASE_OFFSETS = (0.0, 0.5)
 GAIT_STANCE_THRESHOLD = 0.55
-FOOT_CLEARANCE_TARGET_M = 0.07
-FOOT_CLEARANCE_STD_M = 0.05
-FOOT_CLEARANCE_TANH_MULT = 2.0
-FEET_SLIDE_NORMALIZER_MPS = 1.0
+FOOT_SWING_HEIGHT_TARGET_M = 0.07
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
 HIP_YAW_ROLL_REFERENCE_SCALE_RAD = 0.20
@@ -65,8 +60,8 @@ REWARD_NORMALIZATION_SCALES = {
     },
     "fat2_prior_exp": {"scale": FAT2_ERROR_SCALE_RAD, "unit": "rad"},
     "feet_gait": {"scale": GAIT_PERIOD_S, "unit": "s"},
-    "feet_clearance": {"scale": FOOT_CLEARANCE_TARGET_M, "unit": "m"},
-    "feet_slide": {"scale": FEET_SLIDE_NORMALIZER_MPS, "unit": "m/s"},
+    "feet_swing_height": {"scale": FOOT_SWING_HEIGHT_TARGET_M, "unit": "m"},
+    "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {
         "scale": TERRAIN_NORMAL_VELOCITY_SCALE_MPS,
         "unit": "m/s",
@@ -93,8 +88,9 @@ def track_speed_exp_value(
     v_ref: torch.Tensor,
     v_robot_s: torch.Tensor,
     v_robot_l: torch.Tensor,
+    lateral_penalty_scale: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
-    velocity_error = torch.square(v_ref - v_robot_s) + torch.square(v_robot_l)
+    velocity_error = torch.square(v_ref - v_robot_s) + lateral_penalty_scale * torch.square(v_robot_l)
     return torch.exp(-velocity_error / SPEED_ERROR_SCALE_MPS**2)
 
 
@@ -108,9 +104,7 @@ def heading_error_l2_value(heading_error: torch.Tensor) -> torch.Tensor:
 
 
 def zmp_margin_barrier_value(zmp_margin: torch.Tensor) -> torch.Tensor:
-    return torch.square(
-        torch.relu(ZMP_MARGIN_SCALE_M - zmp_margin) / ZMP_MARGIN_SCALE_M
-    )
+    return torch.square(torch.relu(ZMP_MARGIN_SCALE_M - zmp_margin) / ZMP_MARGIN_SCALE_M)
 
 
 def hitch_height_exp_value(
@@ -118,9 +112,9 @@ def hitch_height_exp_value(
     target_height: float,
     two_wheel_contact: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.exp(
-        -torch.square((hitch_height - target_height) / HITCH_HEIGHT_ERROR_SCALE_M)
-    ) * two_wheel_contact.to(hitch_height.dtype)
+    return torch.exp(-torch.square((hitch_height - target_height) / HITCH_HEIGHT_ERROR_SCALE_M)) * two_wheel_contact.to(
+        hitch_height.dtype
+    )
 
 
 def hitch_height_recovery_l2_value(
@@ -153,9 +147,7 @@ def fat2_prior_exp_value(
 ) -> torch.Tensor:
     if sigma <= 0.0:
         raise ValueError("FAT2 sigma must be positive")
-    return torch.exp(-torch.square((torso_pitch - theta_fat) / sigma)) * valid.to(
-        torso_pitch.dtype
-    )
+    return torch.exp(-torch.square((torso_pitch - theta_fat) / sigma)) * valid.to(torso_pitch.dtype)
 
 
 def terrain_normal_velocity_l2_value(normal_velocity: torch.Tensor) -> torch.Tensor:
@@ -169,13 +161,10 @@ def joint_power_l1_value(torque: torch.Tensor, joint_velocity: torch.Tensor) -> 
 
 
 def processed_action_rate_l2_value(
-    target: torch.Tensor,
-    previous_target: torch.Tensor,
+    action: torch.Tensor,
+    previous_action: torch.Tensor,
 ) -> torch.Tensor:
-    if target.shape != previous_target.shape:
-        raise ValueError("processed action histories must have identical shapes")
-    action_scale = target.new_tensor(ACTION_SCALE)
-    return torch.mean(torch.square((target - previous_target) / action_scale), dim=-1)
+    return torch.sum(torch.square(action - previous_action), dim=-1)
 
 
 def hip_yaw_roll_reference_l2_value(
@@ -208,19 +197,21 @@ def feet_gait_value(
     return torch.sum(contact_match.to(episode_time_s.dtype), dim=-1) * moving.to(episode_time_s.dtype)
 
 
-def foot_clearance_reward_value(
+def feet_swing_height_value(
     foot_height: torch.Tensor,
-    foot_speed: torch.Tensor,
-    v_ref: torch.Tensor,
+    is_contact: torch.Tensor,
     *,
-    target_height: float = FOOT_CLEARANCE_TARGET_M,
-    std: float = FOOT_CLEARANCE_STD_M,
-    tanh_mult: float = FOOT_CLEARANCE_TANH_MULT,
+    target_height: float = FOOT_SWING_HEIGHT_TARGET_M,
 ) -> torch.Tensor:
-    height_error = torch.square(foot_height - target_height)
-    swing_weight = torch.tanh(tanh_mult * foot_speed)
-    reward = torch.exp(-torch.sum(height_error * swing_weight, dim=-1) / std)
-    return reward * (torch.abs(v_ref) > MOVING_COMMAND_THRESHOLD_MPS).to(reward.dtype)
+    height_error = torch.square(foot_height - target_height) * ~is_contact
+    return torch.sum(height_error, dim=-1)
+
+
+def feet_slide_value(
+    foot_velocity: torch.Tensor,
+    is_contact: torch.Tensor,
+) -> torch.Tensor:
+    return torch.sum(torch.square(foot_velocity) * is_contact[..., None], dim=(1, 2))
 
 
 def pelvis_height_limits_l2_value(
@@ -240,10 +231,12 @@ def pelvis_height_limits_l2_value(
 
 
 def track_speed_exp(env: Any) -> torch.Tensor:
+    command_cfg = env.cfg.policy_update.command_sampling
     return track_speed_exp_value(
         env.command_state.v_ref,
         env.policy_robot_speed_s,
         env.policy_robot_speed_l,
+        command_cfg.maximum / command_cfg.limit_maximum,
     )
 
 
@@ -314,24 +307,26 @@ def feet_gait(
     )
 
 
-def feet_clearance(
+def feet_swing_height(
     env: Any,
+    sensor_cfg: Any | None = None,
     asset_cfg: Any | None = None,
 ) -> torch.Tensor:
+    sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
+    sensor = env.scene[sensor_name]
+    sensor_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
+    is_contact = torch.linalg.vector_norm(sensor.data.net_forces_w[:, sensor_ids], dim=-1) > 1.0
+
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
     body_ids = _resolve_body_ids(asset_cfg, env.foot_body_ids)
     terrain_origin_w = env.scene.terrain.env_origins
     foot_position = robot.data.body_pos_w[:, body_ids]
-    foot_velocity = robot.data.body_lin_vel_w[:, body_ids]
     foot_height = torch.sum(
         (foot_position - terrain_origin_w[:, None, :]) * env.path_normal_w[:, None, :],
         dim=-1,
     )
-    velocity_s = torch.sum(foot_velocity * env.path_tangent_w[:, None, :], dim=-1)
-    velocity_l = torch.sum(foot_velocity * env.path_lateral_w[:, None, :], dim=-1)
-    foot_speed = torch.sqrt(torch.square(velocity_s) + torch.square(velocity_l))
-    return foot_clearance_reward_value(foot_height, foot_speed, env.command_state.v_ref)
+    return feet_swing_height_value(foot_height, is_contact)
 
 
 def feet_slide(
@@ -339,24 +334,15 @@ def feet_slide(
     sensor_cfg: Any | None = None,
     asset_cfg: Any | None = None,
 ) -> torch.Tensor:
-    """Sum slope-plane foot speed for feet that are currently in contact."""
-
     sensor_name = "robot_contacts" if sensor_cfg is None else getattr(sensor_cfg, "name", "robot_contacts")
     sensor = env.scene[sensor_name]
     sensor_ids = _resolve_body_ids(sensor_cfg, env.foot_sensor_ids)
-    contact = sensor.data.current_contact_time[:, sensor_ids] > 0.0
+    contact = torch.linalg.vector_norm(sensor.data.net_forces_w[:, sensor_ids], dim=-1) > 1.0
 
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
     body_ids = _resolve_body_ids(asset_cfg, env.foot_body_ids)
-    velocity_w = robot.data.body_lin_vel_w[:, body_ids]
-    velocity_s = torch.sum(velocity_w * env.path_tangent_w[:, None, :], dim=-1)
-    velocity_y = torch.sum(velocity_w * env.path_lateral_w[:, None, :], dim=-1)
-    slide_speed = (
-        torch.sqrt(torch.square(velocity_s) + torch.square(velocity_y))
-        / FEET_SLIDE_NORMALIZER_MPS
-    )
-    return torch.sum(slide_speed * contact.to(slide_speed.dtype), dim=-1)
+    return feet_slide_value(robot.data.body_lin_vel_w[:, body_ids], contact)
 
 
 def terrain_normal_velocity_l2(env: Any) -> torch.Tensor:
@@ -373,15 +359,11 @@ def joint_power_l1(env: Any, asset_cfg: Any | None = None) -> torch.Tensor:
     asset_name = "robot" if asset_cfg is None else getattr(asset_cfg, "name", "robot")
     robot = env.scene[asset_name]
     joint_ids = _policy_joint_ids(env, asset_cfg)
-    return joint_power_l1_value(
-        robot.data.applied_torque[:, joint_ids], robot.data.joint_vel[:, joint_ids]
-    )
+    return joint_power_l1_value(robot.data.applied_torque[:, joint_ids], robot.data.joint_vel[:, joint_ids])
 
 
 def processed_action_rate_l2(env: Any) -> torch.Tensor:
-    return processed_action_rate_l2_value(
-        env.action_state.target, env.action_state.prev_target
-    )
+    return processed_action_rate_l2_value(env.action_state.raw_action, env.action_state.prev_raw_action)
 
 
 def hip_yaw_roll_reference_l2(
@@ -450,13 +432,10 @@ def termination(env: Any) -> torch.Tensor:
 
 __all__ = [
     "FAT2_ERROR_SCALE_RAD",
-    "FOOT_CLEARANCE_STD_M",
-    "FOOT_CLEARANCE_TARGET_M",
-    "FOOT_CLEARANCE_TANH_MULT",
+    "FOOT_SWING_HEIGHT_TARGET_M",
     "GAIT_PERIOD_S",
     "GAIT_PHASE_OFFSETS",
     "GAIT_STANCE_THRESHOLD",
-    "FEET_SLIDE_NORMALIZER_MPS",
     "HEADING_ERROR_SCALE_RAD",
     "HIP_YAW_ROLL_POLICY_INDICES",
     "HIP_YAW_ROLL_REFERENCE_SCALE_RAD",
@@ -476,11 +455,12 @@ __all__ = [
     "ZMP_MARGIN_SCALE_M",
     "fat2_prior_exp",
     "fat2_prior_exp_value",
-    "feet_clearance",
-    "foot_clearance_reward_value",
+    "feet_swing_height",
+    "feet_swing_height_value",
     "feet_gait",
     "feet_gait_value",
     "feet_slide",
+    "feet_slide_value",
     "heading_error_l2",
     "heading_error_l2_value",
     "hip_yaw_roll_reference_l2",

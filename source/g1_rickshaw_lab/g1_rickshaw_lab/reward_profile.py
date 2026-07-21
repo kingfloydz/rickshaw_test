@@ -17,7 +17,7 @@ GUIDE_REWARD_TERMS = (
     "hitch_height_recovery_l2",
     "fat2_prior_exp",
     "feet_gait",
-    "feet_clearance",
+    "feet_swing_height",
     "feet_slide",
     "terrain_normal_velocity_l2",
     "joint_power_l1",

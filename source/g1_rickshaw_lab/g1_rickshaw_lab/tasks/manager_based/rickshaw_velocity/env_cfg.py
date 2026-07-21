@@ -294,10 +294,13 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
         },
     )
-    feet_clearance = RewTerm(
-        func=mdp.feet_clearance,
-        weight=mdp.REWARD_WEIGHTS["feet_clearance"],
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=list(FOOT_BODY_NAMES), preserve_order=True)},
+    feet_swing_height = RewTerm(
+        func=mdp.feet_swing_height,
+        weight=mdp.REWARD_WEIGHTS["feet_swing_height"],
+        params={
+            "sensor_cfg": SceneEntityCfg("robot_contacts", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=list(FOOT_BODY_NAMES), preserve_order=True),
+        },
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,

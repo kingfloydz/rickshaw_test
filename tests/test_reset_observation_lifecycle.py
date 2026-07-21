@@ -71,6 +71,7 @@ def _fake_env() -> SimpleNamespace:
         device="cpu",
         cfg=SimpleNamespace(observation_noise_enabled=False),
         step_dt=0.02,
+        episode_length_buf=torch.zeros(num_envs),
         scene={
             "robot": robot,
             "rickshaw": SimpleNamespace(

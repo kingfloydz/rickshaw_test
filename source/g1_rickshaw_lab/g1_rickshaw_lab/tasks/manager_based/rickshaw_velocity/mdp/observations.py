@@ -18,6 +18,7 @@ from g1_rickshaw_lab.policy_schema import (
 from g1_rickshaw_lab.slope_contract import SLOPE_GRADIENTS
 
 from .actions import ACTION_DIM
+from .rewards import GAIT_PERIOD_S
 
 TEACHER_STATIC_DOMAIN_DIM = TEACHER_STATIC_DIM - 1
 SLOPE_LOWER = min(SLOPE_GRADIENTS)
@@ -28,7 +29,8 @@ PROJECTED_GRAVITY_SLICE = slice(3, 6)
 TASK_SIGNAL_SLICE = slice(6, 9)
 JOINT_POSITION_SLICE = slice(9, 38)
 JOINT_VELOCITY_SLICE = slice(38, 67)
-PREVIOUS_ACTION_SLICE = slice(67, ACTOR_OBSERVATION_DIM)
+PREVIOUS_ACTION_SLICE = slice(67, 67 + ACTION_DIM)
+GAIT_PHASE_SLICE = slice(67 + ACTION_DIM, ACTOR_OBSERVATION_DIM)
 
 BASE_ANGULAR_VELOCITY_SCALE = 0.25
 PROJECTED_GRAVITY_SCALE = 1.0
@@ -46,6 +48,7 @@ ACTOR_OBSERVATION_NOISE_SCALE = (
     + (0.01 * JOINT_POSITION_SCALE,) * ACTION_DIM
     + (1.5 * JOINT_VELOCITY_SCALE,) * ACTION_DIM
     + (0.0,) * ACTION_DIM
+    + (0.0,) * 2
 )
 
 TEACHER_STATIC_FEATURE_NAMES = (
@@ -87,6 +90,12 @@ def wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
     return torch.atan2(torch.sin(angle), torch.cos(angle))
 
 
+def gait_phase_observation(episode_time_s: torch.Tensor) -> torch.Tensor:
+    phase = torch.remainder(episode_time_s, GAIT_PERIOD_S) / GAIT_PERIOD_S
+    angle = 2.0 * torch.pi * phase
+    return torch.stack((torch.sin(angle), torch.cos(angle)), dim=-1)
+
+
 def assemble_actor_observation(
     base_angular_velocity_b: torch.Tensor,
     projected_gravity_b: torch.Tensor,
@@ -97,8 +106,9 @@ def assemble_actor_observation(
     q_ref: torch.Tensor,
     joint_velocity_value: torch.Tensor,
     previous_processed_action: torch.Tensor,
+    gait_phase: torch.Tensor,
 ) -> torch.Tensor:
-    """Assemble the only deployment observation, in the fixed 96-D order."""
+    """Assemble the only deployment observation, in the fixed 98-D order."""
 
     batch_shape = base_angular_velocity_b.shape[:-1]
     if base_angular_velocity_b.shape[-1] != 3:
@@ -113,6 +123,8 @@ def assemble_actor_observation(
     ):
         if value.shape != (*batch_shape, ACTION_DIM):
             raise ValueError(f"{name} must have shape {(*batch_shape, ACTION_DIM)}")
+    if gait_phase.shape != (*batch_shape, 2):
+        raise ValueError(f"gait_phase must have shape {(*batch_shape, 2)}")
     for name, value in (
         ("v_ref", v_ref),
         ("lateral_error", lateral_error),
@@ -131,6 +143,7 @@ def assemble_actor_observation(
         q_ref,
         joint_velocity_value,
         previous_processed_action,
+        gait_phase,
     )
 
 
@@ -144,6 +157,7 @@ def _assemble_actor_observation(
     q_ref: torch.Tensor,
     joint_velocity_value: torch.Tensor,
     previous_processed_action: torch.Tensor,
+    gait_phase: torch.Tensor,
 ) -> torch.Tensor:
     """Hot-path observation assembly after startup schema validation."""
 
@@ -164,6 +178,7 @@ def _assemble_actor_observation(
             position_error * JOINT_POSITION_SCALE,
             joint_velocity_value * JOINT_VELOCITY_SCALE,
             previous_processed_action * PREVIOUS_ACTION_SCALE,
+            gait_phase,
         ),
         dim=-1,
     )
@@ -187,7 +202,7 @@ class ObservationHistoryState:
         history_enabled: bool = True,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
-    ) -> "ObservationHistoryState":
+    ) -> ObservationHistoryState:
         history_length = validate_history_length(history_length)
         if observation_dim <= 0:
             raise ValueError("feature dimension must be positive")
@@ -328,7 +343,7 @@ def actor_observation(
     env: Any,
     asset_cfg: Any | None = None,
 ) -> torch.Tensor:
-    """Isaac Lab observation-manager adapter for the complete 96-D vector."""
+    """Isaac Lab observation-manager adapter for the complete 98-D vector."""
 
     asset = _resolve_asset(env, asset_cfg)
     ids = _policy_joint_ids(env, asset_cfg)
@@ -344,6 +359,7 @@ def actor_observation(
         _reference(env),
         asset.data.joint_vel[:, ids],
         previous_processed_action(env),
+        gait_phase_observation(env.episode_length_buf * env.step_dt),
     )
     if env.cfg.observation_noise_enabled:
         observation += torch.empty_like(observation).uniform_(-1.0, 1.0) * env.actor_observation_noise_scale
@@ -357,9 +373,7 @@ def _is_observation_shape_probe(env: Any) -> bool:
 
 
 def _history_length(env: Any) -> int:
-    return validate_history_length(
-        int(getattr(getattr(env, "cfg", None), "history_length", HISTORY_LENGTH))
-    )
+    return validate_history_length(int(getattr(getattr(env, "cfg", None), "history_length", HISTORY_LENGTH)))
 
 
 def _shape_placeholder(env: Any, *feature_shape: int) -> torch.Tensor:
@@ -479,6 +493,7 @@ def critic_privileged_state(env: Any, expected_dim: int | None = None) -> torch.
 __all__ = [
     "ACTOR_OBSERVATION_DIM",
     "CRITIC_PRIVILEGED_DIM",
+    "GAIT_PHASE_SLICE",
     "HISTORY_LENGTH",
     "TEACHER_DYNAMIC_DIM",
     "TEACHER_DYNAMIC_FEATURE_NAMES",
@@ -494,6 +509,7 @@ __all__ = [
     "critic_privileged_state",
     "current_actor_observation",
     "dynamic_privileged_observation",
+    "gait_phase_observation",
     "joint_velocity",
     "previous_processed_action",
     "projected_gravity",

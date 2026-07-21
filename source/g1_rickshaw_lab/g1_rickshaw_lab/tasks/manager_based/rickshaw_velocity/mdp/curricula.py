@@ -9,6 +9,7 @@ import torch
 
 from g1_rickshaw_lab.slope_contract import (
     SLOPE_COUNT,
+    SLOPE_GRADIENTS,
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
     terrain_index_for_gradient,
@@ -44,6 +45,35 @@ def balanced_slope_assignment(
     """Assign all 19 slopes with counts differing by at most one."""
 
     slots = torch.arange(num_envs, device=device, dtype=torch.long) % SLOPE_COUNT
+    if shuffle:
+        slots = slots[torch.randperm(num_envs, device=device)]
+    levels = torch.tensor(SLOPE_TERRAIN_LEVELS, device=device)[slots]
+    terrain_types = torch.tensor(SLOPE_TERRAIN_TYPES, device=device)[slots]
+    return slots, levels, terrain_types
+
+
+def weighted_slope_assignment(
+    num_envs: int,
+    *,
+    device: torch.device | str,
+    shuffle: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Concentrate training environments near level ground while retaining every slope."""
+
+    slopes = torch.tensor(SLOPE_GRADIENTS, device=device)
+    side_limit = torch.where(slopes < 0.0, -slopes[0], slopes[-1])
+    weights = 2.0 - torch.abs(slopes) / side_limit
+
+    minimum_count = int(num_envs >= SLOPE_COUNT)
+    counts = torch.full((SLOPE_COUNT,), minimum_count, device=device, dtype=torch.long)
+    remaining = num_envs - minimum_count * SLOPE_COUNT
+    quota = weights * remaining / torch.sum(weights)
+    counts += torch.floor(quota).to(torch.long)
+    remainder = num_envs - int(torch.sum(counts).item())
+    if remainder:
+        counts[torch.topk(quota - torch.floor(quota), remainder).indices] += 1
+
+    slots = torch.repeat_interleave(torch.arange(SLOPE_COUNT, device=device), counts)
     if shuffle:
         slots = slots[torch.randperm(num_envs, device=device)]
     levels = torch.tensor(SLOPE_TERRAIN_LEVELS, device=device)[slots]
@@ -89,10 +119,10 @@ def randomize_startup_slopes(
     *,
     shuffle: bool = True,
 ) -> None:
-    """Map an exactly balanced slope set to all environments."""
+    """Assign the center-weighted training slope distribution once at startup."""
 
     del env_ids
-    _, levels, terrain_types = balanced_slope_assignment(
+    _, levels, terrain_types = weighted_slope_assignment(
         env.num_envs,
         device=env.device,
         shuffle=shuffle,
@@ -106,4 +136,5 @@ __all__ = [
     "balanced_slope_assignment",
     "randomize_startup_slopes",
     "speed_command_levels",
+    "weighted_slope_assignment",
 ]

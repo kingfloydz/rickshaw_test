@@ -726,8 +726,12 @@ def test_butterworth_frequency_response_and_reset_to_q_ref() -> None:
     torch.testing.assert_close(zero_target, q_ref, rtol=0.0, atol=3.0e-8)
 
     state.process(torch.ones_like(q_ref), action_scale_vector(dtype=torch.float64))
+    torch.testing.assert_close(state.prev_raw_action, torch.zeros_like(q_ref))
+    torch.testing.assert_close(state.raw_action, torch.ones_like(q_ref))
     replacement = q_ref + 0.25
     state.reset(replacement)
+    torch.testing.assert_close(state.prev_raw_action, torch.zeros_like(q_ref))
+    torch.testing.assert_close(state.raw_action, torch.zeros_like(q_ref))
     torch.testing.assert_close(state.x_prev, replacement)
     torch.testing.assert_close(state.y_prev, replacement)
     torch.testing.assert_close(state.target, replacement)

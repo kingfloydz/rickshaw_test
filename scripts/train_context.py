@@ -24,6 +24,7 @@ from g1_rickshaw_lab.provenance import (  # noqa: E402
     extract_checkpoint_metadata,
     save_checkpoint_atomic,
 )
+from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM  # noqa: E402
 from g1_rickshaw_lab.reward_profile import (  # noqa: E402
     REWARD_WEIGHT_OVERRIDES_KEY,
     reward_weight_overrides_from_configuration,
@@ -50,6 +51,7 @@ from _rollout_audit import (  # noqa: E402
     normalize_audit_tensors,
     validate_rollout_sample_audit,
 )
+
 CHECKPOINT_SCHEMA_VERSION = 1
 S1_GUIDE_PARAMETERS = GUIDE_TRAINING_PARAMETERS["s1_context_distillation"]
 REQUIRED_TENSORS = (
@@ -144,8 +146,10 @@ def _normalize_shard(
     teacher_mean = _as_tensor(
         raw.get("teacher_action_mean"), "teacher_action_mean", path
     ).float()
-    if current.ndim != 2 or current.shape[-1] != 96:
-        raise ValueError(f"current must have shape [N,96], got {tuple(current.shape)}")
+    if current.ndim != 2 or current.shape[-1] != ACTOR_OBSERVATION_DIM:
+        raise ValueError(
+            f"current must have shape [N,{ACTOR_OBSERVATION_DIM}], got {tuple(current.shape)}"
+        )
     batch_size = current.shape[0]
     normalized = {
         "current": current,
@@ -157,7 +161,7 @@ def _normalize_shard(
         "z_star": _as_tensor(raw.get("z_star"), "z_star", path).float(),
     }
     expected_shapes = {
-        "history": (batch_size, history_length, 96),
+        "history": (batch_size, history_length, ACTOR_OBSERVATION_DIM),
         "teacher_action_mean": (batch_size, 29),
         "teacher_action_std": (batch_size, 29),
         "z_star": (batch_size, latent_dim),

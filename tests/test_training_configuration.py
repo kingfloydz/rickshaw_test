@@ -47,7 +47,7 @@ def test_s0_configuration_binds_startup_randomization() -> None:
 
     assert validated["guide_parameters"] == {
         "domain_randomization": "startup_fixed",
-        "terrain_slopes": "startup_balanced_fixed",
+        "terrain_slopes": "startup_center_weighted_fixed",
         "observation_noise": "unitree_g1_uniform",
     }
     configuration["guide_parameters"] = {}

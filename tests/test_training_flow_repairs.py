@@ -6,6 +6,8 @@ import sys
 import pytest
 import torch
 
+from g1_rickshaw_lab.policy_schema import ACTOR_OBSERVATION_DIM
+
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -25,8 +27,8 @@ from train_context import _normalize_shard, seed_s1_training  # noqa: E402
 
 def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
     return {
-        "current": torch.zeros(batch_size, 96),
-        "history": torch.zeros(batch_size, 61, 96),
+        "current": torch.zeros(batch_size, ACTOR_OBSERVATION_DIM),
+        "history": torch.zeros(batch_size, 61, ACTOR_OBSERVATION_DIM),
         "teacher_action_mean": torch.zeros(batch_size, ACTION_DIM),
         "teacher_action_std": torch.ones(batch_size, ACTION_DIM),
         "z_star": torch.zeros(batch_size, 16),
@@ -40,7 +42,9 @@ def _canonical_rollout_tensors(batch_size: int = 2) -> dict[str, torch.Tensor]:
     }
 
 
-def _write_rollout_shard(path: Path, tensors: dict[str, torch.Tensor], *, root: str = "rollout") -> None:
+def _write_rollout_shard(
+    path: Path, tensors: dict[str, torch.Tensor], *, root: str = "rollout"
+) -> None:
     torch.save(
         {
             "schema_version": ROLLOUT_MANIFEST_SCHEMA_VERSION,
@@ -52,9 +56,7 @@ def _write_rollout_shard(path: Path, tensors: dict[str, torch.Tensor], *, root: 
 
 def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
     assignment = slope_environment_assignment(DEFAULT_NUM_ENVS)
-    counts = torch.bincount(
-        assignment["slope_index"], minlength=len(SIGNED_SLOPES)
-    )
+    counts = torch.bincount(assignment["slope_index"], minlength=len(SIGNED_SLOPES))
     assert counts.tolist() == [432] * 3 + [431] * 16
     torch.testing.assert_close(
         torch.unique(assignment["slope"], sorted=True),
@@ -64,13 +66,15 @@ def test_formal_rollout_assignment_covers_all_19_slopes() -> None:
     assert len(SLOPE_TERRAIN_TYPES) == len(SIGNED_SLOPES)
 
 
-def test_formal_rollout_shard_accepts_only_canonical_tensor_shapes(tmp_path: Path) -> None:
+def test_formal_rollout_shard_accepts_only_canonical_tensor_shapes(
+    tmp_path: Path,
+) -> None:
     shard = tmp_path / "rollout.pt"
     _write_rollout_shard(shard, _canonical_rollout_tensors())
 
     normalized = _normalize_shard(shard)
 
-    assert normalized["current"].shape == (2, 96)
+    assert normalized["current"].shape == (2, ACTOR_OBSERVATION_DIM)
     assert normalized["teacher_action_std"].shape == (2, ACTION_DIM)
 
 

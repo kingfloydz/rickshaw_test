@@ -113,6 +113,7 @@ class ButterworthActionState:
 
     q_ref: torch.Tensor
     raw_action: torch.Tensor
+    prev_raw_action: torch.Tensor
     x_prev: torch.Tensor
     y_prev: torch.Tensor
     target: torch.Tensor
@@ -120,7 +121,7 @@ class ButterworthActionState:
     prev_prev_target: torch.Tensor
 
     @classmethod
-    def create(cls, q_ref: torch.Tensor) -> "ButterworthActionState":
+    def create(cls, q_ref: torch.Tensor) -> ButterworthActionState:
         if q_ref.ndim != 2:
             raise ValueError(f"q_ref must have shape [N, D], got {tuple(q_ref.shape)}")
         reference = q_ref.clone()
@@ -128,6 +129,7 @@ class ButterworthActionState:
         return cls(
             q_ref=reference,
             raw_action=zeros.clone(),
+            prev_raw_action=zeros.clone(),
             x_prev=reference.clone(),
             y_prev=reference.clone(),
             target=reference.clone(),
@@ -160,6 +162,7 @@ class ButterworthActionState:
 
         self.q_ref[ids] = q_ref
         self.raw_action[ids] = 0.0
+        self.prev_raw_action[ids] = 0.0
         self.x_prev[ids] = q_ref
         self.y_prev[ids] = q_ref
         self.target[ids] = q_ref
@@ -193,6 +196,7 @@ class ButterworthActionState:
             self.x_prev[ids],
             self.y_prev[ids],
         )
+        self.prev_raw_action[ids] = self.raw_action[ids]
         self.raw_action[ids] = normalized_action
         self.prev_prev_target[ids] = self.prev_target[ids]
         self.prev_target[ids] = self.target[ids]

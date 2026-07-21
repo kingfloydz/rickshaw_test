@@ -110,7 +110,7 @@ TRAINING_CONFIGURATION_FIELDS = {
 GUIDE_TRAINING_PARAMETERS = {
     "s0_teacher": {
         "domain_randomization": "startup_fixed",
-        "terrain_slopes": "startup_balanced_fixed",
+        "terrain_slopes": "startup_center_weighted_fixed",
         "observation_noise": "unitree_g1_uniform",
     },
     "s1_context_distillation": {
@@ -846,8 +846,14 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
                 {"name": "joint_velocity", "slice": [38, 67], "scale": [0.05] * ACTION_DIM},
                 {
                     "name": "previous_processed_action",
-                    "slice": [67, ACTOR_OBSERVATION_DIM],
+                    "slice": [67, 67 + ACTION_DIM],
                     "scale": [1.0] * ACTION_DIM,
+                },
+                {
+                    "name": "gait_phase",
+                    "fields": ["sin_phase", "cos_phase"],
+                    "slice": [67 + ACTION_DIM, ACTOR_OBSERVATION_DIM],
+                    "scale": [1.0, 1.0],
                 },
             ],
         },
