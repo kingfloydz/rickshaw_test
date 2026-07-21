@@ -133,9 +133,9 @@ GUIDE_TRAINING_PARAMETERS = {
     },
 }
 GUIDE_MAX_ITERATIONS = {
-    "s0_teacher": 4000,
-    "s1_context_distillation": 3000,
-    "s2_student_ppo": 2000,
+    "s0_teacher": 2600,
+    "s1_context_distillation": 2000,
+    "s2_student_ppo": 1600,
 }
 BASELINE_ROLLOUT_STEPS = DEFAULT_TRAINING_PARAMETERS["rollout_steps"]
 

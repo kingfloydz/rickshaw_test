@@ -483,7 +483,7 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     partial = tmp_path / "model_10.pt"
-    complete = tmp_path / "model_3999.pt"
+    complete = tmp_path / "model_2599.pt"
     wrong = tmp_path / "model_wrong.pt"
     for path in (partial, complete, wrong):
         path.write_bytes(b"checkpoint")
@@ -495,12 +495,12 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
             if Path(path) == wrong
             else spec.training_parameters
         )
-        iteration = 10 if Path(path) == partial else 3999
+        iteration = 10 if Path(path) == partial else 2599
         return {
             "iter": iteration,
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": parameters,
-                "max_iterations": 4000,
+                "max_iterations": 2600,
                 "task": "task",
                 "seed": 42,
                 "num_envs": 4096,
@@ -537,7 +537,7 @@ def test_ppo_checkpoint_selects_complete_matching_variant(
 def test_s2_checkpoint_must_match_teacher_and_context_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    checkpoint = tmp_path / "model_1999.pt"
+    checkpoint = tmp_path / "model_1599.pt"
     checkpoint.write_bytes(b"checkpoint")
     teacher = tmp_path / "teacher.pt"
     context = tmp_path / "context.pt"
@@ -548,10 +548,10 @@ def test_s2_checkpoint_must_match_teacher_and_context_lineage(
         pipeline,
         "load_stage_checkpoint",
         lambda *_args, **_kwargs: {
-            "iter": 1999,
+            "iter": 1599,
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": spec.training_parameters,
-                "max_iterations": 2000,
+                "max_iterations": 1600,
                 "task": "task",
                 "seed": 42,
                 "num_envs": 4096,
@@ -717,7 +717,7 @@ def test_s1_resume_matches_the_training_invocation(
         lambda *_args, **_kwargs: {
             pipeline.TRAINING_CONFIGURATION_KEY: {
                 "training_parameters": spec.training_parameters,
-                "max_iterations": 3000,
+                "max_iterations": 2000,
                 "task": "task",
                 "seed": 42,
                 "num_envs": None,
@@ -726,7 +726,7 @@ def test_s1_resume_matches_the_training_invocation(
             pipeline.CHECKPOINT_LINEAGE_KEY: {
                 "teacher_checkpoint": str(teacher.resolve())
             },
-            "training": {"completed_iterations": 3000},
+            "training": {"completed_iterations": 2000},
         },
     )
 

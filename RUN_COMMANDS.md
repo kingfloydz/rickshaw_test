@@ -32,16 +32,16 @@ export PYTHON=/root/miniconda3/envs/env_isaaclab/bin/python
   --headless
 ```
 
-默认训练 4000 iterations。真实 rickshaw、双 D6 和安全检查从 iteration 0 生效。8192 个环境在 startup 分别采样固定物理参数和坡度，后续 episode reset 不重新采样。
+默认训练 2600 iterations。真实 rickshaw、双 D6 和安全检查从 iteration 0 生效。8192 个环境在 startup 分别采样固定物理参数和坡度，后续 episode reset 不重新采样。
 
 FAT2、latent 和 rollout 消融只在 S0 选择，S1/S2 从 checkpoint 自动继承。
 `fat2_weight` 支持 `0.0/0.1/0.2`，默认 `0.0`；ZMP 奖励默认权重同样为 `0.0`。Rollout 等预算如下：
 
 | rollout steps | S0 updates | S2 updates | save interval updates |
 |---:|---:|---:|---:|
-| 24 | 8000 | 4000 | 400 |
-| 48 | 4000 | 2000 | 200 |
-| 64 | 3000 | 1500 | 150 |
+| 24 | 5200 | 3200 | 400 |
+| 48 | 2600 | 1600 | 200 |
+| 64 | 1950 | 1200 | 150 |
 
 三行各阶段的 `updates × rollout_steps` 相同。`latent_dim` 支持 `4/6/8/10/12/14/16/18/20/24/32`；每条
 S0 -> S1 -> S2 lineage 内 teacher encoder、student encoder 和 actor 输入使用同一维度。

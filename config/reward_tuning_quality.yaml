@@ -5,7 +5,7 @@ fixed:
   rollout_steps: 48
   latent_dim: 16
   fat2_weight: 0.0
-  max_iterations: 4000
+  max_iterations: 2600
 fixed_reward_weights:
   zmp_margin_barrier: 0.0
 factors:

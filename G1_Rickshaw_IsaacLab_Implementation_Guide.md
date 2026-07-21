@@ -759,7 +759,7 @@ actor input  = current + z_star
 critic input = current + raw_privilege_34
 ```
 
-S0 总预算为 `4000*48` 条每环境 transition；R=`24/48/64` 时总 update 数分别为 `8000/4000/3000`。8192 个环境在 startup 独立采样固定物理参数，坡度按 19 个坡面均衡随机分配；训练期间和普通 episode reset 均不重新采样。
+S0 总预算为 `2600*48` 条每环境 transition；R=`24/48/64` 时总 update 数分别为 `5200/2600/1950`。8192 个环境在 startup 独立采样固定物理参数，坡度按 19 个坡面均衡随机分配；训练期间和普通 episode reset 均不重新采样。
 
 ### 10.2 S1 On-policy Student Distillation
 
@@ -777,11 +777,11 @@ loss = gaussian_kl(teacher_dist, student_dist).mean() \
     + 0.1 * F.smooth_l1_loss(z_hat, z_star)
 ```
 
-Adam：context learning rate `3e-4`、batch `65536`、mini-batch `8192`、gradient clip `1.0`，最多 `3000` iterations。每 200 iterations 在 `torch.no_grad()` 下比较固定验证集 action KL；训练结束时恢复历史最低 action KL 的完整 student 状态，并只保存这一份 S1 checkpoint，不维护候选 checkpoint 或二次排名流程。
+Adam：context learning rate `3e-4`、batch `65536`、mini-batch `8192`、gradient clip `1.0`，最多 `2000` iterations。每 200 iterations 在 `torch.no_grad()` 下比较固定验证集 action KL；训练结束时恢复历史最低 action KL 的完整 student 状态，并只保存这一份 S1 checkpoint，不维护候选 checkpoint 或二次排名流程。
 
 ### 10.3 S2 Student PPO Fine-tune
 
-用 `z_hat` 替换 `z_star`，critic 继续读取独立 raw privilege group。Context encoder 与 actor 在 S2 一并解冻：context learning rate `1e-4`，actor/critic learning rate `3e-4`。S2 预算为 `2000*48` 条每环境 transition，R=`24/48/64` 时分别训练 `4000/2000/1500` 个实际 update。S2 不再保留 distillation loss。
+用 `z_hat` 替换 `z_star`，critic 继续读取独立 raw privilege group。Context encoder 与 actor 在 S2 一并解冻：context learning rate `1e-4`，actor/critic learning rate `3e-4`。S2 预算为 `1600*48` 条每环境 transition，R=`24/48/64` 时分别训练 `3200/1600/1200` 个实际 update。S2 不再保留 distillation loss。
 
 ### 10.4 PPO 配置
 
