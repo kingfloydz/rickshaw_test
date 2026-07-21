@@ -37,7 +37,7 @@ def test_slope_video_names_preserve_order_and_gradient() -> None:
     assert slope_video_path(output, 18).name == "teacher_slope_19_+10pct.mp4"
 
 
-def test_renderer_splits_the_raw_recording_into_nineteen_videos(tmp_path: Path) -> None:
+def test_renderer_labels_each_slope_segment_independently(tmp_path: Path) -> None:
     import cv2
     import numpy as np
 
@@ -49,15 +49,18 @@ def test_renderer_splits_the_raw_recording_into_nineteen_videos(tmp_path: Path) 
         (400, 100),
     )
     assert writer.isOpened()
-    for index in range(renderer.SLOPE_COUNT):
-        writer.write(np.full((100, 400, 3), index, dtype=np.uint8))
+    writer.write(np.zeros((100, 400, 3), dtype=np.uint8))
     writer.release()
 
-    videos = renderer._split_labeled_videos(
-        source,
-        tmp_path / "teacher.mp4",
-        frames_per_slope=1,
-    )
+    videos = [
+        renderer._label_slope_video(
+            source,
+            tmp_path / "teacher.mp4",
+            slope_index=index,
+            frames_per_slope=1,
+        )
+        for index in range(renderer.SLOPE_COUNT)
+    ]
 
     assert len(videos) == renderer.SLOPE_COUNT
     assert all(Path(video["video"]).is_file() for video in videos)

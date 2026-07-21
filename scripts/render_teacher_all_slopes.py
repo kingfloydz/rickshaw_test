@@ -91,15 +91,15 @@ def _run_play_child(
         sys.argv = previous_argv
 
 
-def _split_labeled_videos(
+def _label_slope_video(
     source: Path,
     output: Path,
     *,
+    slope_index: int,
     frames_per_slope: int,
-) -> list[dict[str, object]]:
+) -> dict[str, object]:
     import cv2
 
-    required_frames = SLOPE_COUNT * frames_per_slope
     capture = cv2.VideoCapture(os.fspath(source))
     if not capture.isOpened():
         raise RuntimeError(f"cannot decode raw video: {source}")
@@ -107,67 +107,62 @@ def _split_labeled_videos(
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if raw_frames < required_frames:
+    if raw_frames < frames_per_slope:
         capture.release()
-        raise RuntimeError(f"raw video has {raw_frames} frames; expected at least {required_frames}")
+        raise RuntimeError(f"raw video has {raw_frames} frames; expected at least {frames_per_slope}")
     if fps <= 0.0 or width <= 0 or height <= 0:
         capture.release()
         raise RuntimeError("raw video has invalid media metadata")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    videos = []
-    try:
-        for slope_index, slope_percent in enumerate(SLOPE_PERCENTAGES):
-            destination = slope_video_path(output, slope_index)
-            temporary = destination.with_name(f".{destination.stem}.tmp.mp4")
-            writer = cv2.VideoWriter(
-                os.fspath(temporary),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (width, height),
-            )
-            if not writer.isOpened():
-                raise RuntimeError(f"cannot create slope video: {temporary}")
-            try:
-                for local_frame in range(frames_per_slope):
-                    ok, frame = capture.read()
-                    if not ok or frame is None:
-                        frame_index = slope_index * frames_per_slope + local_frame
-                        raise RuntimeError(f"cannot decode raw frame {frame_index}")
-                    label = f"Slope {slope_percent:+d}%   {slope_index + 1}/{SLOPE_COUNT}"
-                    cv2.rectangle(frame, (24, 24), (340, 78), (0, 0, 0), thickness=-1)
-                    cv2.putText(
-                        frame,
-                        label,
-                        (40, 61),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (255, 255, 255),
-                        thickness=2,
-                        lineType=cv2.LINE_AA,
-                    )
-                    writer.write(frame)
-            finally:
-                writer.release()
+    destination = slope_video_path(output, slope_index)
+    temporary = destination.with_name(f".{destination.stem}.tmp.mp4")
+    writer = cv2.VideoWriter(
+        os.fspath(temporary),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        raise RuntimeError(f"cannot create slope video: {temporary}")
 
-            if not temporary.is_file() or temporary.stat().st_size == 0:
-                raise RuntimeError(f"slope video encoder produced no output: {temporary}")
-            os.replace(temporary, destination)
-            videos.append(
-                {
-                    "index": slope_index,
-                    "percent": slope_percent,
-                    "gradient": slope_percent / 100.0,
-                    "video": os.fspath(destination),
-                    "frames": frames_per_slope,
-                    "fps": fps,
-                    "duration_seconds": frames_per_slope / fps,
-                    "resolution": [width, height],
-                }
+    slope_percent = SLOPE_PERCENTAGES[slope_index]
+    label = f"Slope {slope_percent:+d}%   {slope_index + 1}/{SLOPE_COUNT}"
+    try:
+        for frame_index in range(frames_per_slope):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"cannot decode raw frame {frame_index}")
+            cv2.rectangle(frame, (24, 24), (340, 78), (0, 0, 0), thickness=-1)
+            cv2.putText(
+                frame,
+                label,
+                (40, 61),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (255, 255, 255),
+                thickness=2,
+                lineType=cv2.LINE_AA,
             )
+            writer.write(frame)
     finally:
         capture.release()
-    return videos
+        writer.release()
+
+    if not temporary.is_file() or temporary.stat().st_size == 0:
+        raise RuntimeError(f"slope video encoder produced no output: {temporary}")
+    os.replace(temporary, destination)
+    return {
+        "index": slope_index,
+        "percent": slope_percent,
+        "gradient": slope_percent / 100.0,
+        "video": os.fspath(destination),
+        "frames": frames_per_slope,
+        "fps": fps,
+        "duration_seconds": frames_per_slope / fps,
+        "resolution": [width, height],
+    }
 
 
 def _write_manifest(
@@ -192,6 +187,18 @@ def _write_manifest(
 def main() -> int:
     args = _parser().parse_args()
     _validate_arguments(args)
+    if not args.render_child:
+        subprocess.run(
+            [
+                sys.executable,
+                os.fspath(Path(__file__).resolve()),
+                *sys.argv[1:],
+                "--render-child",
+            ],
+            check=True,
+        )
+        return 0
+
     checkpoint_path = require_existing_file(args.checkpoint, "S0 checkpoint").resolve()
     checkpoint = load_stage_checkpoint(
         checkpoint_path,
@@ -207,26 +214,16 @@ def main() -> int:
     raw_directory = output.parent / "raw" / output.stem
     raw_directory.mkdir(parents=True, exist_ok=True)
     total_frames = SLOPE_COUNT * args.frames_per_slope
+    videos: list[dict[str, object]] = []
 
-    if not args.render_child:
-        subprocess.run(
-            [
-                sys.executable,
-                os.fspath(Path(__file__).resolve()),
-                *sys.argv[1:],
-                "--render-child",
-            ],
-            check=True,
-        )
-        raw_videos = sorted(raw_directory.glob("*.mp4"), key=lambda path: path.stat().st_mtime_ns)
-        if not raw_videos:
-            raise RuntimeError(f"Isaac Lab produced no video in {raw_directory}")
-        raw_video = raw_videos[-1]
-        videos = _split_labeled_videos(
+    def finalize_segment(raw_video: Path, slope_index: int) -> None:
+        video = _label_slope_video(
             raw_video,
             output,
+            slope_index=slope_index,
             frames_per_slope=args.frames_per_slope,
         )
+        videos.append(video)
         manifest = _write_manifest(
             output,
             checkpoint=checkpoint_path,
@@ -235,9 +232,8 @@ def main() -> int:
         )
         if not args.keep_raw:
             raw_video.unlink()
-        print(f"rendered {len(videos)} slope videos: {output.parent}")
+        print(f"rendered slope {slope_index + 1}/{SLOPE_COUNT}: {video['video']}")
         print(f"manifest: {manifest}")
-        return 0
 
     runner_context = RunnerContext.playback(
         stage="s0_teacher",
@@ -248,6 +244,8 @@ def main() -> int:
         export_policy=False,
         follow_robot_camera=True,
         slope_frames=args.frames_per_slope,
+        video_name_prefix=output.stem,
+        video_segment_callback=finalize_segment,
     )
     launcher_arguments = [
         "--task",
@@ -256,7 +254,7 @@ def main() -> int:
         os.fspath(checkpoint_path),
         "--video",
         "--video_length",
-        str(total_frames + 1),
+        str(total_frames),
         "--num_envs",
         str(SLOPE_COUNT),
         "--seed",
@@ -284,6 +282,7 @@ def main() -> int:
         if exc.code not in (None, 0):
             raise
 
+    print(f"rendered {len(videos)} slope videos: {output.parent}")
     return 0
 
 

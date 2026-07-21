@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ class PlayOptions:
     export_only: bool = False
     follow_robot_camera: bool = False
     slope_frames: int | None = None
+    video_name_prefix: str = "rl-video"
+    video_segment_callback: Callable[[Path, int], None] | None = None
 
     def __post_init__(self) -> None:
         if self.export_only and not self.export_policy:
@@ -220,11 +223,19 @@ def _run_play(
         env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
         if args.video:
             video_dir = options.video_dir or log_dir / "videos/play"
+            segment_frames = options.slope_frames
             env = gym.wrappers.RecordVideo(
                 env,
                 video_folder=os.fspath(video_dir),
-                step_trigger=lambda step: step == 0,
-                video_length=args.video_length,
+                step_trigger=(
+                    (lambda step: step == 0)
+                    if segment_frames is None
+                    else (lambda step: step % segment_frames == 0)
+                ),
+                video_length=(
+                    args.video_length if segment_frames is None else segment_frames - 1
+                ),
+                name_prefix=options.video_name_prefix,
                 disable_logger=True,
             )
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -252,7 +263,16 @@ def _run_play(
             if args.video:
                 timestep += 1
                 if options.slope_frames is not None:
-                    index = min((timestep + 1) // options.slope_frames, env.unwrapped.num_envs - 1)
+                    if (
+                        timestep % options.slope_frames == 0
+                        and options.video_segment_callback is not None
+                    ):
+                        segment_index = timestep // options.slope_frames - 1
+                        raw_video = video_dir / (
+                            f"{options.video_name_prefix}-step-{segment_index * options.slope_frames}.mp4"
+                        )
+                        options.video_segment_callback(raw_video, segment_index)
+                    index = min(timestep // options.slope_frames, env.unwrapped.num_envs - 1)
                     env.unwrapped.viewport_camera_controller.set_view_env_index(index)
                     robot = env.unwrapped.scene["robot"].data.root_pos_w[index]
                     cart = env.unwrapped.scene["rickshaw"].data.root_pos_w[index]
