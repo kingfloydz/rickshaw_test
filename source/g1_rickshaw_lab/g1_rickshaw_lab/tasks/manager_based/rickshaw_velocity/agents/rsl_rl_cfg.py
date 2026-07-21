@@ -1,97 +1,55 @@
-"""RSL-RL PPO defaults fixed by the implementation guide."""
+"""RSL-RL configuration using mjlab's native runner schema."""
 
-from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
-
-from g1_rickshaw_lab.training_contract import GUIDE_MAX_ITERATIONS, TRAINING_ARTIFACT_INTERVAL
+from __future__ import annotations
 
 
-def _gaussian_cfg() -> RslRlMLPModelCfg.GaussianDistributionCfg:
-    # Per-joint lower/upper body stds are installed by the custom policy checkpoint loader.
-    return RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.4, std_type="log")
+def g1_rickshaw_ppo_runner_cfg():
+    from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
-
-@configclass
-class G1RickshawPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
-    class_name: str = "g1_rickshaw_lab.rl.rsl_rl_models:RickshawPPO"
-    context_learning_rate: float | None = None
-
-
-@configclass
-class G1RickshawActorModelCfg(RslRlMLPModelCfg):
-    latent_dim: int = 16
-
-
-@configclass
-class G1RickshawTeacherPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """S0 privileged-teacher PPO configuration."""
-
-    seed = 42
-    device = "cuda:0"
-    num_steps_per_env = 48
-    max_iterations = GUIDE_MAX_ITERATIONS["s0_teacher"]
-    save_interval = TRAINING_ARTIFACT_INTERVAL
-    experiment_name = "g1_rickshaw_teacher"
-    run_name = "s0"
-    empirical_normalization = False
-    clip_actions = 1.0
-    obs_groups = {
-        "actor": [
-            "policy",
-            "history",
-            "teacher_dynamic_history",
-            "teacher_static",
-        ],
-        "critic": ["policy", "critic"],
-    }
-    actor = G1RickshawActorModelCfg(
-        class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawActorModel",
-        hidden_dims=[512, 256, 128],
-        activation="elu",
-        obs_normalization=False,
-        distribution_cfg=_gaussian_cfg(),
-    )
-    critic = RslRlMLPModelCfg(
-        class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawCriticModel",
-        hidden_dims=[256, 128],
-        activation="elu",
-        obs_normalization=False,
-        distribution_cfg=None,
-    )
-    algorithm = G1RickshawPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.001,
-        num_learning_epochs=5,
-        num_mini_batches=8,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.97,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
+    return RslRlOnPolicyRunnerCfg(
+        seed=42,
+        num_steps_per_env=48,
+        max_iterations=10_000,
+        save_interval=200,
+        experiment_name="g1_rickshaw_velocity",
+        run_name="mjlab",
+        actor=RslRlModelCfg(
+            hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 0.4,
+                "std_type": "log",
+            },
+        ),
+        critic=RslRlModelCfg(
+            hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+        ),
+        algorithm=RslRlPpoAlgorithmCfg(
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.001,
+            num_learning_epochs=5,
+            num_mini_batches=8,
+            learning_rate=3.0e-4,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.97,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+        ),
     )
 
 
-@configclass
-class G1RickshawStudentPPORunnerCfg(G1RickshawTeacherPPORunnerCfg):
-    """S2 student PPO fine-tuning configuration."""
+G1RickshawTeacherPPORunnerCfg = g1_rickshaw_ppo_runner_cfg
+G1RickshawStudentPPORunnerCfg = g1_rickshaw_ppo_runner_cfg
 
-    max_iterations = GUIDE_MAX_ITERATIONS["s2_student_ppo"]
-    experiment_name = "g1_rickshaw_student"
-    run_name = "s2"
-    obs_groups = {
-        "actor": ["policy", "history"],
-        "critic": ["policy", "critic"],
-    }
-    actor = G1RickshawActorModelCfg(
-        class_name="g1_rickshaw_lab.rl.rsl_rl_models:RslRickshawActorModel",
-        hidden_dims=[512, 256, 128],
-        activation="elu",
-        obs_normalization=False,
-        distribution_cfg=_gaussian_cfg(),
-    )
-
-    def __post_init__(self) -> None:
-        self.algorithm.context_learning_rate = 1.0e-4
+__all__ = [
+    "G1RickshawStudentPPORunnerCfg",
+    "G1RickshawTeacherPPORunnerCfg",
+    "g1_rickshaw_ppo_runner_cfg",
+]

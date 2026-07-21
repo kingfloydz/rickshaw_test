@@ -1,158 +1,102 @@
-"""Scene spawner for the replicated robot-rickshaw closed chain."""
+"""MuJoCo site-weld closed chain for the fixed grippers and rickshaw."""
 
 from __future__ import annotations
 
-import math
-from collections.abc import Callable
-from dataclasses import MISSING
-from typing import Any
+import mujoco
 
-from isaaclab.sim import SpawnerCfg
-from isaaclab.sim.utils import clone, create_prim, get_current_stage
-from isaaclab.utils import configclass
-from pxr import Gf, Sdf, Usd, UsdPhysics
+from g1_rickshaw_lab.assets.g1_dex1 import GRASP_SITE_NAMES, get_g1_spec
+from g1_rickshaw_lab.assets.mujoco_spec import (
+    ALL_COLLISION_BITS,
+    GRIPPER_COLLISION_BIT,
+    GROUND_COLLISION_BIT,
+    RICKSHAW_COLLISION_BIT,
+)
+from g1_rickshaw_lab.assets.rickshaw import HITCH_SITE_NAMES, get_rickshaw_spec
+
+ROBOT_ENTITY_NAME = "robot"
+RICKSHAW_ENTITY_NAME = "rickshaw"
+WELD_NAMES = ("left_grasp_weld", "right_grasp_weld")
 
 
-def _expand_env_path(path: str, env_namespace: str) -> str:
-    if path.startswith("/"):
-        return path.replace("{ENV_NS}", env_namespace).replace(
-            "{ENV_REGEX_NS}", env_namespace
+def add_closed_chain_constraints(spec: mujoco.MjSpec) -> None:
+    """Add two rigid site welds after mjlab has attached both entities."""
+
+    for side, grasp_site, hitch_site in zip(("left", "right"), GRASP_SITE_NAMES, HITCH_SITE_NAMES, strict=True):
+        name1 = f"{ROBOT_ENTITY_NAME}/{grasp_site}"
+        name2 = f"{RICKSHAW_ENTITY_NAME}/{hitch_site}"
+        if spec.site(name1) is None or spec.site(name2) is None:
+            raise ValueError(f"missing {side} closed-chain sites: {name1}, {name2}")
+        spec.add_equality(
+            name=f"{side}_grasp_weld",
+            type=mujoco.mjtEq.mjEQ_WELD,
+            objtype=mujoco.mjtObj.mjOBJ_SITE,
+            name1=name1,
+            name2=name2,
+            active=1,
+            solref=(0.004, 1.0),
+            solimp=(0.95, 0.99, 0.002, 0.5, 2.0),
         )
-    return f"{env_namespace}/{path.lstrip('/')}"
 
 
-def _set_local_pose(
-    joint: UsdPhysics.Joint,
-    position: tuple[float, ...],
-    quaternion: tuple[float, ...],
-    side: int,
-) -> None:
-    pos = Gf.Vec3f(*position)
-    quat = Gf.Quatf(quaternion[0], Gf.Vec3f(*quaternion[1:]))
-    if side == 0:
-        joint.CreateLocalPos0Attr().Set(pos)
-        joint.CreateLocalRot0Attr().Set(quat)
-    else:
-        joint.CreateLocalPos1Attr().Set(pos)
-        joint.CreateLocalRot1Attr().Set(quat)
+def build_assembled_spec(*, with_ground: bool = True) -> mujoco.MjSpec:
+    """Build a standalone one-environment model for validation/statics."""
+
+    spec = mujoco.MjSpec()
+    if with_ground:
+        ground = spec.worldbody.add_geom(
+            name="terrain",
+            type=mujoco.mjtGeom.mjGEOM_PLANE,
+            size=(0.0, 0.0, 0.05),
+        )
+        ground.contype = GROUND_COLLISION_BIT
+        ground.conaffinity = ALL_COLLISION_BITS
+        ground.friction[:3] = (1.0, 0.005, 0.0001)
+    spec.attach(get_g1_spec(), prefix=f"{ROBOT_ENTITY_NAME}/", frame=spec.worldbody.add_frame())
+    spec.attach(get_rickshaw_spec(), prefix=f"{RICKSHAW_ENTITY_NAME}/", frame=spec.worldbody.add_frame())
+    add_closed_chain_constraints(spec)
+    return spec
 
 
-def _apply_limit(
-    prim: Usd.Prim, axis: str, lower: float, upper: float
-) -> None:
-    limit = UsdPhysics.LimitAPI.Apply(prim, axis)
-    limit.CreateLowAttr().Set(lower)
-    limit.CreateHighAttr().Set(upper)
-
-
-def _apply_drive(
-    prim: Usd.Prim,
-    axis: str,
-    stiffness: float,
-    damping: float,
-    maximum: float,
-) -> None:
-    drive = UsdPhysics.DriveAPI.Apply(prim, axis)
-    drive.CreateTypeAttr().Set("force")
-    drive.CreateStiffnessAttr().Set(stiffness)
-    drive.CreateDampingAttr().Set(damping)
-    drive.CreateMaxForceAttr().Set(maximum)
-
-
-@clone
-def spawn_replicated_dual_d6(
-    prim_path: str,
-    cfg: "ReplicatedDualD6SpawnerCfg",
-    translation: tuple[float, float, float] | None = None,
-    orientation: tuple[float, float, float, float] | None = None,
-    **kwargs: Any,
-) -> Usd.Prim:
-    """Author two D6 joints in the source environment before scene replication."""
-
-    del kwargs
-    handle = cfg.handle_constraint
-    handle.validate()
-    stage = get_current_stage()
-    env_namespace = prim_path.rsplit("/", 1)[0]
-    constraints_prim = create_prim(
-        prim_path,
-        prim_type="Xform",
-        translation=translation,
-        orientation=orientation,
-        stage=stage,
-    )
-
-    robot_root_path = f"{env_namespace}/Robot/pelvis"
-    cart_root_path = f"{env_namespace}/Rickshaw/base_link"
-    for label, body_path in (
-        ("robot articulation root", robot_root_path),
-        ("rickshaw articulation root", cart_root_path),
+def validate_assembled_model(model: mujoco.MjModel) -> tuple[str, ...]:
+    issues: list[str] = []
+    if model.neq != 2:
+        issues.append(f"expected two equality constraints, got {model.neq}")
+    for name in WELD_NAMES:
+        equality_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, name)
+        if equality_id < 0:
+            issues.append(f"missing equality: {name}")
+        elif model.eq_type[equality_id] != mujoco.mjtEq.mjEQ_WELD:
+            issues.append(f"{name} is not a weld")
+    movable_names = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) for index in range(model.njnt)}
+    for forbidden in (
+        "robot/left_dex1_finger_joint_1",
+        "robot/left_dex1_finger_joint_2",
+        "robot/right_dex1_finger_joint_1",
+        "robot/right_dex1_finger_joint_2",
     ):
-        if not stage.GetPrimAtPath(body_path).IsValid():
-            raise RuntimeError(f"{label} prim does not exist: {body_path}")
-    filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(
-        stage.GetPrimAtPath(robot_root_path)
-    )
-    filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(cart_root_path))
-
-    for side_index, side_name in enumerate(("left", "right")):
-        robot_path = _expand_env_path(
-            handle.robot_body_paths[side_index], env_namespace
-        )
-        hitch_path = _expand_env_path(
-            handle.hitch_body_paths[side_index], env_namespace
-        )
-        for body_path in (robot_path, hitch_path):
-            if not stage.GetPrimAtPath(body_path).IsValid():
-                raise RuntimeError(f"D6 body prim does not exist: {body_path}")
-        joint_path = handle.joint_prim_path_template.format(
-            ENV_NS=env_namespace, side=side_name, env_id=0
-        )
-        joint = UsdPhysics.Joint.Define(stage, joint_path)
-        joint.CreateBody0Rel().SetTargets([Sdf.Path(robot_path)])
-        joint.CreateBody1Rel().SetTargets([Sdf.Path(hitch_path)])
-        joint.CreateCollisionEnabledAttr().Set(False)
-        joint.CreateExcludeFromArticulationAttr().Set(True)
-        _set_local_pose(
-            joint,
-            handle.grasp_local_positions[side_index],
-            handle.grasp_local_quaternions_wxyz[side_index],
-            0,
-        )
-        _set_local_pose(joint, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0), 1)
-
-        prim = joint.GetPrim()
-        for axis in ("transX", "transY", "transZ"):
-            _apply_limit(prim, axis, -handle.linear_limit, handle.linear_limit)
-            _apply_drive(
-                prim,
-                axis,
-                handle.linear_stiffness,
-                handle.linear_damping,
-                handle.max_force,
+        if forbidden in movable_names:
+            issues.append(f"gripper joint still movable: {forbidden}")
+    gripper_geoms = [index for index in range(model.ngeom) if model.geom_contype[index] == GRIPPER_COLLISION_BIT]
+    rickshaw_geoms = [index for index in range(model.ngeom) if model.geom_contype[index] == RICKSHAW_COLLISION_BIT]
+    if not gripper_geoms or not rickshaw_geoms:
+        issues.append("missing gripper or rickshaw collision class")
+    for gripper_geom in gripper_geoms:
+        for rickshaw_geom in rickshaw_geoms:
+            enabled = bool(
+                model.geom_contype[gripper_geom] & model.geom_conaffinity[rickshaw_geom]
+                or model.geom_contype[rickshaw_geom] & model.geom_conaffinity[gripper_geom]
             )
-        for axis_index, axis in enumerate(("rotX", "rotY", "rotZ")):
-            if handle.rotation_free_axes[axis_index]:
-                continue
-            angular_limit_deg = math.degrees(handle.angular_limit)
-            _apply_limit(prim, axis, -angular_limit_deg, angular_limit_deg)
-            if handle.rotation_driven_axes[axis_index]:
-                _apply_drive(
-                    prim,
-                    axis,
-                    handle.angular_stiffness,
-                    handle.angular_damping,
-                    handle.max_torque,
-                )
-    return constraints_prim
+            if enabled:
+                issues.append("gripper-rickshaw collision filtering is not symmetric")
+                return tuple(issues)
+    return tuple(issues)
 
 
-@configclass
-class ReplicatedDualD6SpawnerCfg(SpawnerCfg):
-    """Configuration for the source-environment dual-D6 spawner."""
-
-    func: Callable = spawn_replicated_dual_d6
-    handle_constraint: Any = MISSING
-
-
-__all__ = ["ReplicatedDualD6SpawnerCfg", "spawn_replicated_dual_d6"]
+__all__ = [
+    "ROBOT_ENTITY_NAME",
+    "RICKSHAW_ENTITY_NAME",
+    "WELD_NAMES",
+    "add_closed_chain_constraints",
+    "build_assembled_spec",
+    "validate_assembled_model",
+]

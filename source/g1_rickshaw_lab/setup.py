@@ -1,31 +1,28 @@
-"""Installation script for the g1_rickshaw_lab Isaac Lab extension."""
+"""Installation script for the G1 rickshaw mjlab task."""
 
 from pathlib import Path
 
-import toml
 from setuptools import find_packages, setup
 
 
-EXTENSION_ROOT = Path(__file__).resolve().parent
-EXTENSION_DATA = toml.load(EXTENSION_ROOT / "config" / "extension.toml")
-
 setup(
     name="g1_rickshaw_lab",
-    version=EXTENSION_DATA["package"]["version"],
-    description=EXTENSION_DATA["package"]["description"],
-    url=EXTENSION_DATA["package"]["repository"],
+    version="0.2.0",
+    description="MuJoCo/mjlab manager-based G1 rickshaw task",
     packages=find_packages(),
     include_package_data=True,
     python_requires=">=3.10",
     install_requires=[
         "torch",
         "numpy",
-        "PyYAML",
+        "mujoco>=3.3.6",
+        "mjlab==1.2.0",
+        "mujoco-warp==3.5.0",
         "rsl-rl-lib==5.0.1",
-        "tensordict>=0.6",
+        "scipy",
     ],
     extras_require={
-        "test": ["pytest", "toml"],
+        "test": ["pytest", "trimesh"],
     },
     zip_safe=False,
 )

@@ -1050,12 +1050,10 @@
       </geometry>
     </collision>
   </link>
-  <joint name="left_dex1_finger_joint_1" type="prismatic">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+  <joint name="left_dex1_finger_joint_1" type="fixed">
+    <origin xyz="0 0.01609 0" rpy="0 0 0"/>
     <parent link="left_dex1_base_link"/>
     <child link="left_dex1_finger_link_1"/>
-    <axis xyz="0 -1 0"/>
-    <limit lower="-0.02" upper="0.0245" effort="20" velocity="0.2"/>
   </joint>
   <link name="left_dex1_finger_link_2">
     <inertial>
@@ -1079,12 +1077,10 @@
       </geometry>
     </collision>
   </link>
-  <joint name="left_dex1_finger_joint_2" type="prismatic">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+  <joint name="left_dex1_finger_joint_2" type="fixed">
+    <origin xyz="0 -0.01609 0" rpy="0 0 0"/>
     <parent link="left_dex1_base_link"/>
     <child link="left_dex1_finger_link_2"/>
-    <axis xyz="0 1 0"/>
-    <limit lower="-0.02" upper="0.0245" effort="20" velocity="0.2"/>
   </joint>
 
   <joint name="right_base_joint" type="fixed">
@@ -1136,12 +1132,10 @@
       </geometry>
     </collision>
   </link>
-  <joint name="right_dex1_finger_joint_1" type="prismatic">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+  <joint name="right_dex1_finger_joint_1" type="fixed">
+    <origin xyz="0 0.01609 0" rpy="0 0 0"/>
     <parent link="right_dex1_base_link"/>
     <child link="right_dex1_finger_link_1"/>
-    <axis xyz="0 -1 0"/>
-    <limit lower="-0.02" upper="0.0245" effort="20" velocity="0.2"/>
   </joint>
   <link name="right_dex1_finger_link_2">
     <inertial>
@@ -1165,11 +1159,9 @@
       </geometry>
     </collision>
   </link>
-  <joint name="right_dex1_finger_joint_2" type="prismatic">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+  <joint name="right_dex1_finger_joint_2" type="fixed">
+    <origin xyz="0 -0.01609 0" rpy="0 0 0"/>
     <parent link="right_dex1_base_link"/>
     <child link="right_dex1_finger_link_2"/>
-    <axis xyz="0 1 0"/>
-    <limit lower="-0.02" upper="0.0245" effort="20" velocity="0.2"/>
   </joint>
 </robot>

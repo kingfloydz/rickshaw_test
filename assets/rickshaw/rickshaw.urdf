@@ -3,9 +3,10 @@
   <!--
     Meshes were exported in a common assembly frame with coordinates that
     appear to be in 0.1 mm units, so all mesh geometry is scaled by 1e-4.
-    The base_link frame is located midway between the wheel centers, projected
-    onto the ground plane. Its axes match Unitree G1: +X forward, +Y left,
-    and +Z up.
+    The base_link frame is on the ground below the wheel axle. Its axes match
+    Unitree G1: +X forward, +Y left, and +Z up. The wheel diameter is 0.6 m;
+    the body is lowered 0.074999 m to keep the CAD axle and wheel centers
+    concentric.
   -->
 
   <material name="rickshaw_body_dark_red">
@@ -19,7 +20,7 @@
   <link name="base_link">
     <inertial>
       <!-- Body CoM is shifted 0.02 m rearward from the source geometry. -->
-      <origin xyz="0.7227393855133334 0 0.7026888532066667" rpy="0 0 0"/>
+      <origin xyz="0.7227393855133334 0 0.6276898532066667" rpy="0 0 0"/>
       <mass value="36.0"/>
       <inertia
         ixx="7.393572" ixy="0" ixz="0"
@@ -27,14 +28,14 @@
         izz="17.829456"/>
     </inertial>
     <visual>
-      <origin xyz="1.94034 -0.414504 0" rpy="0 0 1.57079632679"/>
+      <origin xyz="1.94034 -0.414504 -0.074999" rpy="0 0 1.57079632679"/>
       <geometry>
         <mesh filename="body.stl" scale="0.0001 0.0001 0.0001"/>
       </geometry>
       <material name="rickshaw_body_dark_red"/>
     </visual>
     <collision>
-      <origin xyz="1.94034 -0.414504 0" rpy="0 0 1.57079632679"/>
+      <origin xyz="1.94034 -0.414504 -0.074999" rpy="0 0 1.57079632679"/>
       <geometry>
         <mesh filename="body_collision.stl" scale="0.0001 0.0001 0.0001"/>
       </geometry>
@@ -46,21 +47,21 @@
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="2.0"/>
       <inertia
-        ixx="0.071184" ixy="0" ixz="0"
-        iyy="0.140624" iyz="0"
-        izz="0.071184"/>
+        ixx="0.04587720205066667" ixy="0" ixz="0"
+        iyy="0.09" iyz="0"
+        izz="0.04587720205066667"/>
     </inertial>
     <visual>
-      <origin xyz="1.94034 -0.792735 -0.374999" rpy="0 0 1.57079632679"/>
+      <origin xyz="1.552272 -0.792735 -0.3" rpy="0 0 1.57079632679"/>
       <geometry>
-        <mesh filename="right_wheel.stl" scale="0.0001 0.0001 0.0001"/>
+        <mesh filename="right_wheel.stl" scale="0.0001 0.00008 0.00008"/>
       </geometry>
       <material name="rickshaw_wheel_dark"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="0.374999" length="0.072548"/>
+        <cylinder radius="0.3" length="0.072548"/>
       </geometry>
     </collision>
   </link>
@@ -70,21 +71,21 @@
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="2.0"/>
       <inertia
-        ixx="0.071184" ixy="0" ixz="0"
-        iyy="0.140624" iyz="0"
-        izz="0.071184"/>
+        ixx="0.04587720205066667" ixy="0" ixz="0"
+        iyy="0.09" iyz="0"
+        izz="0.04587720205066667"/>
     </inertial>
     <visual>
-      <origin xyz="1.94034 -0.036274 -0.374999" rpy="0 0 1.57079632679"/>
+      <origin xyz="1.552272 -0.036274 -0.3" rpy="0 0 1.57079632679"/>
       <geometry>
-        <mesh filename="left_wheel.stl" scale="0.0001 0.0001 0.0001"/>
+        <mesh filename="left_wheel.stl" scale="0.0001 0.00008 0.00008"/>
       </geometry>
       <material name="rickshaw_wheel_dark"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="0.374999" length="0.072548"/>
+        <cylinder radius="0.3" length="0.072548"/>
       </geometry>
     </collision>
   </link>
@@ -92,7 +93,7 @@
   <joint name="left_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="left_wheel_link"/>
-    <origin xyz="0 0.378231 0.374999" rpy="0 0 0"/>
+    <origin xyz="0 0.378231 0.3" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <dynamics damping="0.02" friction="0.0"/>
   </joint>
@@ -100,12 +101,16 @@
   <joint name="right_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="right_wheel_link"/>
-    <origin xyz="0 -0.378231 0.374999" rpy="0 0 0"/>
+    <origin xyz="0 -0.378231 0.3" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <dynamics damping="0.02" friction="0.0"/>
   </joint>
 
-  <!-- Attachment points on the front crossbar for connecting the rickshaw to Unitree G1. -->
+  <!--
+    body.stl centerline points are (+/-0.276, -1.664929, 0.180746).
+    Rz(+pi/2) maps them to (+1.664929, +/-0.276, 0.180746), then the
+    body/wheel alignment offset maps Z to 0.105747 in base_link.
+  -->
   <link name="left_tow_hitch_link">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -120,7 +125,7 @@
   <joint name="left_tow_hitch_joint" type="fixed">
     <parent link="base_link"/>
     <child link="left_tow_hitch_link"/>
-    <origin xyz="1.85049373 0.235 0.18164719" rpy="0 0 0"/>
+    <origin xyz="1.664929 0.276 0.105747" rpy="0 0 0"/>
   </joint>
 
   <link name="right_tow_hitch_link">
@@ -137,6 +142,6 @@
   <joint name="right_tow_hitch_joint" type="fixed">
     <parent link="base_link"/>
     <child link="right_tow_hitch_link"/>
-    <origin xyz="1.85049373 -0.235 0.18164719" rpy="0 0 0"/>
+    <origin xyz="1.664929 -0.276 0.105747" rpy="0 0 0"/>
   </joint>
 </robot>
