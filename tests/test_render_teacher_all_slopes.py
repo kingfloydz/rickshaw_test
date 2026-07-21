@@ -15,16 +15,53 @@ import render_teacher_all_slopes as renderer  # noqa: E402
 from _isaaclab_wrappers import FOLLOW_CAMERA_EYE, FOLLOW_CAMERA_LOOKAT  # noqa: E402
 from render_teacher_all_slopes import (  # noqa: E402
     DEFAULT_FRAMES_PER_SLOPE,
+    RENDER_SPEED_MPS,
     slope_index_for_frame,
+    slope_video_path,
 )
 
 
 def test_default_keeps_exactly_one_thousand_frames_per_slope() -> None:
     assert DEFAULT_FRAMES_PER_SLOPE == 1000
+    assert RENDER_SPEED_MPS == 1.0
     assert slope_index_for_frame(0, 1000) == 0
     assert slope_index_for_frame(999, 1000) == 0
     assert slope_index_for_frame(1000, 1000) == 1
     assert slope_index_for_frame(18_999, 1000) == 18
+
+
+def test_slope_video_names_preserve_order_and_gradient() -> None:
+    output = Path("teacher.mp4")
+
+    assert slope_video_path(output, 0).name == "teacher_slope_01_-8pct.mp4"
+    assert slope_video_path(output, 18).name == "teacher_slope_19_+10pct.mp4"
+
+
+def test_renderer_splits_the_raw_recording_into_nineteen_videos(tmp_path: Path) -> None:
+    import cv2
+    import numpy as np
+
+    source = tmp_path / "raw.mp4"
+    writer = cv2.VideoWriter(
+        str(source),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        10.0,
+        (400, 100),
+    )
+    assert writer.isOpened()
+    for index in range(renderer.SLOPE_COUNT):
+        writer.write(np.full((100, 400, 3), index, dtype=np.uint8))
+    writer.release()
+
+    videos = renderer._split_labeled_videos(
+        source,
+        tmp_path / "teacher.mp4",
+        frames_per_slope=1,
+    )
+
+    assert len(videos) == renderer.SLOPE_COUNT
+    assert all(Path(video["video"]).is_file() for video in videos)
+    assert [video["percent"] for video in videos] == list(renderer.SLOPE_PERCENTAGES)
 
 
 @pytest.mark.parametrize("frame, frames_per_slope", [(-1, 1000), (0, 0)])
