@@ -33,6 +33,11 @@ from g1_rickshaw_lab.workflows.rsl_rl import PlayOptions  # noqa: E402
 DEFAULT_TASK = "Isaac-G1-Rickshaw-Directional-Slope-v0"
 DEFAULT_FRAMES_PER_SLOPE = 1000
 RENDER_SPEED_MPS = 1.0
+FIXED_ENVIRONMENT_OVERRIDES = (
+    "env.domain_randomization.enabled=false",
+    "env.observation_noise_enabled=false",
+    "env.shuffle_slopes=false",
+)
 
 
 def slope_index_for_frame(frame_index: int, frames_per_slope: int) -> int:
@@ -268,7 +273,7 @@ def main() -> int:
         f"env.policy_update.command_sampling.maximum={RENDER_SPEED_MPS}",
         f"env.policy_update.command_sampling.limit_maximum={RENDER_SPEED_MPS}",
         "env.policy_update.command_sampling.standing_fraction=0.0",
-        "env.shuffle_slopes=false",
+        *FIXED_ENVIRONMENT_OVERRIDES,
     ]
     if args.headless:
         launcher_arguments.append("--headless")

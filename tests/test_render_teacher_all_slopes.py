@@ -15,6 +15,7 @@ import render_teacher_all_slopes as renderer  # noqa: E402
 from _isaaclab_wrappers import FOLLOW_CAMERA_EYE, FOLLOW_CAMERA_LOOKAT  # noqa: E402
 from render_teacher_all_slopes import (  # noqa: E402
     DEFAULT_FRAMES_PER_SLOPE,
+    FIXED_ENVIRONMENT_OVERRIDES,
     RENDER_SPEED_MPS,
     slope_index_for_frame,
     slope_video_path,
@@ -99,3 +100,11 @@ def test_render_child_exposes_launcher_arguments_through_sys_argv(
 
     assert observed_argv == ["render_teacher_all_slopes.py", *launcher_arguments]
     assert sys.argv is original_argv
+
+
+def test_renderer_uses_fixed_nominal_physics() -> None:
+    assert FIXED_ENVIRONMENT_OVERRIDES == (
+        "env.domain_randomization.enabled=false",
+        "env.observation_noise_enabled=false",
+        "env.shuffle_slopes=false",
+    )
