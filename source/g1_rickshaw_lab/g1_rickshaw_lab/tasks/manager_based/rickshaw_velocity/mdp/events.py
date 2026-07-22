@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import MISSING, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import torch
 
@@ -67,7 +68,6 @@ class RickshawRuntimeState:
     pitch: torch.Tensor
     two_wheel_contact: torch.Tensor
     connection_residual: torch.Tensor
-    connection_impulse: torch.Tensor
     connection_wrench_w: torch.Tensor
     connection_truth_wrench_w: torch.Tensor
     hand_force_w: torch.Tensor
@@ -94,7 +94,6 @@ class RickshawRuntimeState:
                 num_envs, device=device, dtype=torch.bool
             ),
             connection_residual=scalar.clone(),
-            connection_impulse=torch.zeros((num_envs, 2), device=device, dtype=dtype),
             connection_wrench_w=torch.zeros((num_envs, 2, 6), device=device, dtype=dtype),
             connection_truth_wrench_w=torch.zeros(
                 (num_envs, 2, 6), device=device, dtype=dtype

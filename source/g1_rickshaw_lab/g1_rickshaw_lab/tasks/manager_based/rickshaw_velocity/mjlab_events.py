@@ -21,7 +21,6 @@ from g1_rickshaw_lab.assets.rickshaw import (
     WHEEL_LINK_NAMES,
 )
 from g1_rickshaw_lab.configuration import G1_JOINT_ORDER
-from g1_rickshaw_lab.g1_motor_defaults import G1_JOINT_EFFORT_LIMITS
 from g1_rickshaw_lab.policy_schema import HISTORY_LENGTH, TEACHER_DYNAMIC_DIM
 from g1_rickshaw_lab.slope_contract import (
     SLOPE_COUNT,
@@ -72,12 +71,6 @@ from .mdp.events import (
     sample_domain_parameters,
 )
 from .mdp.observations import ObservationHistoryState
-from .mdp.terminations import (
-    ImmediateSafetyCfg,
-    PersistentSafetyCfg,
-    PersistentTerminationState,
-    TerminationCauseState,
-)
 from .task_spec import RickshawPoseTargetCfg
 
 
@@ -92,8 +85,6 @@ class MjlabTaskRuntimeCfg:
     fat2: FAT2Cfg
     support: SupportPolygonCfg
     zmp: ZMPCfg
-    immediate_safety: ImmediateSafetyCfg
-    persistent_safety: PersistentSafetyCfg
     history_length: int = HISTORY_LENGTH
     shuffle_slopes: bool = True
     play: bool = False
@@ -184,10 +175,6 @@ def initialize_mjlab_task(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTask
     cart = env.scene["rickshaw"]
     env.policy_joint_ids = _ids(robot, "joints", G1_JOINT_ORDER)
     env.policy_actuator_ids = _ids(robot, "actuators", G1_JOINT_ORDER)
-    env.arm_actuator_ids = env.policy_actuator_ids[15:]
-    env.arm_effort_limits = torch.tensor(
-        G1_JOINT_EFFORT_LIMITS[15:], device=env.device, dtype=torch.float32
-    )
     env.wheel_joint_ids = _ids(cart, "joints", WHEEL_JOINT_NAMES)
     env.wheel_body_ids = _ids(cart, "bodies", WHEEL_LINK_NAMES)
     env.hitch_site_ids = _ids(cart, "sites", HITCH_SITE_NAMES)
@@ -244,8 +231,6 @@ def initialize_mjlab_task(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTask
         observation_dim=TEACHER_DYNAMIC_DIM,
         device=env.device,
     )
-    env.termination_state = PersistentTerminationState.zeros(env.num_envs, device=env.device)
-    env.termination_cause_state = TerminationCauseState.zeros(env.num_envs, device=env.device)
     env.rickshaw_pose_cfg = cfg.rickshaw_pose
     env.fat2_wrench_consistency_state = WrenchConsistencyState.zeros(
         env.num_envs, cfg.fat2.wrench_consistency_window_steps, device=env.device
@@ -461,8 +446,6 @@ def reset_from_mujoco_statics(env: Any, env_ids: torch.Tensor | None) -> None:
     env.stability_state.zmp_valid[env_ids] = False
     env.observation_history_state.reset(env_ids)
     env.teacher_dynamic_history_state.reset(env_ids)
-    env.termination_state.reset(env_ids)
-    env.termination_cause_state.reset(env_ids)
     env.fat2_wrench_consistency_state.reset(env_ids)
     env.fat2_com_radius_state.reset(env_ids)
     env.cart_previous_com_velocity_w[env_ids] = 0.0
@@ -540,14 +523,6 @@ def ensure_mjlab_physical_state(env: Any) -> None:
     env.rickshaw_state.connection_truth_wrench_w[..., :3] = 0.5 * env.rickshaw_state.hand_force_w[:, None, :]
     env.rickshaw_state.connection_truth_wrench_w[..., 3:] = 0.0
     env.rickshaw_state.connection_wrench_w[:] = env.rickshaw_state.connection_truth_wrench_w
-    env.rickshaw_state.connection_impulse[:, 0] = torch.amax(
-        torch.linalg.vector_norm(env.rickshaw_state.connection_wrench_w[..., :3], dim=-1),
-        dim=-1,
-    ) * env.step_dt
-    env.rickshaw_state.connection_impulse[:, 1] = torch.amax(
-        torch.linalg.vector_norm(env.rickshaw_state.connection_wrench_w[..., 3:], dim=-1),
-        dim=-1,
-    ) * env.step_dt
     env.cart_previous_com_velocity_w[:] = cart_velocity
 
     foot_force = env.scene["robot_contacts"].data.force

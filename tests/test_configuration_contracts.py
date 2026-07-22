@@ -28,8 +28,6 @@ def _range_for(name: str) -> dict[str, float]:
 
 def _calibration_for(name: str):
     vectors = {
-        "safety.hitch_height_bounds": [0.65, 0.85],
-        "safety.rickshaw_pitch_bounds": [-0.2, 0.5],
         "fat.com_radius_bounds": [0.5, 0.85],
     }
     if name in vectors:
@@ -77,7 +75,6 @@ def test_feasibility_envelope_rejects_joint_order_drift() -> None:
     )
     with pytest.raises(ConfigurationContractError, match="fixed checkpoint order"):
         FeasibilityEnvelope.from_mapping(mapping)
-
 def test_legacy_actuator_fields_are_rejected() -> None:
     mapping = _valid_mapping()
     mapping["calibration"]["control.linear_stiffness_nominal"] = 5.0

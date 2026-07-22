@@ -5,6 +5,26 @@ import torch
 from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp import rewards
 
 
+def test_requested_reward_profile() -> None:
+    assert rewards.REWARD_WEIGHTS["joint_acc_l2"] == -2.5e-7
+    assert rewards.REWARD_WEIGHTS["joint_position_limits"] == -10.0
+    assert rewards.REWARD_WEIGHTS["action_rate_l2"] == -0.05
+    assert rewards.REWARD_WEIGHTS["feet_gait"] == 0.5
+    assert rewards.GAIT_PERIOD_S == 1.0
+    assert rewards.GAIT_STANCE_THRESHOLD == 0.56
+    assert rewards.MOVING_COMMAND_THRESHOLD_MPS == 0.1
+
+
+def test_action_rate_uses_raw_policy_action_delta() -> None:
+    action = torch.tensor([[0.5, -0.5]])
+    previous_action = torch.tensor([[0.2, -0.1]])
+
+    torch.testing.assert_close(
+        rewards.action_rate_l2_value(action, previous_action),
+        torch.tensor([0.25]),
+    )
+
+
 def test_speed_kernels_use_the_configured_scales() -> None:
     v_ref = torch.tensor([1.0])
     v_robot = torch.tensor([0.5])
@@ -27,7 +47,7 @@ def test_gait_reward_requires_motion_and_matching_contact_phase() -> None:
 
     value = rewards.feet_gait_value(episode_time, contact, v_ref)
 
-    torch.testing.assert_close(value, torch.tensor([2.0, 0.0, 0.0]))
+    torch.testing.assert_close(value, torch.tensor([1.0, 0.0, 0.0]))
 
 
 def test_swing_height_penalty_uses_only_airborne_feet() -> None:

@@ -20,7 +20,7 @@ factors:
     high: -0.0002
     high_label: power_0002
   action_rate:
-    term: processed_action_rate_l2
+    term: action_rate_l2
     low: -0.01
     high: -0.02
     high_label: rate_002

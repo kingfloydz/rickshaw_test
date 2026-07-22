@@ -14,7 +14,6 @@ from g1_rickshaw_lab.policy_schema import (
     TEACHER_STATIC_DIM,
 )
 
-from .mdp.dynamics import torso_tilt_from_slope_normal
 from .mdp.observations import (
     ACTOR_OBSERVATION_NOISE_SCALE,
     SLOPE_LOWER,
@@ -31,6 +30,7 @@ from .mdp.rewards import (
     JOINT_LIMIT_NORMALIZER_RAD,
     PELVIS_HEIGHT_BOUNDS_M,
     PELVIS_HEIGHT_ERROR_SCALE_M,
+    action_rate_l2_value,
     fat2_prior_exp_value,
     feet_gait_value,
     feet_slide_value,
@@ -42,22 +42,9 @@ from .mdp.rewards import (
     joint_power_l1_value,
     lateral_error_l2_value,
     pelvis_height_limits_l2_value,
-    processed_action_rate_l2_value,
     terrain_normal_velocity_l2_value,
     track_speed_exp_value,
     zmp_margin_barrier_value,
-)
-from .mdp.terminations import (
-    IMMEDIATE_CAUSES,
-    PERSISTENT_CAUSES,
-    ImmediateSafetyCfg,
-    PersistentSafetyCfg,
-    connection_safety_violation,
-    contact_force_violation,
-    finite_tensor_violation,
-    hard_joint_limit_violation,
-    persistent_condition_matrix,
-    wheel_lift_violation,
 )
 from .mjlab_events import ensure_mjlab_physical_state
 
@@ -158,10 +145,7 @@ def teacher_static(env: Any) -> torch.Tensor:
     if not hasattr(env, "normalized_teacher_static_domain"):
         return _shape_probe(env, TEACHER_STATIC_DIM)
     slope = torch.clamp(
-        2.0
-        * (env.slope[:, None] - SLOPE_LOWER)
-        / (SLOPE_UPPER - SLOPE_LOWER)
-        - 1.0,
+        2.0 * (env.slope[:, None] - SLOPE_LOWER) / (SLOPE_UPPER - SLOPE_LOWER) - 1.0,
         -1.0,
         1.0,
     )
@@ -248,7 +232,7 @@ def fat2_prior_exp(env: Any) -> torch.Tensor:
 def feet_gait(env: Any) -> torch.Tensor:
     ensure_mjlab_physical_state(env)
     sensor = env.scene["robot_contacts"]
-    contact = sensor.data.found > 0
+    contact = sensor.data.current_contact_time > 0
     return feet_gait_value(env.episode_length_buf * env.step_dt, contact, env.command_state.v_ref)
 
 
@@ -284,8 +268,13 @@ def joint_power_l1(env: Any) -> torch.Tensor:
     return joint_power_l1_value(robot.data.actuator_force, robot.data.joint_vel[:, env.policy_joint_ids])
 
 
-def processed_action_rate_l2(env: Any) -> torch.Tensor:
-    return processed_action_rate_l2_value(env.action_state.raw_action, env.action_state.prev_raw_action)
+def joint_acc_l2(env: Any) -> torch.Tensor:
+    robot = env.scene["robot"]
+    return torch.sum(torch.square(robot.data.joint_acc[:, env.policy_joint_ids]), dim=-1)
+
+
+def action_rate_l2(env: Any) -> torch.Tensor:
+    return action_rate_l2_value(env.action_state.raw_action, env.action_state.prev_raw_action)
 
 
 def hip_yaw_roll_reference_l2(env: Any) -> torch.Tensor:
@@ -300,111 +289,15 @@ def pelvis_height_limits_l2(env: Any) -> torch.Tensor:
     ensure_mjlab_physical_state(env)
     pelvis = env.scene["robot"].data.body_link_pos_w[:, env.pelvis_body_id]
     height = torch.sum((pelvis - env.scene.env_origins) * env.path_normal_w, dim=-1)
-    return pelvis_height_limits_l2_value(
-        height, bounds=PELVIS_HEIGHT_BOUNDS_M, scale=PELVIS_HEIGHT_ERROR_SCALE_M
-    )
+    return pelvis_height_limits_l2_value(height, bounds=PELVIS_HEIGHT_BOUNDS_M, scale=PELVIS_HEIGHT_ERROR_SCALE_M)
 
 
 def joint_position_limits(env: Any) -> torch.Tensor:
     robot = env.scene["robot"]
     position = robot.data.joint_pos[:, env.policy_joint_ids]
     limits = robot.data.soft_joint_pos_limits[:, env.policy_joint_ids]
-    violation = torch.relu(limits[..., 0] - position) + torch.relu(
-        position - limits[..., 1]
-    )
+    violation = torch.relu(limits[..., 0] - position) + torch.relu(position - limits[..., 1])
     return torch.sum(violation / JOINT_LIMIT_NORMALIZER_RAD, dim=-1)
-
-
-def time_out(env: Any) -> torch.Tensor:
-    result = env.episode_length_buf >= env.max_episode_length
-    env.termination_cause_state.begin_policy_step()
-    env.termination_cause_state.record(("time_out",), result[:, None])
-    return result
-
-
-def immediate_safety(env: Any, cfg: ImmediateSafetyCfg) -> torch.Tensor:
-    ensure_mjlab_physical_state(env)
-    robot = env.scene["robot"]
-    cart = env.scene["rickshaw"]
-    contact_force = env.scene["illegal_robot_contacts"].data.force
-    limits = robot.data.joint_pos_limits[:, env.policy_joint_ids]
-    causes = torch.stack(
-        (
-            finite_tensor_violation(
-                robot.data.root_link_pose_w,
-                robot.data.root_link_vel_w,
-                robot.data.joint_pos,
-                robot.data.joint_vel,
-                cart.data.root_link_pose_w,
-                cart.data.root_link_vel_w,
-                cart.data.joint_pos,
-                cart.data.joint_vel,
-                env.command_state.v_sample,
-                env.command_state.v_ref,
-                env.command_state.a_ref,
-                env.path_state.lateral_error,
-                env.path_state.heading_error,
-                env.action_state.q_ref,
-                env.action_state.target,
-                env.rickshaw_state.wheel_normal_force,
-                env.rickshaw_state.connection_residual,
-                env.rickshaw_state.connection_impulse,
-                env.stability_state.theta_fat,
-                env.stability_state.zmp_margin,
-                env.analytic_force_state.a_s,
-            ),
-            contact_force_violation(contact_force, cfg.illegal_contact_force_threshold),
-            wheel_lift_violation(
-                env.rickshaw_state.wheel_normal_force,
-                cfg.wheel_lift_normal_force_threshold,
-            ),
-            connection_safety_violation(
-                env.rickshaw_state.connection_residual,
-                env.rickshaw_state.connection_impulse,
-                cfg.connection_residual_limit,
-                cfg.connection_impulse_limit,
-            ),
-            hard_joint_limit_violation(
-                robot.data.joint_pos[:, env.policy_joint_ids], limits
-            ),
-        ),
-        dim=-1,
-    )
-    env.termination_cause_state.record(IMMEDIATE_CAUSES, causes)
-    return torch.any(causes, dim=-1)
-
-
-def persistent_safety(env: Any, cfg: PersistentSafetyCfg) -> torch.Tensor:
-    ensure_mjlab_physical_state(env)
-    robot = env.scene["robot"]
-    root_height = torch.sum(
-        (robot.data.root_link_pos_w - env.scene.env_origins) * env.path_normal_w,
-        dim=-1,
-    )
-    torso_tilt = torso_tilt_from_slope_normal(
-        robot.data.body_link_quat_w[:, env.torso_body_id], env.path_normal_w
-    )
-    arm_torque = (
-        robot.data.actuator_force[:, env.arm_actuator_ids]
-        / env.arm_effort_limits
-    )
-    violations = persistent_condition_matrix(
-        root_height,
-        torso_tilt,
-        env.rickshaw_state.hitch_height,
-        env.rickshaw_state.pitch,
-        env.path_state.lateral_error,
-        env.path_state.heading_error,
-        env.policy_robot_speed_s,
-        env.command_state.v_ref,
-        arm_torque,
-        env.stability_state.zmp_margin,
-        env.stability_state.zmp_valid,
-        cfg,
-    )
-    result = env.termination_state.update(violations, cfg.persistence_steps)
-    env.termination_cause_state.record(PERSISTENT_CAUSES, env.termination_state.last_causes)
-    return result
 
 
 def termination(env: Any) -> torch.Tensor:
@@ -432,19 +325,17 @@ __all__ = [
     "hip_yaw_roll_reference_l2",
     "hitch_height_exp",
     "hitch_height_recovery_l2",
+    "joint_acc_l2",
     "joint_position_limits",
     "joint_power_l1",
     "lateral_error_l2",
     "pelvis_height_limits_l2",
-    "processed_action_rate_l2",
+    "action_rate_l2",
     "speed_command_levels",
-    "immediate_safety",
-    "persistent_safety",
     "teacher_dynamic_history",
     "teacher_static",
     "terrain_normal_velocity_l2",
     "termination",
     "track_speed_exp",
-    "time_out",
     "zmp_margin_barrier",
 ]

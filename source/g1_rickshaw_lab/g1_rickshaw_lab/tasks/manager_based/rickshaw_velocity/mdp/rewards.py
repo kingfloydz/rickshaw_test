@@ -12,15 +12,16 @@ REWARD_WEIGHTS = {
     "hitch_height_exp": 0.5,
     "hitch_height_recovery_l2": -0.25,
     "fat2_prior_exp": 0.0,
-    "feet_gait": 0.25,
+    "feet_gait": 0.5,
     "feet_swing_height": -20.0,
     "feet_slide": -0.20,
     "terrain_normal_velocity_l2": -0.25,
     "joint_power_l1": -2.0e-4,
-    "processed_action_rate_l2": -0.03,
+    "joint_acc_l2": -2.5e-7,
+    "action_rate_l2": -0.05,
     "hip_yaw_roll_reference_l2": -0.05,
     "pelvis_height_limits_l2": -1.0,
-    "joint_position_limits": -1.0,
+    "joint_position_limits": -10.0,
     "termination": -200.0,
 }
 
@@ -33,10 +34,10 @@ HITCH_HEIGHT_ERROR_SCALE_M = 0.02
 HITCH_HEIGHT_RECOVERY_DEADBAND_M = 0.05
 HITCH_HEIGHT_RECOVERY_SCALE_M = 0.05
 FAT2_ERROR_SCALE_RAD = 0.12
-MOVING_COMMAND_THRESHOLD_MPS = 0.05
-GAIT_PERIOD_S = 1.20
+MOVING_COMMAND_THRESHOLD_MPS = 0.1
+GAIT_PERIOD_S = 1.0
 GAIT_PHASE_OFFSETS = (0.0, 0.5)
-GAIT_STANCE_THRESHOLD = 0.55
+GAIT_STANCE_THRESHOLD = 0.56
 FOOT_SWING_HEIGHT_TARGET_M = 0.07
 TERRAIN_NORMAL_VELOCITY_SCALE_MPS = 0.25
 JOINT_POWER_NORMALIZER_W = 1.0
@@ -65,7 +66,8 @@ REWARD_NORMALIZATION_SCALES = {
         "unit": "m/s",
     },
     "joint_power_l1": {"scale": JOINT_POWER_NORMALIZER_W, "unit": "W"},
-    "processed_action_rate_l2": {
+    "joint_acc_l2": {"scale": 1.0, "unit": "rad/s^2"},
+    "action_rate_l2": {
         "scale": 1.0,
         "unit": "normalized_action",
     },
@@ -158,7 +160,7 @@ def joint_power_l1_value(torque: torch.Tensor, joint_velocity: torch.Tensor) -> 
     return torch.sum(torch.abs(torque * joint_velocity), dim=-1) / JOINT_POWER_NORMALIZER_W
 
 
-def processed_action_rate_l2_value(
+def action_rate_l2_value(
     action: torch.Tensor,
     previous_action: torch.Tensor,
 ) -> torch.Tensor:
@@ -192,7 +194,7 @@ def feet_gait_value(
     desired_contact = phase < threshold
     contact_match = ~(desired_contact ^ is_contact)
     moving = torch.abs(v_ref) > MOVING_COMMAND_THRESHOLD_MPS
-    return torch.sum(contact_match.to(episode_time_s.dtype), dim=-1) * moving.to(episode_time_s.dtype)
+    return torch.mean(contact_match.to(episode_time_s.dtype), dim=-1) * moving.to(episode_time_s.dtype)
 
 
 def feet_swing_height_value(
@@ -262,7 +264,7 @@ __all__ = [
     "joint_power_l1_value",
     "lateral_error_l2_value",
     "pelvis_height_limits_l2_value",
-    "processed_action_rate_l2_value",
+    "action_rate_l2_value",
     "terrain_normal_velocity_l2_value",
     "track_speed_exp_value",
     "zmp_margin_barrier_value",

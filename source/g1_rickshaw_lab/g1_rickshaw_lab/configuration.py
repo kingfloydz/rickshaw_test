@@ -112,23 +112,13 @@ REQUIRED_CALIBRATION_FIELDS = (
     "support.foot_half_width",
     "support.foot_center_offset_x",
     "safety.theta_max",
-    "safety.illegal_contact_force_threshold",
     "safety.minimum_wheel_normal_force",
     "safety.min_ground_reaction",
-    "safety.connection_residual_limit",
-    "safety.connection_impulse_limit",
-    "safety.hitch_height_bounds",
-    "safety.rickshaw_pitch_bounds",
-    "safety.corridor_half_width",
-    "safety.heading_error_limit",
     "safety.overspeed_margin",
-    "safety.arm_torque_limit",
 )
 
 _CALIBRATION_VECTOR_LENGTHS = {
     "fat.com_radius_bounds": 2,
-    "safety.hitch_height_bounds": 2,
-    "safety.rickshaw_pitch_bounds": 2,
 }
 _CALIBRATION_STRICTLY_POSITIVE = frozenset(
     {
@@ -145,15 +135,9 @@ _CALIBRATION_STRICTLY_POSITIVE = frozenset(
         "support.foot_half_width",
         "support.foot_center_offset_x",
         "safety.theta_max",
-        "safety.illegal_contact_force_threshold",
         "safety.minimum_wheel_normal_force",
         "safety.min_ground_reaction",
-        "safety.connection_residual_limit",
-        "safety.connection_impulse_limit",
-        "safety.corridor_half_width",
-        "safety.heading_error_limit",
         "safety.overspeed_margin",
-        "safety.arm_torque_limit",
     }
 )
 
@@ -383,11 +367,7 @@ def _validate_calibration(calibration: Mapping[str, Any]) -> Mapping[str, Any]:
         vector = tuple(
             _finite_float(component, f"calibration.{name}[{index}]") for index, component in enumerate(value)
         )
-        if name in {
-            "fat.com_radius_bounds",
-            "safety.hitch_height_bounds",
-            "safety.rickshaw_pitch_bounds",
-        } and vector[0] >= vector[1]:
+        if name == "fat.com_radius_bounds" and vector[0] >= vector[1]:
             raise ConfigurationContractError(f"calibration.{name} lower bound must be less than its upper bound")
         validated[name] = vector
     theta_max = validated["safety.theta_max"]

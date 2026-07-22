@@ -2,47 +2,17 @@
 
 from __future__ import annotations
 
+import math
+
 from g1_rickshaw_lab.assets import get_g1_robot_cfg, get_rickshaw_cfg
 from g1_rickshaw_lab.configuration import load_feasibility_envelope
 from g1_rickshaw_lab.policy_schema import HISTORY_LENGTH
 from g1_rickshaw_lab.project_paths import CONFIG_ROOT
 
-ILLEGAL_CONTACT_BODY_NAMES = (
-    "pelvis",
-    "left_hip_pitch_link",
-    "left_hip_roll_link",
-    "left_hip_yaw_link",
-    "left_knee_link",
-    "left_ankle_pitch_link",
-    "right_hip_pitch_link",
-    "right_hip_roll_link",
-    "right_hip_yaw_link",
-    "right_knee_link",
-    "right_ankle_pitch_link",
-    "waist_yaw_link",
-    "waist_roll_link",
-    "torso_link",
-    "left_shoulder_pitch_link",
-    "left_shoulder_roll_link",
-    "left_shoulder_yaw_link",
-    "left_elbow_link",
-    "left_wrist_roll_link",
-    "left_wrist_pitch_link",
-    "left_wrist_yaw_link",
-    "right_shoulder_pitch_link",
-    "right_shoulder_roll_link",
-    "right_shoulder_yaw_link",
-    "right_elbow_link",
-    "right_wrist_roll_link",
-    "right_wrist_pitch_link",
-    "right_wrist_yaw_link",
-)
-
 
 def _runtime_cfg(*, play: bool, history_length: int):
     from .mdp.dynamics import AnalyticForceCfg, FAT2Cfg, SupportPolygonCfg, ZMPCfg
     from .mdp.events import DomainRandomizationCfg, SpeedCommandSamplingCfg
-    from .mdp.terminations import ImmediateSafetyCfg, PersistentSafetyCfg
     from .mjlab_events import MjlabTaskRuntimeCfg
     from .task_spec import RickshawPoseTargetCfg
 
@@ -59,10 +29,7 @@ def _runtime_cfg(*, play: bool, history_length: int):
         "wheel.left_damping",
         "wheel.right_damping",
     )
-    ranges = {
-        name: (envelope.ranges[name].minimum, envelope.ranges[name].maximum)
-        for name in names
-    }
+    ranges = {name: (envelope.ranges[name].minimum, envelope.ranges[name].maximum) for name in names}
     nominal = {
         "torso.mass_delta": 0.0,
         "payload.mass": 0.0,
@@ -90,23 +57,15 @@ def _runtime_cfg(*, play: bool, history_length: int):
             hitch_height_tolerance=calibration["rickshaw_pose.hitch_height_tolerance"],
             hitch_vertical_speed_tolerance=calibration["rickshaw_pose.hitch_vertical_speed_tolerance"],
         ),
-        analytic_force=AnalyticForceCfg(
-            minimum_wheel_normal_force=calibration["safety.minimum_wheel_normal_force"]
-        ),
+        analytic_force=AnalyticForceCfg(minimum_wheel_normal_force=calibration["safety.minimum_wheel_normal_force"]),
         fat2=FAT2Cfg(
             robot_mass=calibration["fat.robot_mass"],
             com_radius=calibration["fat.com_radius"],
             com_radius_bounds=tuple(calibration["fat.com_radius_bounds"]),
             theta_max=calibration["safety.theta_max"],
-            wrench_consistency_relative_tolerance=calibration[
-                "fat.wrench_consistency_relative_tolerance"
-            ],
-            wrench_consistency_absolute_floor_n=calibration[
-                "fat.wrench_consistency_absolute_floor_n"
-            ],
-            wrench_consistency_window_steps=calibration[
-                "fat.wrench_consistency_window_steps"
-            ],
+            wrench_consistency_relative_tolerance=calibration["fat.wrench_consistency_relative_tolerance"],
+            wrench_consistency_absolute_floor_n=calibration["fat.wrench_consistency_absolute_floor_n"],
+            wrench_consistency_window_steps=calibration["fat.wrench_consistency_window_steps"],
         ),
         support=SupportPolygonCfg(
             foot_half_length=calibration["support.foot_half_length"],
@@ -114,21 +73,6 @@ def _runtime_cfg(*, play: bool, history_length: int):
             foot_center_offset_x=calibration["support.foot_center_offset_x"],
         ),
         zmp=ZMPCfg(min_ground_reaction=calibration["safety.min_ground_reaction"]),
-        immediate_safety=ImmediateSafetyCfg(
-            illegal_contact_force_threshold=calibration["safety.illegal_contact_force_threshold"],
-            wheel_lift_normal_force_threshold=calibration["safety.minimum_wheel_normal_force"],
-            connection_residual_limit=calibration["safety.connection_residual_limit"],
-            connection_impulse_limit=calibration["safety.connection_impulse_limit"],
-        ),
-        persistent_safety=PersistentSafetyCfg(
-            torso_tilt_max=calibration["safety.theta_max"],
-            hitch_height_bounds=tuple(calibration["safety.hitch_height_bounds"]),
-            rickshaw_pitch_bounds=tuple(calibration["safety.rickshaw_pitch_bounds"]),
-            lateral_corridor=calibration["safety.corridor_half_width"],
-            heading_envelope=calibration["safety.heading_error_limit"],
-            overspeed_margin=calibration["safety.overspeed_margin"],
-            arm_torque_limit=calibration["safety.arm_torque_limit"],
-        ),
         history_length=history_length,
         shuffle_slopes=not play,
         play=play,
@@ -139,6 +83,7 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
     """Create the full directional-slope task using mjlab 1.2 APIs."""
 
     from mjlab.envs import ManagerBasedRlEnvCfg
+    from mjlab.envs import mdp as envs_mdp
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -208,40 +153,24 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
         )
     }
     events = {
-        "initialize_task": EventTermCfg(
-            func=initialize_mjlab_task, mode="startup", params={"cfg": runtime}
-        ),
-        "initialize_domain": EventTermCfg(
-            func=initialize_mjlab_domain, mode="startup", params={"cfg": runtime}
-        ),
+        "initialize_task": EventTermCfg(func=initialize_mjlab_task, mode="startup", params={"cfg": runtime}),
+        "initialize_domain": EventTermCfg(func=initialize_mjlab_domain, mode="startup", params={"cfg": runtime}),
         "mujoco_static_reset": EventTermCfg(func=reset_from_mujoco_statics, mode="reset"),
-        "policy_state": EventTermCfg(
-            func=advance_mjlab_policy_state, mode="step", params={"cfg": runtime}
-        ),
+        "policy_state": EventTermCfg(func=advance_mjlab_policy_state, mode="step", params={"cfg": runtime}),
     }
     rewards = {
-        "track_speed_exp": RewardTermCfg(
-            func=mjlab_mdp.track_speed_exp, weight=REWARD_WEIGHTS["track_speed_exp"]
-        ),
-        "lateral_error_l2": RewardTermCfg(
-            func=mjlab_mdp.lateral_error_l2, weight=REWARD_WEIGHTS["lateral_error_l2"]
-        ),
-        "heading_error_l2": RewardTermCfg(
-            func=mjlab_mdp.heading_error_l2, weight=REWARD_WEIGHTS["heading_error_l2"]
-        ),
+        "track_speed_exp": RewardTermCfg(func=mjlab_mdp.track_speed_exp, weight=REWARD_WEIGHTS["track_speed_exp"]),
+        "lateral_error_l2": RewardTermCfg(func=mjlab_mdp.lateral_error_l2, weight=REWARD_WEIGHTS["lateral_error_l2"]),
+        "heading_error_l2": RewardTermCfg(func=mjlab_mdp.heading_error_l2, weight=REWARD_WEIGHTS["heading_error_l2"]),
         "zmp_margin_barrier": RewardTermCfg(
             func=mjlab_mdp.zmp_margin_barrier, weight=REWARD_WEIGHTS["zmp_margin_barrier"]
         ),
-        "hitch_height_exp": RewardTermCfg(
-            func=mjlab_mdp.hitch_height_exp, weight=REWARD_WEIGHTS["hitch_height_exp"]
-        ),
+        "hitch_height_exp": RewardTermCfg(func=mjlab_mdp.hitch_height_exp, weight=REWARD_WEIGHTS["hitch_height_exp"]),
         "hitch_height_recovery_l2": RewardTermCfg(
             func=mjlab_mdp.hitch_height_recovery_l2,
             weight=REWARD_WEIGHTS["hitch_height_recovery_l2"],
         ),
-        "fat2_prior_exp": RewardTermCfg(
-            func=mjlab_mdp.fat2_prior_exp, weight=REWARD_WEIGHTS["fat2_prior_exp"]
-        ),
+        "fat2_prior_exp": RewardTermCfg(func=mjlab_mdp.fat2_prior_exp, weight=REWARD_WEIGHTS["fat2_prior_exp"]),
         "feet_gait": RewardTermCfg(func=mjlab_mdp.feet_gait, weight=REWARD_WEIGHTS["feet_gait"]),
         "feet_swing_height": RewardTermCfg(
             func=mjlab_mdp.feet_swing_height, weight=REWARD_WEIGHTS["feet_swing_height"]
@@ -251,12 +180,14 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
             func=mjlab_mdp.terrain_normal_velocity_l2,
             weight=REWARD_WEIGHTS["terrain_normal_velocity_l2"],
         ),
-        "joint_power_l1": RewardTermCfg(
-            func=mjlab_mdp.joint_power_l1, weight=REWARD_WEIGHTS["joint_power_l1"]
+        "joint_power_l1": RewardTermCfg(func=mjlab_mdp.joint_power_l1, weight=REWARD_WEIGHTS["joint_power_l1"]),
+        "joint_acc_l2": RewardTermCfg(
+            func=mjlab_mdp.joint_acc_l2,
+            weight=REWARD_WEIGHTS["joint_acc_l2"],
         ),
-        "processed_action_rate_l2": RewardTermCfg(
-            func=mjlab_mdp.processed_action_rate_l2,
-            weight=REWARD_WEIGHTS["processed_action_rate_l2"],
+        "action_rate_l2": RewardTermCfg(
+            func=mjlab_mdp.action_rate_l2,
+            weight=REWARD_WEIGHTS["action_rate_l2"],
         ),
         "hip_yaw_roll_reference_l2": RewardTermCfg(
             func=mjlab_mdp.hip_yaw_roll_reference_l2,
@@ -270,19 +201,13 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
             func=mjlab_mdp.joint_position_limits,
             weight=REWARD_WEIGHTS["joint_position_limits"],
         ),
-        "termination": RewardTermCfg(
-            func=mjlab_mdp.termination, weight=REWARD_WEIGHTS["termination"]
-        ),
+        "termination": RewardTermCfg(func=mjlab_mdp.termination, weight=REWARD_WEIGHTS["termination"]),
     }
     terminations = {
-        "time_out": TerminationTermCfg(func=mjlab_mdp.time_out, time_out=True),
-        "immediate_safety": TerminationTermCfg(
-            func=mjlab_mdp.immediate_safety,
-            params={"cfg": runtime.immediate_safety},
-        ),
-        "persistent_safety": TerminationTermCfg(
-            func=mjlab_mdp.persistent_safety,
-            params={"cfg": runtime.persistent_safety},
+        "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
+        "fell_over": TerminationTermCfg(
+            func=envs_mdp.bad_orientation,
+            params={"limit_angle": math.radians(70.0)},
         ),
     }
     curriculum = {
@@ -317,18 +242,6 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
         num_slots=1,
         history_length=10,
     )
-    illegal_contacts = ContactSensorCfg(
-        name="illegal_robot_contacts",
-        primary=ContactMatch(
-            mode="body",
-            pattern=ILLEGAL_CONTACT_BODY_NAMES,
-            entity="robot",
-        ),
-        secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found", "force"),
-        reduce="netforce",
-        num_slots=1,
-    )
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(
@@ -337,7 +250,7 @@ def g1_rickshaw_env_cfg(*, play: bool = False, history_length: int = HISTORY_LEN
                 max_init_terrain_level=0,
             ),
             entities={"robot": get_g1_robot_cfg(), "rickshaw": get_rickshaw_cfg()},
-            sensors=(feet, wheels, illegal_contacts),
+            sensors=(feet, wheels),
             num_envs=19 if play else 8192,
             env_spacing=6.0,
             spec_fn=add_closed_chain_constraints,

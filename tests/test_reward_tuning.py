@@ -148,14 +148,14 @@ def test_quality_configuration_generates_the_exact_second_factorial() -> None:
         "zmp_margin_barrier": 0.0,
         "terrain_normal_velocity_l2": -0.5,
         "joint_power_l1": -0.0001,
-        "processed_action_rate_l2": -0.01,
+        "action_rate_l2": -0.01,
     }
     strongest = profiles[-1]["reward_weight_overrides"]
     assert strongest == {
         "zmp_margin_barrier": 0.0,
         "terrain_normal_velocity_l2": -1.0,
         "joint_power_l1": -0.0002,
-        "processed_action_rate_l2": -0.02,
+        "action_rate_l2": -0.02,
     }
 
 
@@ -402,7 +402,7 @@ def test_quality_batch_uses_an_independent_output_directory(
         "zmp_margin_barrier": 0.0,
         "terrain_normal_velocity_l2": -0.5,
         "joint_power_l1": -0.0001,
-        "processed_action_rate_l2": -0.01,
+        "action_rate_l2": -0.01,
     }
     assert not output_dir.exists()
 

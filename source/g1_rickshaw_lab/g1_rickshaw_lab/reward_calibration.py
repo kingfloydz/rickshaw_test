@@ -13,8 +13,8 @@ from .artifact_io import utc_timestamp, write_json_atomic
 from .reward_profile import GUIDE_REWARD_TERMS
 from .slope_contract import SLOPE_GRADIENTS
 
-REWARD_CALIBRATION_SCHEMA_VERSION = 7
-RAW_REWARD_SAMPLE_SCHEMA_VERSION = 7
+REWARD_CALIBRATION_SCHEMA_VERSION = 8
+RAW_REWARD_SAMPLE_SCHEMA_VERSION = 8
 RAW_REWARD_SAMPLE_KIND = "mjlab_reward_manager_unweighted_terms"
 SPEED_REFERENCE_TERM = "track_speed_exp"
 SPEED_TERMS = ("track_speed_exp",)
@@ -32,13 +32,13 @@ GUIDE_PHYSICAL_SCALES = {
     "hitch_height_recovery_deadband_m": 0.05,
     "hitch_height_recovery_scale_m": 0.05,
     "fat2_sigma_rad": 0.12,
-    "processed_action_rate_normalizer": 1.0,
+    "action_rate_normalizer": 1.0,
     "hip_yaw_roll_reference_scale_rad": 0.20,
     "pelvis_height_bounds_m": [0.58, 0.87],
     "pelvis_height_error_scale_m": 0.05,
-    "gait_period_s": 1.20,
+    "gait_period_s": 1.0,
     "gait_phase_offsets": [0.0, 0.5],
-    "gait_stance_threshold": 0.55,
+    "gait_stance_threshold": 0.56,
     "foot_clearance_target_m": 0.07,
     "foot_clearance_std_m": 0.05,
     "foot_clearance_tanh_mult": 2.0,
@@ -56,12 +56,13 @@ GUIDE_REWARD_NORMALIZATION_SCALES = {
     "hitch_height_exp": {"scale": 0.02, "unit": "m"},
     "hitch_height_recovery_l2": {"scale": 0.05, "unit": "m"},
     "fat2_prior_exp": {"scale": 0.12, "unit": "rad"},
-    "feet_gait": {"scale": 1.20, "unit": "s"},
+    "feet_gait": {"scale": 1.0, "unit": "s"},
     "feet_swing_height": {"scale": 0.07, "unit": "m"},
     "feet_slide": {"scale": 1.0, "unit": "m/s"},
     "terrain_normal_velocity_l2": {"scale": 0.25, "unit": "m/s"},
     "joint_power_l1": {"scale": 1.0, "unit": "W"},
-    "processed_action_rate_l2": {"scale": 1.0, "unit": "normalized_action"},
+    "joint_acc_l2": {"scale": 1.0, "unit": "rad/s^2"},
+    "action_rate_l2": {"scale": 1.0, "unit": "normalized_action"},
     "hip_yaw_roll_reference_l2": {"scale": 0.20, "unit": "rad"},
     "pelvis_height_limits_l2": {"scale": 0.05, "unit": "m"},
     "joint_position_limits": {"scale": 1.0, "unit": "rad"},
