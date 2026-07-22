@@ -28,8 +28,10 @@ from g1_rickshaw_lab.tasks.manager_based.rickshaw_velocity.mdp.dynamics import (
     SpeedReferenceState,
     WrenchConsistencyState,
     foot_support_polygon,
+    quat_apply_wxyz,
     rolling_resistance_wrench,
     sagittal_com_radius,
+    slope_zmp,
     torso_pitch_from_world_vertical,
     torso_tilt_from_slope_normal,
     update_speed_reference,
@@ -283,3 +285,38 @@ def test_torso_tilt_ignores_yaw() -> None:
         rtol=0.0,
         atol=1.0e-12,
     )
+
+
+def test_quaternion_vector_rotation_matches_mjlab() -> None:
+    quat_apply = pytest.importorskip("mjlab.utils.lab_api.math").quat_apply
+
+    generator = torch.Generator().manual_seed(7)
+    quaternion = torch.randn((16, 4), dtype=torch.float64, generator=generator)
+    quaternion = quaternion / torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True)
+    vector = torch.randn((16, 3), dtype=torch.float64, generator=generator)
+    torch.testing.assert_close(
+        quat_apply_wxyz(quaternion, vector),
+        quat_apply(quaternion, vector),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_slope_zmp_applied_hand_torque_sign() -> None:
+    zmp, _, reaction, valid = slope_zmp(
+        torch.tensor([0.0], dtype=torch.float64),
+        torch.tensor([1.0], dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+        torch.tensor([0.0], dtype=torch.float64),
+        torch.tensor([1.0], dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+        torch.tensor([9.81], dtype=torch.float64),
+        1.0,
+        torch.tensor([0.0], dtype=torch.float64),
+        min_ground_reaction=1.0,
+    )
+    assert valid.item()
+    torch.testing.assert_close(reaction, torch.tensor([9.81], dtype=torch.float64))
+    torch.testing.assert_close(zmp, torch.tensor([1.0], dtype=torch.float64))

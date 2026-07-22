@@ -8,7 +8,12 @@ from typing import Any
 import numpy as np
 import torch
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
-from mjlab.utils.lab_api.math import quat_from_matrix
+from mjlab.utils.lab_api.math import (
+    matrix_from_quat,
+    quat_from_euler_xyz,
+    quat_from_matrix,
+    quat_mul,
+)
 
 from g1_rickshaw_lab.assets.g1_dex1 import GRASP_SITE_NAMES
 from g1_rickshaw_lab.assets.rickshaw import (
@@ -66,7 +71,6 @@ from .mdp.events import (
     StabilityState,
     _update_teacher_static_domain,
     compute_path_tracking_errors,
-    quat_multiply_wxyz,
     resample_speed_command,
     sample_domain_parameters,
 )
@@ -104,7 +108,7 @@ def _slope_frame(gradient: torch.Tensor) -> tuple[torch.Tensor, ...]:
     tangent = torch.stack((torch.cos(gamma), zeros, torch.sin(gamma)), dim=-1)
     lateral = torch.stack((zeros, torch.ones_like(gamma), zeros), dim=-1)
     normal = torch.stack((-torch.sin(gamma), zeros, torch.cos(gamma)), dim=-1)
-    quat = torch.stack((torch.cos(0.5 * gamma), zeros, -torch.sin(0.5 * gamma), zeros), dim=-1)
+    quat = quat_from_euler_xyz(zeros, -gamma, zeros)
     return gamma, tangent, lateral, normal, quat
 
 
@@ -256,18 +260,6 @@ def initialize_mjlab_task(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTask
     env._mjlab_observation_state_step = -1
 
 
-def _quat_matrix(quat: torch.Tensor) -> torch.Tensor:
-    w, x, y, z = quat.unbind(-1)
-    return torch.stack(
-        (
-            1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
-            2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-            2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
-        ),
-        dim=-1,
-    ).reshape(*quat.shape[:-1], 3, 3)
-
-
 @requires_model_fields(
     "body_mass",
     "body_ipos",
@@ -300,7 +292,7 @@ def initialize_mjlab_domain(env: Any, env_ids: torch.Tensor | None, cfg: MjlabTa
     default_com = env.sim.get_default_field("body_ipos")[base_global]
     default_principal = env.sim.get_default_field("body_inertia")[base_global]
     default_quat = env.sim.get_default_field("body_iquat")[base_global]
-    rotation = _quat_matrix(default_quat)
+    rotation = matrix_from_quat(default_quat)
     default_inertia = rotation @ torch.diag(default_principal) @ rotation.mT
     payload_mass = sampled["payload.mass"]
     payload_com = torch.stack(
@@ -382,7 +374,7 @@ def _transform_pose(env: Any, local_pose: torch.Tensor, env_ids: torch.Tensor) -
         + lateral * local_pose[:, 1:2]
         + normal * local_pose[:, 2:3]
     )
-    quaternion = quat_multiply_wxyz(env.slope_quat_w[env_ids], local_pose[:, 3:7])
+    quaternion = quat_mul(env.slope_quat_w[env_ids], local_pose[:, 3:7])
     return torch.cat((position, quaternion), dim=-1)
 
 
@@ -542,7 +534,7 @@ def ensure_mjlab_physical_state(env: Any) -> None:
     env.stability_state.support_point_mask[:] = mask
     env.stability_state.support_center_w[:] = support_center
 
-    cart_speed = torch.sum(cart.data.root_link_lin_vel_w * env.path_tangent_w, dim=-1)
+    cart_speed = torch.sum(cart_velocity * env.path_tangent_w, dim=-1)
     update_analytic_handle_force_state(
         env.analytic_force_state,
         cart_speed,

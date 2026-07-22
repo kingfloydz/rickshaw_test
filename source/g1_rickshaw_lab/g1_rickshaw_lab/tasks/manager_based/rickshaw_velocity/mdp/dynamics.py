@@ -922,7 +922,13 @@ def slope_zmp(
     *,
     min_ground_reaction: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute slope-frame ZMP including the complete hand wrench."""
+    """Compute slope-frame ZMP for the cart-on-robot hand wrench.
+
+    ``hand_force_*`` and ``hand_torque_y`` use the wrench acting on the robot
+    from the cart.  The force moment is written as the negative of the usual
+    ``r x F`` term so the same expression remains valid for the sagittal
+    reaction balance.
+    """
 
     mass = torch.as_tensor(robot_mass, device=com_s.device, dtype=com_s.dtype)
     r_s = mass * (com_acceleration_s + GRAVITY * torch.sin(gamma)) - hand_force_s
@@ -933,7 +939,7 @@ def slope_zmp(
         (handle_s - com_s) * hand_force_n - (handle_n - com_n) * hand_force_s
     )
     zmp_s = com_s + (
-        -com_n * r_s - hand_moment_about_com - hand_torque_y
+        -com_n * r_s - hand_moment_about_com + hand_torque_y
     ) / denominator
     zmp_s = torch.where(valid, zmp_s, torch.zeros_like(zmp_s))
     return zmp_s, r_s, r_n, valid

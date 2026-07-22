@@ -151,22 +151,6 @@ class StabilityState:
         )
 
 
-def quat_multiply_wxyz(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
-    if lhs.shape != rhs.shape or lhs.shape[-1] != 4:
-        raise ValueError("quaternion operands must have identical [...,4] shapes")
-    lw, lx, ly, lz = lhs.unbind(dim=-1)
-    rw, rx, ry, rz = rhs.unbind(dim=-1)
-    return torch.stack(
-        (
-            lw * rw - lx * rx - ly * ry - lz * rz,
-            lw * rx + lx * rw + ly * rz - lz * ry,
-            lw * ry - lx * rz + ly * rw + lz * rx,
-            lw * rz + lx * ry - ly * rx + lz * rw,
-        ),
-        dim=-1,
-    )
-
-
 @dataclass
 class SpeedCommandSamplingCfg:
     minimum: float = 0.0
@@ -417,7 +401,6 @@ __all__ = [
     "StabilityState",
     "compute_path_tracking_errors",
     "effective_cart_mass_com_bounds",
-    "quat_multiply_wxyz",
     "resample_speed_command",
     "sample_domain_parameters",
     "sample_speed_commands",
