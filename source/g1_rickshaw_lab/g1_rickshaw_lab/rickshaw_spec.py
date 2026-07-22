@@ -11,15 +11,15 @@ class RickshawUrdfSpec:
 
     base_mass: float = 36.0
     base_com_x_before_shift: float = 0.7427393855133334
-    center_of_mass_rearward_shift: float = 0.02
-    base_com_x: float = 0.7227393855133334
+    center_of_mass_rearward_shift: float = 0.6427393855133334
+    base_com_x: float = 0.1
     base_inertia_diagonal: tuple[float, float, float] = (7.393572, 22.277208, 17.829456)
     wheel_mass: float = 2.0
     wheel_inertia_diagonal: tuple[float, float, float] = (0.04587720205066667, 0.09, 0.04587720205066667)
     hitch_link_mass: float = 0.02
     total_mass: float = 40.04
     center_of_mass: tuple[float, float, float] = (
-        0.6514788970649351,
+        0.09157335564435565,
         0.0,
         0.5944321827032967,
     )

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
+import g1_rickshaw_lab.static_equilibrium as static_equilibrium
 from g1_rickshaw_lab.slope_contract import (
     FORMAL_EVALUATION_ENVS_PER_SLOPE,
     FORMAL_EVALUATION_NUM_ENVS,
@@ -47,3 +51,43 @@ def test_balanced_slope_counts_are_deterministic() -> None:
 
     with pytest.raises(ValueError, match="positive integer"):
         balanced_slope_counts(0)
+
+
+def test_static_library_continues_from_zero_independently_by_sign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[float, float | None]] = []
+
+    def solve(
+        _model: object,
+        gradient: float,
+        *,
+        cfg: object = None,
+        qpos_seed: np.ndarray | None = None,
+    ):
+        del cfg
+        calls.append((gradient, None if qpos_seed is None else float(qpos_seed[0])))
+        return SimpleNamespace(gradient=gradient, qpos=np.array([gradient]))
+
+    monkeypatch.setattr(static_equilibrium, "solve_mujoco_static_equilibrium", solve)
+    result = static_equilibrium.solve_mujoco_static_equilibria(
+        object(), SLOPE_GRADIENTS
+    )
+
+    positive = tuple(gradient for gradient in SLOPE_GRADIENTS if gradient > 0.0)
+    negative = tuple(
+        sorted(
+            (gradient for gradient in SLOPE_GRADIENTS if gradient < 0.0), reverse=True
+        )
+    )
+    assert tuple(gradient for gradient, _seed in calls) == (0.0, *positive, *negative)
+    assert calls[0][1] is None
+    assert tuple(seed for _gradient, seed in calls[1 : 1 + len(positive)]) == (
+        0.0,
+        *positive[:-1],
+    )
+    assert tuple(seed for _gradient, seed in calls[1 + len(positive) :]) == (
+        0.0,
+        *negative[:-1],
+    )
+    assert tuple(solution.gradient for solution in result) == SLOPE_GRADIENTS

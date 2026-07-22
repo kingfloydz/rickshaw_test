@@ -19,8 +19,8 @@
 
   <link name="base_link">
     <inertial>
-      <!-- Body CoM is shifted 0.02 m rearward from the source geometry. -->
-      <origin xyz="0.7227393855133334 0 0.6276898532066667" rpy="0 0 0"/>
+      <!-- Body CoM is fixed at x=0.1 m in the assembly frame. -->
+      <origin xyz="0.1 0 0.6276898532066667" rpy="0 0 0"/>
       <mass value="36.0"/>
       <inertia
         ixx="7.393572" ixy="0" ixz="0"

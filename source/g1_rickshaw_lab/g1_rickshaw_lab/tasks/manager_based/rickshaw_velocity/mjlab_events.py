@@ -33,7 +33,7 @@ from g1_rickshaw_lab.slope_contract import (
     SLOPE_TERRAIN_LEVELS,
     SLOPE_TERRAIN_TYPES,
 )
-from g1_rickshaw_lab.static_equilibrium import MujocoStaticEquilibrium, solve_mujoco_static_equilibrium
+from g1_rickshaw_lab.static_equilibrium import MujocoStaticEquilibrium, solve_mujoco_static_equilibria
 
 from .closed_chain import build_assembled_spec
 from .mdp.curricula import apply_terrain_assignment, balanced_slope_assignment, weighted_slope_assignment
@@ -149,13 +149,7 @@ def _precompute_statics() -> tuple[Any, tuple[MujocoStaticEquilibrium, ...]]:
     model.opt.timestep = 0.002
     model.opt.iterations = 100
     model.opt.ls_iterations = 50
-    solutions: list[MujocoStaticEquilibrium] = []
-    qpos_seed = None
-    for gradient in SLOPE_GRADIENTS:
-        solution = solve_mujoco_static_equilibrium(model, gradient, qpos_seed=qpos_seed)
-        solutions.append(solution)
-        qpos_seed = solution.qpos
-    result = tuple(solutions)
+    result = solve_mujoco_static_equilibria(model, SLOPE_GRADIENTS)
     if len(result) != SLOPE_COUNT or tuple(item.gradient for item in result) != SLOPE_GRADIENTS:
         raise RuntimeError("MuJoCo static library must contain exactly the configured 19 slopes")
     return model, result

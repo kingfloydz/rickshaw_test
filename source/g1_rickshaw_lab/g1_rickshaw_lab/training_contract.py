@@ -784,20 +784,13 @@ def _deployment_contract(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     feasibility = load_feasibility_envelope(feasibility_config_path())
     calibration = feasibility.calibration
     ranges = feasibility.ranges
-    from .static_equilibrium import solve_mujoco_static_equilibrium
+    from .static_equilibrium import solve_mujoco_static_equilibria
     from .tasks.manager_based.rickshaw_velocity.closed_chain import (
         build_assembled_spec,
     )
 
     model = build_assembled_spec().compile()
-    static_solutions = []
-    qpos_seed = None
-    for gradient in SLOPE_GRADIENTS:
-        solution = solve_mujoco_static_equilibrium(
-            model, gradient, qpos_seed=qpos_seed
-        )
-        static_solutions.append(solution)
-        qpos_seed = solution.qpos
+    static_solutions = solve_mujoco_static_equilibria(model, SLOPE_GRADIENTS)
     command_ranges: dict[str, dict[str, Any]] = {}
     for name, source_name, unit in (
         ("acceleration_limit", "command.acceleration_limit", "m/s^2"),

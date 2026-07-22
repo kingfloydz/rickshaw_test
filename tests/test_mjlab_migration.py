@@ -37,9 +37,12 @@ def test_rickshaw_has_0_6m_wheels_aligned_with_lowered_body() -> None:
     assert validate_rickshaw_urdf() == ()
     spec = RICKSHAW_URDF_SPEC
     assert spec.wheel_radius == 0.3
+    assert spec.base_com_x == 0.1
     assert math.isclose(spec.body_vertical_offset, -(0.374999 - 0.3), abs_tol=1.0e-12)
     assert math.isclose(
-        spec.base_com_x_before_shift - spec.base_com_x, 0.02, abs_tol=1.0e-12
+        spec.base_com_x_before_shift - spec.base_com_x,
+        0.6427393855133334,
+        abs_tol=1.0e-12,
     )
     model = get_rickshaw_spec().compile()
     for name in ("left_wheel_link", "right_wheel_link"):
@@ -48,7 +51,9 @@ def test_rickshaw_has_0_6m_wheels_aligned_with_lowered_body() -> None:
 
 
 def test_g1_uses_official_builtin_position_actuator_defaults() -> None:
-    BuiltinPositionActuatorCfg = pytest.importorskip("mjlab.actuator").BuiltinPositionActuatorCfg
+    BuiltinPositionActuatorCfg = pytest.importorskip(
+        "mjlab.actuator"
+    ).BuiltinPositionActuatorCfg
 
     from g1_rickshaw_lab.assets.g1_dex1 import get_g1_robot_cfg
     from g1_rickshaw_lab.g1_motor_defaults import (
@@ -70,7 +75,9 @@ def test_g1_uses_official_builtin_position_actuator_defaults() -> None:
 
     actuators = get_g1_robot_cfg().articulation.actuators
     assert len(actuators) == 6
-    assert all(isinstance(actuator, BuiltinPositionActuatorCfg) for actuator in actuators)
+    assert all(
+        isinstance(actuator, BuiltinPositionActuatorCfg) for actuator in actuators
+    )
     assert math.isclose(NATURAL_FREQUENCY, 20.0 * 3.1415926535)
     assert DAMPING_RATIO == 2.0
     expected = (
@@ -88,7 +95,10 @@ def test_g1_uses_official_builtin_position_actuator_defaults() -> None:
             actuator.effort_limit,
             actuator.armature,
         )
-        assert all(math.isclose(value, target) for value, target in zip(actual, values, strict=True))
+        assert all(
+            math.isclose(value, target)
+            for value, target in zip(actual, values, strict=True)
+        )
 
 
 def test_assembled_model_uses_two_connections_and_only_tow_rod_collision() -> None:
